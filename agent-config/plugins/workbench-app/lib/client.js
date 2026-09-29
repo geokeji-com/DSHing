@@ -693,7 +693,7 @@ window.__ModuleLoader__.load({
 			 * body 下没有这层，浮层定位稳定。左=草稿列表，右=正文 + 确认入库。 */
 			var WbCtx = null; /* apply 时赋值：TaskBar 自动弹侧栏用 */
 
-			function wbOpenReview(client, onChanged) {
+			function wbOpenReview(client, onChanged, clientKey) {
 				var old = document.getElementById("wb-review-overlay");
 				if (old) old.remove();
 				var wrap = document.createElement("div");
@@ -721,6 +721,7 @@ window.__ModuleLoader__.load({
 				document.body.appendChild(wrap);
 
 				var mainTitle = null, mainText = null, mainFoot = null, msgEl = null, currentTitle = "";
+				var resolvedClientKey = String(clientKey || "");
 				function ensureMain() {
 					if (mainTitle) return;
 					mainTitle = document.createElement("div"); mainTitle.className = "wb_reviewMainTitle";
@@ -765,7 +766,7 @@ window.__ModuleLoader__.load({
 					if (!title) return;
 					fetch("/api/workbench/confirm-draft", {
 						method: "POST", headers: { "content-type": "application/json", accept: "application/json" },
-						body: JSON.stringify({ client: client, title: title }),
+						body: JSON.stringify({ client: client, client_key: resolvedClientKey, title: title }),
 					})
 						.then(function (r) { return r.json().then(function (b) { return { code: r.status, body: b }; }); })
 						.then(function (res) {
@@ -788,8 +789,8 @@ window.__ModuleLoader__.load({
 			function ReviewTabBody(props) {
 				var sessionId = props.sessionId;
 				var useChat = props.useChat;
-				var st = React.useState({ client: "", drafts: null, sel: "", body: "", msg: "", confirmIdx: 0, checked: {} });
-				var client = st[0].client, drafts = st[0].drafts, sel = st[0].sel, bodyText = st[0].body, msg = st[0].msg, checked = st[0].checked;
+				var st = React.useState({ client: "", client_key: "", drafts: null, sel: "", body: "", msg: "", confirmIdx: 0, checked: {} });
+				var client = st[0].client, clientKey = st[0].client_key, drafts = st[0].drafts, sel = st[0].sel, bodyText = st[0].body, msg = st[0].msg, checked = st[0].checked;
 				var setL = st[1];
 				function toggleCheck(title) {
 					setL(function (p) {
@@ -802,9 +803,12 @@ window.__ModuleLoader__.load({
 
 				/* 客户解析：params → 当前会话首条 user 消息的编号 → meta.client */
 				var clientFromParams = null;
+				var clientKeyFromParams = null;
 				try {
 					var info = typeof props.useTabInfo === "function" ? props.useTabInfo() : null;
-					clientFromParams = info && info.navigation && info.navigation.params ? (info.navigation.params.client || null) : null;
+					var navParams = info && info.navigation && info.navigation.params ? info.navigation.params : null;
+					clientFromParams = navParams ? (navParams.client || null) : null;
+					clientKeyFromParams = navParams ? (navParams.client_key || null) : null;
 				} catch (e) { }
 				var chatSnap = null;
 				if (!clientFromParams && typeof useChat === "function" && sessionId) {
@@ -827,17 +831,51 @@ window.__ModuleLoader__.load({
 					}
 				}
 				React.useEffect(function () {
-					if (clientFromParams) { setL(function (p) { return Object.assign({}, p, { client: clientFromParams }); }); return; }
-					if (metaId === "") { setL(function (p) { return Object.assign({}, p, { client: "" }); }); return; }
 					var alive = true;
-					fetch("/api/workbench/task-meta?id=" + encodeURIComponent(metaId), { headers: { accept: "application/json" } })
-						.then(function (r) { return r.json(); })
-						.then(function (body) {
-							if (alive && body && typeof body.client === "string") setL(function (p) { return Object.assign({}, p, { client: body.client }); });
-						})
-						.catch(function () { });
+					function applyClient(disp, key) {
+						if (!alive) return;
+						setL(function (p) {
+							return Object.assign({}, p, {
+								client: disp || p.client || "",
+								client_key: key || p.client_key || "",
+							});
+						});
+					}
+					/* 优先会话索引绑死的 client_key */
+					if (typeof sessionId === "string" && sessionId !== "") {
+						fetch("/api/workbench/session-client?session=" + encodeURIComponent(sessionId), { headers: { accept: "application/json" } })
+							.then(function (r) { return r.json(); })
+							.then(function (body) {
+								var b = body && body.binding ? body.binding : null;
+								if (b && typeof b.client_key === "string" && b.client_key !== "") {
+									applyClient(b.client || clientFromParams || "", b.client_key);
+									return;
+								}
+								fallbackMeta();
+							})
+							.catch(function () { fallbackMeta(); });
+					} else {
+						fallbackMeta();
+					}
+					function fallbackMeta() {
+						if (clientFromParams || clientKeyFromParams) {
+							applyClient(clientFromParams || "", clientKeyFromParams || "");
+							return;
+						}
+						if (metaId === "") { applyClient("", ""); return; }
+						fetch("/api/workbench/task-meta?id=" + encodeURIComponent(metaId), { headers: { accept: "application/json" } })
+							.then(function (r) { return r.json(); })
+							.then(function (body) {
+								if (!body) return;
+								applyClient(
+									typeof body.client === "string" ? body.client : "",
+									typeof body.client_key === "string" ? body.client_key : ""
+								);
+							})
+							.catch(function () { });
+					}
 					return function () { alive = false; };
-				}, [clientFromParams, metaId]);
+				}, [clientFromParams, clientKeyFromParams, metaId, sessionId]);
 
 				/* 草稿列表 */
 				React.useEffect(function () {
@@ -867,13 +905,20 @@ window.__ModuleLoader__.load({
 				function confirmOne(title, done) {
 					return fetch("/api/workbench/confirm-draft", {
 						method: "POST", headers: { "content-type": "application/json", accept: "application/json" },
-						body: JSON.stringify({ client: client, title: title }),
+						body: JSON.stringify({
+							client: client,
+							client_key: clientKey || "",
+							title: title,
+							session_id: typeof sessionId === "string" ? sessionId : "",
+							meta_id: metaId || "",
+						}),
 					})
 						.then(function (r) { return r.json().then(function (b) { return { code: r.status, body: b }; }); })
 						.then(function (res) {
 							var ok = res.body && res.body.ok === true;
 							var m = ok ? "已入库 ✓（" + title + "）"
 								: res.code === 409 ? "跳过：正式库已有同名（" + title + "）"
+								: (res.body && res.body.error === "client-mismatch") ? "失败：客户不匹配（禁止串客户入库）"
 								: "失败：" + ((res.body && (res.body.error || res.body.detail)) || res.code);
 							if (done) setL(function (p) { return Object.assign({}, p, { msg: m }); });
 							return ok;
@@ -1108,7 +1153,7 @@ window.__ModuleLoader__.load({
 					autoRef.current = metaId;
 					var ctrl = WbCtx && WbCtx.sidebarRight;
 					if (ctrl && typeof ctrl.openTab === "function") {
-						try { ctrl.openTab("wb-review", { params: { client: meta.client } }); }
+						try { ctrl.openTab("wb-review", { params: { client: meta.client, client_key: meta.client_key || "" } }); }
 						catch (e) { console.log("[dsh-workbench] 打开审核侧栏失败：", String(e)); }
 					}
 				}, [drafts, metaId]);
