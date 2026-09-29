@@ -6,8 +6,8 @@
 
 | 半边 | 干什么 |
 |---|---|
-| `lib/index.js`（宿主） | 浏览器做不到的事：调 MCP。**不自己配地址、不碰 bearer** —— 通过 `ctx.tools.execute()` 调你已经在「设置 → MCP」里挂好的服务器（默认 `sora-knowledge` / `sora-articles`）。你在设置里换地址/换服务器，工作台自动跟着走。路由含 `GET /api/workbench/clients`（**不缓存**）、`POST/GET /api/workbench/task-meta`（含 `client_key`）、`GET/POST /api/workbench/session-client`（会话↔客户索引）、`POST /api/workbench/confirm-draft`（**绑死 `client_key`** → Support `write_article(draft:false)`）、`GET /api/workbench/mcp`（诊断）。 |
-| `lib/client.js`（浏览器） | 全部界面。注册 `main` 面板（key `workbench` 装配台 + key `workbench-clients` 客户项目）+ `sidebar.panellist` 两行，令牌层从原型 `styles.css:8-80` 原样搬过来。 |
+| `lib/index.js`（宿主） | 浏览器做不到的事：调 MCP。**不自己配地址、不碰 bearer** —— 通过 `ctx.tools.execute()` 调你已经在「设置 → MCP」里挂好的服务器（默认 `sora-knowledge` / `sora-articles`）。你在设置里换地址/换服务器，工作台自动跟着走。路由含 `GET /api/workbench/clients`（**不缓存**）、`POST/GET /api/workbench/task-meta`（含 `client_key`）、`GET/POST /api/workbench/session-client`（会话↔客户索引）、`GET /api/workbench/client-map` + `POST /api/workbench/assign-client-group`（Noah 左树兼容 topic 映射）、`POST /api/workbench/confirm-draft`（**绑死 `client_key`** → Support `write_article(draft:false)`）、`GET /api/workbench/mcp`（诊断）。 |
+| `lib/client.js`（浏览器） | 全部界面。注册 `main` 面板（key `workbench` 装配台）+ Noah 同构 `shell.overlay` 左栏；客户项目旧面板源码保留但不再注册为默认入口，令牌层从原型 `styles.css:8-80` 原样搬过来。 |
 
 ## 为什么是「新面板」而不是「换外壳」
 
@@ -24,7 +24,7 @@
 
 所以 `root`、`conversation`、`main.conversation`、composer **不改原生行为** —— 标准新会话 / 常规会话永远一键可达。
 
-**WB-SUP P1（2026-09-29）**：产品要求左栏「客户 = 项目」一级分组，因此**局部放开**原「`sidebar.workspaces` 一个都不碰」红线 —— 以**注入**的「客户项目」面板（`main` key `workbench-clients` + `sidebar.panellist`）实现分组，**仍不**用脆弱的 hash 类名刮官方会话 DOM。品线 / 期数仍只在装配台下拉。
+**WB-DEV-UI parity（2026-09-29）**：正式左栏由 Noah 同构 `SidebarNav` 通过 `shell.overlay` 提供，分组数据优先使用 P1 `session-client` + `list_clients`，再合并兼容 topic map；旧 `workbench-clients` 面板源码保留但不再显示，避免重复左树。
 
 **红线**：不写针对别人 hash 类名的选择器。`sidebar-glass` 里那些 `.hHd-Xa_root` 在当前构建里已经全部失效（现在是 `PcsDIq_root` 之类），这类选择器会在每次上游重建后静默失效。这里的类名全是自己的 `wb_` 前缀。
 
@@ -64,15 +64,16 @@ dsh plugin --profile web add /path/to/plugins/dsh-workbench
 - [ ] C 区：会话页渲染形态
 - [ ] R 区：右栏硬规则检查脚本还没写（草稿审核 tab / 确认入库已接 P2）
 
-## 客户项目分组（WB-SUP P1）
+## 左栏客户分组（WB-DEV-UI / WB-SUP P1）
 
 | 项 | 行为 |
 |---|---|
 | 稳定键 | task-meta 与 session 索引存 `client_key`（CUS-*）；显示名并存于 `client` |
-| 新会话 | 装配台发送 → `POST /api/workbench/task-meta` 带 `client_key`+`client` → `startSession` → PromptRelay 拿到 session id 后 `POST /api/workbench/session-client` |
-| 左栏 | 「客户项目」面板：每组 = `list_clients` 一个客户（一级）；组下为索引里该 `client_key` 的会话；「＋ 在此客户下新开会话」预填装配台客户 |
-| 未归类 | 索引里无 / 空 `client_key` 的绑定；**历史原生会话**若不在索引里，仍只出现在官方会话列表（本面板列不出全量官方会话 —— 原生 list API 未暴露时的已知局限） |
-| 落库 | 确认入库 A（见 P2） |
+| 新会话 | 装配台发送 → `POST /api/workbench/task-meta` → `startSession` → PromptRelay 拿到 session id 后写 `session-client`，并登记 Noah 兼容 topic map |
+| 左栏 | `shell.overlay` 的 `SidebarNav` 显示「生文 Agent / ＋ 新建任务 / 搜索 / 客户分组会话树」；客户名优先来自 `list_clients` |
+| 未归类 | 空或未知 `client_key` 的绑定进入「其他」；没有索引的历史原生会话仍留在官方会话系统 |
+| 入口 | 点「＋ 新建任务」调用 `layout.selectPanel(workbench)`，点会话调用 `uiWorkspace.openSession` / `sessions.open` |
+
 
 ## 确认入库绑死客户（WB-SUP P2）
 
@@ -89,3 +90,8 @@ dsh plugin --profile web add /path/to/plugins/dsh-workbench
 1. **客户 = 知识库**，客户列表不本地缓存，打开时查一次、本次会话内复用。
 2. 工作区里的产物先落盘，**只有确认了才调工具入库**；入库顺序是「先写远端拿回执 → 再动工作区」，失败不回滚远端。
 3. 正文一改，那一篇的机器检查结论**当场作废**（退回无色）；重跑检查是可选，不是必经。
+
+
+## 确认后的发文台可见性（P3）
+
+工作台「确认入库」调用 Support `write_article(draft:false)`，文章进入该 `client_key` 的 `ready`；dsh-cloud P3 的发文台列表读取 `Support ready ∪ library`，所以确认后同客户可选用。这个链路只改变可见性，不自动外发或投放。
