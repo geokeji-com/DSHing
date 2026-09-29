@@ -18,8 +18,9 @@ window.__ModuleLoader__.load({
 		 *    就渲染原型里那块表格/那排标签的**壳**加一句空态说明，不放编造的行。
 		 *    假数据会让人误以为接了，然后照着假形状去写后端。
 		 * 2. **只落在 DSH 的扩展点上。** 新的 `main` 面板 + `sidebar.panellist`
-		 *    一行 + 一个会话域的接力挂件。root / conversation / composer /
-		 *    sidebar.workspaces 一个都不碰，标准流程永远一点即达。
+		 *    + 客户项目面板。root / conversation / composer 仍不碰原生行为。
+		 *    WB-SUP P1：左栏「客户=项目」分组产品上放开（注入客户项目 UI）；
+		 *    仍禁止用脆弱的 hash 类名刮官方 DOM。
 		 *
 		 * 类名全是自己的 `wb_` 前缀：CSS 是手写的（本包没有 tsdown 构建，
 		 * 没有 class-name hashing 可依赖），所以也绝不写指向别人 hash 类名的选择器。
@@ -308,6 +309,41 @@ window.__ModuleLoader__.load({
 			"}",
 			".wb_send:disabled{opacity:.45; cursor:default;}",
 
+			/* ---- 客户项目分组（WB-SUP P1 左栏/注入面板） ---------------- */
+			".wb_cg{",
+			"  box-sizing:border-box; display:flex; flex-direction:column; height:100%; min-height:0;",
+			"  background:var(--wb-side); color:var(--wb-text); font:13px/1.5 var(--wb-font); padding:10px 8px 16px;",
+			"}",
+			".wb_cg *{box-sizing:border-box;}",
+			".wb_cgHd{display:flex; align-items:baseline; gap:8px; padding:4px 8px 10px;}",
+			".wb_cgTitle{font-size:13px; font-weight:600; color:var(--wb-strong);}",
+			".wb_cgHint{font-size:11px; color:var(--wb-dim2); margin-left:auto;}",
+			".wb_cgList{flex:1; min-height:0; overflow:auto; display:flex; flex-direction:column; gap:4px;}",
+			".wb_cgGroup{border:1px solid var(--wb-line-soft); border-radius:8px; background:var(--wb-elev); overflow:hidden;}",
+			".wb_cgGroup[data-open='0'] .wb_cgBody{display:none;}",
+			".wb_cgGHd{",
+			"  display:flex; align-items:center; gap:6px; width:100%; padding:8px 10px; border:none;",
+			"  background:transparent; color:inherit; text-align:left; cursor:pointer;",
+			"}",
+			".wb_cgGHd:hover{background:var(--wb-elev2);}",
+			".wb_cgGName{font-weight:600; font-size:13px; color:var(--wb-strong); min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}",
+			".wb_cgGKey{font-size:10.5px; color:var(--wb-dim2); font-family:var(--wb-mono);}",
+			".wb_cgGCnt{margin-left:auto; font-size:11px; color:var(--wb-dim2);}",
+			".wb_cgBody{padding:0 6px 8px; display:flex; flex-direction:column; gap:2px;}",
+			".wb_cgSess{",
+			"  display:flex; align-items:center; gap:6px; width:100%; padding:6px 8px; border:none;",
+			"  border-radius:6px; background:transparent; color:inherit; text-align:left; cursor:pointer; font-size:12.5px;",
+			"}",
+			".wb_cgSess:hover{background:var(--wb-accent-bg); color:var(--wb-accent);}",
+			".wb_cgSessMeta{font-size:10.5px; color:var(--wb-dim2); margin-left:auto; white-space:nowrap;}",
+			".wb_cgEmpty{padding:8px 10px; font-size:11.5px; color:var(--wb-dim2);}",
+			".wb_cgNew{",
+			"  margin:4px 4px 0; padding:5px 8px; border:1px dashed var(--wb-accent-line); border-radius:6px;",
+			"  background:var(--wb-accent-bg); color:var(--wb-accent); font-size:12px; cursor:pointer;",
+			"}",
+			".wb_cgNew:hover{border-style:solid;}",
+			".wb_cgNote{padding:10px 8px 0; font-size:11px; color:var(--wb-dim2); line-height:1.6;}",
+
 			/* 空态 */
 			".wb_empty{",
 			"  height:100%; min-height:110px; display:flex; flex-direction:column;",
@@ -337,6 +373,7 @@ window.__ModuleLoader__.load({
 		}
 
 		var WORKBENCH_KEY = "workbench";
+		var CLIENT_PROJECTS_KEY = "workbench-clients";
 
 		/* ---- 侧栏那一行的图标 -------------------------------------------- */
 		function WorkbenchIcon(props) {
@@ -473,6 +510,71 @@ window.__ModuleLoader__.load({
 			return bits.join(" · ");
 		}
 
+		/* 装配台 POST /api/workbench/task-meta 的 body。稳定键 client_key + 显示名 client。
+		 * 抽成纯函数方便离线快照自检（无 DOM）。 */
+		function buildTaskMetaPayload(opts) {
+			opts = opts || {};
+			return {
+				client_key: String(opts.client_key || ""),
+				client: String(opts.client || ""),
+				line: String(opts.line || ""),
+				period: String(opts.period || ""),
+				mode: opts.mode,
+				topic: opts.topic,
+				refs: opts.refs,
+				skills: opts.skills,
+				base: opts.base,
+			};
+		}
+
+		function bindSessionClient(sessionId, bind) {
+			if (!sessionId || !bind) return;
+			fetch("/api/workbench/session-client", {
+				method: "POST",
+				headers: { "content-type": "application/json", accept: "application/json" },
+				body: JSON.stringify({
+					session_id: sessionId,
+					client_key: bind.client_key || "",
+					client: bind.client || "",
+					meta_id: bind.meta_id || "",
+				}),
+			})
+				.then(function (r) { return r.json().catch(function () { return {}; }); })
+				.then(function (body) {
+					if (!body || body.ok !== true) {
+						console.warn("[dsh-workbench] session-client 绑定未成功：", body && (body.error || body.detail) || "unknown");
+						return;
+					}
+					try { window.dispatchEvent(new Event("wb-session-bound")); } catch (e) { /* */ }
+				})
+				.catch(function (e) {
+					console.warn("[dsh-workbench] session-client 绑定失败（会话暂进未归类）：", String(e && e.message ? e.message : e));
+				});
+		}
+
+		function openSessionBestEffort(ctx, sessionId) {
+			if (!sessionId) return false;
+			var workspace = ctx && typeof ctx.get === "function" ? ctx.get("uiWorkspace") : null;
+			if (workspace) {
+				var methods = ["openSession", "selectSession", "focusSession", "activateSession"];
+				for (var i = 0; i < methods.length; i++) {
+					if (typeof workspace[methods[i]] === "function") {
+						try { workspace[methods[i]](sessionId); return true; } catch (e) { /* try next */ }
+					}
+				}
+			}
+			console.warn("[dsh-workbench] 无法打开会话 " + sessionId + "：宿主未暴露 openSession/selectSession");
+			return false;
+		}
+
+		function goAssembleWithClient(ctx, clientKey) {
+			try { sessionStorage.setItem("wb-preselect-client", String(clientKey || "")); } catch (e) { /* */ }
+			try { window.dispatchEvent(new CustomEvent("wb-client-select", { detail: { key: String(clientKey || "") } })); } catch (e) { /* */ }
+			if (ctx && ctx.layout && typeof ctx.layout.selectPanel === "function") {
+				try { ctx.layout.selectPanel(WORKBENCH_KEY); } catch (e) { /* */ }
+			}
+		}
+
 		function Empty(props) {
 			return h("div", { className: "wb_empty" },
 				h("div", { className: "wb_emptyT" + (props.bad ? " wb_bad" : "") }, props.title),
@@ -530,10 +632,25 @@ window.__ModuleLoader__.load({
 				/* 把任务参数编号绑定到这个会话 —— C1 任务条按 sessionId 取。
 				 * （多设备/刷新后不跨会话残留。） */
 				try {
-					var pendingId = sessionStorage.getItem("wb-pending-meta") || "";
+					var pendingId = sessionStorage.getItem("wb-pending-meta")
+						|| sessionStorage.getItem("wb-task-meta-id") || "";
 					if (pendingId !== "" && typeof props.sessionId === "string" && props.sessionId !== "") {
 						sessionStorage.setItem("wb-meta-for-" + props.sessionId, pendingId);
 						sessionStorage.removeItem("wb-pending-meta");
+					}
+					/* WB-SUP P1：session id 已知时立刻写 session↔client 索引。
+					 * 失败只打 log，不挡发消息 —— 会话暂时进「未归类」。 */
+					var bindRaw = sessionStorage.getItem("wb-pending-bind") || "";
+					if (bindRaw !== "" && typeof props.sessionId === "string" && props.sessionId !== "") {
+						var bind = null;
+						try { bind = JSON.parse(bindRaw); } catch (e2) { bind = null; }
+						sessionStorage.removeItem("wb-pending-bind");
+						if (bind && typeof bind === "object") {
+							if (!bind.meta_id && pendingId) bind.meta_id = pendingId;
+							bindSessionClient(props.sessionId, bind);
+						}
+					} else if (bindRaw !== "" && !(typeof props.sessionId === "string" && props.sessionId !== "")) {
+						console.warn("[dsh-workbench] 起会话后暂无 session id，绑定推迟；会话可能暂进未归类");
 					}
 				} catch (error) { /* 无 sessionStorage 就没有任务条，不影响发消息 */ }
 				actions.setDraft(text);
@@ -551,6 +668,19 @@ window.__ModuleLoader__.load({
 				window.addEventListener("wb-prompt-set", onSet);
 				return function () { window.removeEventListener("wb-prompt-set", onSet); };
 			}, []);
+
+			/* session id 晚到：pending-bind 还在就补绑一次（不挡消息）。 */
+			React.useEffect(function () {
+				if (typeof props.sessionId !== "string" || props.sessionId === "") return;
+				var bindRaw = "";
+				try { bindRaw = sessionStorage.getItem("wb-pending-bind") || ""; } catch (e) { return; }
+				if (bindRaw === "") return;
+				var bind = null;
+				try { bind = JSON.parse(bindRaw); } catch (e2) { return; }
+				if (!bind || typeof bind !== "object") return;
+				try { sessionStorage.removeItem("wb-pending-bind"); } catch (e3) { /* */ }
+				bindSessionClient(props.sessionId, bind);
+			}, [props.sessionId]);
 			return null;
 		}
 
@@ -1003,7 +1133,12 @@ window.__ModuleLoader__.load({
 						h("span", { className: "wb_label" }, label),
 						h("span", { className: "wb_value" }, value));
 				}
-				var clientText = [meta.client, meta.line, meta.period].filter(Boolean).join(" · ");
+				/* 显示优先 display_name（meta.client）；稳定键 client_key 旁注小号字在客户名后 */
+				var clientDisp = meta.client || meta.client_key || "";
+				if (meta.client_key && meta.client && meta.client_key !== meta.client) {
+					clientDisp = meta.client + "（" + meta.client_key + "）";
+				}
+				var clientText = [clientDisp, meta.line, meta.period].filter(Boolean).join(" · ");
 				var materialText = (meta.refs && meta.refs.urls && meta.refs.urls.length > 0)
 					? "参考文章 · " + meta.refs.urls.length + " 篇" + (meta.refs.style ? " · " + meta.refs.style : "")
 					: "客户知识库";
@@ -1127,16 +1262,45 @@ window.__ModuleLoader__.load({
 			var sendingS = React.useState("");
 			var sending = sendingS[0], setSending = sendingS[1];
 
-			/* 默认选第一个客户 */
+			/* 默认选第一个客户；左栏「在此客户下新开会话」可预填 client_key */
 			React.useEffect(function () {
 				if (clients.status !== "ready" || clients.customers.length === 0) return;
-				var first = clients.customers[0];
-				var line = (first.business_lines && first.business_lines[0]) || null;
+				var prefer = "";
+				try { prefer = sessionStorage.getItem("wb-preselect-client") || ""; } catch (e) { prefer = ""; }
+				if (prefer !== "") {
+					try { sessionStorage.removeItem("wb-preselect-client"); } catch (e2) { /* */ }
+				}
+				var chosen = null;
+				if (prefer !== "") {
+					for (var ci = 0; ci < clients.customers.length; ci++) {
+						if (customerId(clients.customers[ci]) === prefer) { chosen = clients.customers[ci]; break; }
+					}
+				}
+				if (chosen === null) chosen = clients.customers[0];
+				var line = (chosen.business_lines && chosen.business_lines[0]) || null;
 				setPick({
-					key: customerId(first),
+					key: customerId(chosen),
 					line: line === null ? "" : String(line.id || ""),
-					period: firstPeriodId(first, line === null ? "" : String(line.id || "")),
+					period: firstPeriodId(chosen, line === null ? "" : String(line.id || "")),
 				});
+			}, [clients.status, clients.customers]);
+
+			React.useEffect(function () {
+				var onSel = function (ev) {
+					var key = ev && ev.detail && ev.detail.key ? String(ev.detail.key) : "";
+					if (key === "" || clients.status !== "ready") return;
+					var found = null;
+					for (var j = 0; j < clients.customers.length; j++) {
+						if (customerId(clients.customers[j]) === key) { found = clients.customers[j]; break; }
+					}
+					if (found === null) return;
+					var line = (found.business_lines && found.business_lines[0]) || null;
+					var lineId = line === null ? "" : String(line.id || "");
+					setPick({ key: key, line: lineId, period: firstPeriodId(found, lineId) });
+					setChipOff(false);
+				};
+				window.addEventListener("wb-client-select", onSel);
+				return function () { window.removeEventListener("wb-client-select", onSel); };
 			}, [clients.status, clients.customers]);
 
 			var current = null;
@@ -1237,20 +1401,31 @@ window.__ModuleLoader__.load({
 					var resp = await fetch("/api/workbench/task-meta", {
 						method: "POST",
 						headers: { "content-type": "application/json", accept: "application/json" },
-						body: JSON.stringify({
-							client: clientName, line: lineName, period: periodName,
+						body: JSON.stringify(buildTaskMetaPayload({
+							client_key: pick.key,
+							client: clientName,
+							line: lineName, period: periodName,
 							mode: mode, topic: topic,
 							refs: { urls: refs.urls, body: refs.body, style: refStyle },
 							skills: picked, base: base,
-						}),
+						})),
 					});
 					var body = await resp.json();
 					if (body && body.ok === true && typeof body.id === "string") metaId = body.id;
 				} catch (error) { /* 登记失败照常发送，任务条走兜底 */ }
 				var text = composePrompt() + (metaId === "" ? "" : "\n\n[任务编号：" + metaId + "]");
-				if (metaId !== "") {
-					try { sessionStorage.setItem("wb-task-meta-id", metaId); } catch (error) { /* 隐身模式就算了 */ }
-				}
+				try {
+					if (metaId !== "") {
+						sessionStorage.setItem("wb-task-meta-id", metaId);
+						sessionStorage.setItem("wb-pending-meta", metaId);
+					}
+					/* 新会话强制绑客户：等 PromptRelay 拿到 session id 再 POST 索引 */
+					sessionStorage.setItem("wb-pending-bind", JSON.stringify({
+						client_key: pick.key,
+						client: clientName,
+						meta_id: metaId,
+					}));
+				} catch (error) { /* 隐身模式就算了 */ }
 				var workspace = ctx !== undefined && ctx !== null && typeof ctx.get === "function" ? ctx.get("uiWorkspace") : undefined;
 				if (workspace === undefined || workspace === null || typeof workspace.startSession !== "function") {
 					setSending("起不了会话：宿主没有 uiWorkspace");
@@ -1537,6 +1712,157 @@ window.__ModuleLoader__.load({
 						sending === "" ? null : h("div", { className: "wb_emptyS wb_bad" }, sending))));
 		}
 
+		/* ---- 客户项目分组面板（WB-SUP P1）---------------------------------
+		 * 方案 A：注入独立 main 面板 + panellist 入口，不刮官方 hash DOM。
+		 * 组 = list_clients；组下会话来自 session-client 索引。
+		 * 「未归类」= 索引里无 client_key / 空键的绑定。
+		 * 局限：拿不到官方全量会话列表时，未归类只覆盖索引内未绑客户的条目，
+		 * 历史原生会话仍在官方 sessions 列表，不会自动出现在本面板。 */
+		function ClientProjectsIcon(props) {
+			var size = Number(props && props.size) || 16;
+			return h("svg", {
+				width: size, height: size, viewBox: "0 0 16 16", fill: "none",
+				"aria-hidden": "true", focusable: "false",
+			},
+				h("path", { d: "M2.5 3.5h5v4h-5v-4zM8.5 3.5h5v4h-5v-4zM2.5 8.5h5v4h-5v-4zM8.5 8.5h5v4h-5v-4z", stroke: "currentColor", strokeWidth: 1.2 }));
+		}
+
+		function ClientProjectsPage(props) {
+			var ctx = props.ctx;
+			var clients = useClients();
+			var indexS = React.useState({ status: "loading", index: {} });
+			var indexState = indexS[0], setIndexState = indexS[1];
+			var openS = React.useState({});
+			var openMap = openS[0], setOpenMap = openS[1];
+
+			function reloadIndex() {
+				setIndexState(function (prev) { return { status: "loading", index: prev.index || {} }; });
+				fetch("/api/workbench/session-client", { headers: { accept: "application/json" } })
+					.then(function (r) { return r.json(); })
+					.then(function (body) {
+						if (body && body.ok === true && body.index && typeof body.index === "object") {
+							setIndexState({ status: "ready", index: body.index });
+						} else {
+							setIndexState({ status: "error", index: {} });
+						}
+					})
+					.catch(function () { setIndexState({ status: "error", index: {} }); });
+			}
+			React.useEffect(function () {
+				reloadIndex();
+				var onBound = function () { reloadIndex(); };
+				window.addEventListener("wb-session-bound", onBound);
+				return function () { window.removeEventListener("wb-session-bound", onBound); };
+			}, []);
+
+			var groups = [];
+			if (clients.status === "ready") {
+				clients.customers.forEach(function (c) {
+					groups.push({
+						key: customerId(c),
+						name: customerName(c),
+						kind: "client",
+					});
+				});
+			}
+			groups.push({ key: "", name: "未归类", kind: "unbound" });
+
+			var byKey = {};
+			Object.keys(indexState.index || {}).forEach(function (sid) {
+				var entry = indexState.index[sid];
+				if (!entry || typeof entry !== "object") return;
+				var ck = String(entry.client_key || "");
+				if (!byKey[ck]) byKey[ck] = [];
+				byKey[ck].push({
+					session_id: sid,
+					client: entry.client || "",
+					meta_id: entry.meta_id || "",
+					bound_at: entry.bound_at || "",
+				});
+			});
+			Object.keys(byKey).forEach(function (ck) {
+				byKey[ck].sort(function (a, b) { return String(b.bound_at).localeCompare(String(a.bound_at)); });
+			});
+
+			function isOpen(key) {
+				if (Object.prototype.hasOwnProperty.call(openMap, key)) return openMap[key] !== false;
+				return true; // 默认展开
+			}
+			function toggle(key) {
+				setOpenMap(function (prev) {
+					var next = Object.assign({}, prev);
+					next[key] = !isOpen(key);
+					return next;
+				});
+			}
+
+			return h("div", { className: "wb_cg" },
+				h("div", { className: "wb_cgHd" },
+					h("span", { className: "wb_cgTitle" }, "客户项目"),
+					h("span", { className: "wb_cgHint" },
+						clients.status === "loading" ? "客户加载中…"
+							: clients.status === "error" ? "客户列表读不到"
+							: (clients.customers.length + " 个客户")
+								+ (indexState.status === "ready" ? " · 索引 " + Object.keys(indexState.index).length : ""))),
+				h("div", { className: "wb_cgList" },
+					clients.status === "error"
+						? h("div", { className: "wb_cgEmpty" }, clientsErrorText(clients.error, clients.detail))
+						: groups.map(function (g) {
+							var sess = byKey[g.key] || [];
+							/* 未归类：空 client_key；也把「索引里 client_key 不在客户列表」的孤儿并进来 */
+							if (g.kind === "unbound") {
+								var known = {};
+								groups.forEach(function (x) { if (x.kind === "client") known[x.key] = true; });
+								sess = [];
+								Object.keys(byKey).forEach(function (ck) {
+									if (ck === "" || !known[ck]) {
+										byKey[ck].forEach(function (row) { sess.push(row); });
+									}
+								});
+								sess.sort(function (a, b) { return String(b.bound_at).localeCompare(String(a.bound_at)); });
+							}
+							var open = isOpen(g.key === "" ? "__unbound__" : g.key);
+							var mapKey = g.key === "" ? "__unbound__" : g.key;
+							return h("div", { className: "wb_cgGroup", key: mapKey, "data-open": open ? "1" : "0" },
+								h("button", {
+									type: "button", className: "wb_cgGHd",
+									onClick: function () { toggle(mapKey); },
+								},
+									h("span", null, open ? "▾" : "▸"),
+									h("span", { className: "wb_cgGName" }, g.name),
+									g.kind === "client" && g.key
+										? h("span", { className: "wb_cgGKey" }, g.key)
+										: null,
+									h("span", { className: "wb_cgGCnt" }, String(sess.length))),
+								h("div", { className: "wb_cgBody" },
+									sess.length === 0
+										? h("div", { className: "wb_cgEmpty" },
+											g.kind === "unbound"
+												? "暂无未归类绑定（历史原生会话仍在官方列表）"
+												: "还没有绑到此客户的会话")
+										: sess.map(function (row) {
+											var label = row.meta_id || row.session_id;
+											var when = row.bound_at ? String(row.bound_at).slice(5, 16).replace("T", " ") : "";
+											return h("button", {
+												type: "button", key: row.session_id, className: "wb_cgSess",
+												title: row.session_id,
+												onClick: function () { openSessionBestEffort(ctx, row.session_id); },
+											},
+												h("span", null, label),
+												when ? h("span", { className: "wb_cgSessMeta" }, when) : null);
+										}),
+									g.kind === "client"
+										? h("button", {
+											type: "button", className: "wb_cgNew",
+											onClick: function () { goAssembleWithClient(ctx, g.key); },
+										}, "＋ 在此客户下新开会话")
+										: null));
+						})),
+				h("div", { className: "wb_cgNote" },
+					"新从装配台发出的会话会自动挂到所选客户。历史未绑定会话进「未归类」。",
+					" 品线/期数仍在装配台下拉，不在左栏展开。"));
+		}
+
 		/* ---- wiring ------------------------------------------------------- */
 		function apply(ctx, config) {
 			WbCtx = ctx;
@@ -1568,6 +1894,20 @@ window.__ModuleLoader__.load({
 					label: "发起任务",
 					order: 20,
 				}, WorkbenchIcon);
+			});
+			/* WB-SUP P1：客户=项目（左栏一级）。独立 main 面板，避免刮官方 workspaces DOM。 */
+			ctx.slots.inject("main", function () {
+				return ctx.slots.register({ name: "main", key: CLIENT_PROJECTS_KEY }, function () {
+					return h(ClientProjectsPage, { ctx: ctx });
+				});
+			});
+			ctx.slots.inject("sidebar.panellist", function () {
+				return ctx.slots.register({
+					name: "sidebar.panellist",
+					id: CLIENT_PROJECTS_KEY,
+					label: "客户项目",
+					order: 15,
+				}, ClientProjectsIcon);
 			});
 
 			/* ---- 没收设置入口（2026-09-23 用户决策）--------------------------

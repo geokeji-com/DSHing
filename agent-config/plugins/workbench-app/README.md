@@ -6,8 +6,8 @@
 
 | 半边 | 干什么 |
 |---|---|
-| `lib/index.js`（宿主） | 浏览器做不到的事：调 MCP。**不自己配地址、不碰 bearer** —— 通过 `ctx.tools.execute()` 调你已经在「设置 → MCP」里挂好的服务器（默认 `sora-knowledge` / `sora-articles`）。你在设置里换地址/换服务器，工作台自动跟着走。路由 `GET /api/workbench/clients`（**不缓存**）、`GET /api/workbench/mcp`（诊断：这台 Host 上挂了哪些 MCP、各有哪些工具）。 |
-| `lib/client.js`（浏览器） | 全部界面。注册 `main` 面板（key `workbench`）+ `sidebar.panellist` 一行，令牌层从原型 `styles.css:8-80` 原样搬过来。 |
+| `lib/index.js`（宿主） | 浏览器做不到的事：调 MCP。**不自己配地址、不碰 bearer** —— 通过 `ctx.tools.execute()` 调你已经在「设置 → MCP」里挂好的服务器（默认 `sora-knowledge` / `sora-articles`）。你在设置里换地址/换服务器，工作台自动跟着走。路由含 `GET /api/workbench/clients`（**不缓存**）、`POST/GET /api/workbench/task-meta`（含 `client_key`）、`GET/POST /api/workbench/session-client`（会话↔客户索引）、`GET /api/workbench/mcp`（诊断）。 |
+| `lib/client.js`（浏览器） | 全部界面。注册 `main` 面板（key `workbench` 装配台 + key `workbench-clients` 客户项目）+ `sidebar.panellist` 两行，令牌层从原型 `styles.css:8-80` 原样搬过来。 |
 
 ## 为什么是「新面板」而不是「换外壳」
 
@@ -22,7 +22,9 @@
 | R1–R5 右栏审核 | `sidebar.right.pane.tab` + `ctx.sidebarRight.openTab` |
 | S1/S5 左栏品牌行·底部入口 | `sidebar.brand.*` / `sidebar.footer.action` |
 
-所以 `root`、`conversation`、`main.conversation`、composer、`sidebar.workspaces`（项目管理）**一个都不碰** —— 标准新会话 / 常规会话 / 项目管理永远一键可达。
+所以 `root`、`conversation`、`main.conversation`、composer **不改原生行为** —— 标准新会话 / 常规会话永远一键可达。
+
+**WB-SUP P1（2026-09-29）**：产品要求左栏「客户 = 项目」一级分组，因此**局部放开**原「`sidebar.workspaces` 一个都不碰」红线 —— 以**注入**的「客户项目」面板（`main` key `workbench-clients` + `sidebar.panellist`）实现分组，**仍不**用脆弱的 hash 类名刮官方会话 DOM。品线 / 期数仍只在装配台下拉。
 
 **红线**：不写针对别人 hash 类名的选择器。`sidebar-glass` 里那些 `.hHd-Xa_root` 在当前构建里已经全部失效（现在是 `PcsDIq_root` 之类），这类选择器会在每次上游重建后静默失效。这里的类名全是自己的 `wb_` 前缀。
 
@@ -55,10 +57,22 @@ dsh plugin --profile web add /path/to/plugins/dsh-workbench
 
 - [x] 令牌层 + 面板 + 侧栏入口
 - [x] A1 给谁写：**接真数据**（客户 / 业务线 / 服务期，全部来自 knowledge MCP）
+- [x] WB-SUP P1：左栏客户=项目分组 + 新会话绑 `client_key`（见下）
 - [ ] A2 主题：只有两个标签的壳；A3 薄弱问句表（数据源未定，先留空）
-- [ ] A4 拖杆 / A5 怎么写 / A7 放大编辑
+- [ ] A4 拖杆 / A5 怎么写 / A7 放大编辑（拖杆/怎么写已有壳）
 - [ ] C 区：会话页渲染形态
-- [ ] R 区：右栏审核（依赖后端：产物目录、硬规则检查脚本、入库 MCP 工具 —— 都还没写）
+- [ ] R 区：右栏审核（草稿审核 tab 已接；硬规则检查脚本还没写）
+- [ ] P2：确认入库改 Support API / 自动 ready（**本 PR 不做**）
+
+## 客户项目分组（WB-SUP P1）
+
+| 项 | 行为 |
+|---|---|
+| 稳定键 | task-meta 与 session 索引存 `client_key`（CUS-*）；显示名并存于 `client` |
+| 新会话 | 装配台发送 → `POST /api/workbench/task-meta` 带 `client_key`+`client` → `startSession` → PromptRelay 拿到 session id 后 `POST /api/workbench/session-client` |
+| 左栏 | 「客户项目」面板：每组 = `list_clients` 一个客户（一级）；组下为索引里该 `client_key` 的会话；「＋ 在此客户下新开会话」预填装配台客户 |
+| 未归类 | 索引里无 / 空 `client_key` 的绑定；**历史原生会话**若不在索引里，仍只出现在官方会话列表（本面板列不出全量官方会话 —— 原生 list API 未暴露时的已知局限） |
+| 落库 | 仍是确认入库 A；本阶段**不**改 confirm-draft 为自动 ready |
 
 ## 不能忘的三条（来自原型说明.md）
 
