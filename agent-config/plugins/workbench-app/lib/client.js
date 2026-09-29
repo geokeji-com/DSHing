@@ -1217,7 +1217,7 @@ window.__ModuleLoader__.load({
 					for (var wsi = 0; wsi < legacyNodes.length; wsi++) {
 						var wsn = legacyNodes[wsi];
 						if (wsn && wsn.kind === "tool-result" && wsn.call
-							&& wsn.call.name === "mcp__sora-articles__write_article" && wsn.isError !== true) {
+							&& /^(?:mcp__articles__|mcp__sora-articles__)write_article$/.test(wsn.call.name) && wsn.isError !== true) {
 							try {
 								var wargs = JSON.parse(wsn.call.argsRaw || "{}");
 								var wtitle = String(wargs.title || wargs.file || "").replace(/\.md$/i, "");
@@ -1639,7 +1639,7 @@ window.__ModuleLoader__.load({
 				for (var wi = 0; wi < list.length; wi++) {
 					var tn = list[wi];
 					if (tn && tn.kind === "tool-result" && tn.call
-						&& tn.call.name === "mcp__sora-articles__write_article" && tn.isError !== true) {
+						&& /^(?:mcp__articles__|mcp__sora-articles__)write_article$/.test(tn.call.name) && tn.isError !== true) {
 						writeDone += 1;
 						try {
 							var targs = JSON.parse(tn.call.argsRaw || "{}");
@@ -1894,7 +1894,7 @@ window.__ModuleLoader__.load({
 				var who = "客户：" + (clientName || "（没选客户）");
 				if (lineName !== "") who += " · 业务线：" + lineName;
 				if (periodName !== "") who += " · 期数：" + periodName;
-				step(who + " —— 请调用知识库工具（sora-knowledge），读取该客户的全部知识库内容再动笔。");
+				step(who + " —— 请调用知识库工具（knowledge；旧席位兼容 sora-knowledge），读取该客户的全部知识库内容再动笔。");
 
 				if (mode === "weak") {
 					step("主题：从薄弱问句里选（薄弱问句库还没接数据 —— 先按知识库内容自行判断主题，或等我补充）。");
@@ -1917,7 +1917,7 @@ window.__ModuleLoader__.load({
 
 				if (base.trim() !== "") step("补充要求：" + base.trim());
 
-				lines.splice(0, 0, "工具分工（请严格照此使用，不要猜）：客户知识库、文章的读写都走 MCP 工具（mcp__sora-knowledge__*、mcp__sora-articles__*）；只有下面列出的 sora-* 写作技能才走技能工具（skill），其他名字不是技能。新文章用文章库的 write_article 写入，必须带 draft:true（进草稿区等人工确认，不要直接入库；除非用户明确说「直接入库」）。技能正文（get_skill 返回的内容）已包含全部规则和提示词，够你写作使用 —— 不要尝试用 skill 工具读技能的子文件/附属文件（如 xxx/prompts/xxx.md 这种带路径的名字），也不要用其他方式抓取它们。");
+				lines.splice(0, 0, "工具分工（请严格照此使用，不要猜）：客户知识库、文章的读写都走 MCP 工具（mcp__knowledge__*、mcp__articles__*；旧席位兼容 mcp__sora-knowledge__*、mcp__sora-articles__*）；只有下面列出的 sora-* 写作技能才走技能工具（skill），其他名字不是技能。新文章用文章库的 write_article 写入，必须带 draft:true（进草稿区等人工确认，不要直接入库；除非用户明确说「直接入库」）。技能正文（get_skill 返回的内容）已包含全部规则和提示词，够你写作使用 —— 不要尝试用 skill 工具读技能的子文件/附属文件（如 xxx/prompts/xxx.md 这种带路径的名字），也不要用其他方式抓取它们。");
 				/* lines 里各条已自带序号（step 加的），这里直接拼，别再加一遍（9-23 实测出现 1.1.）。 */
 				return "【装配台预填 · 初始上下文】\n" + lines.join("\n");
 			}
