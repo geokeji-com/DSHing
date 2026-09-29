@@ -7,8 +7,8 @@
  * 浏览器做不到的事：调 MCP、列技能。全部走 DSH 自己已经挂好的东西，
  * **不自己配地址、不碰任何 token**：
  *
- *   客户    → `ctx.tools.execute('mcp__sora-knowledge__list_clients')`
- *   文章库  → `ctx.tools.execute('mcp__sora-articles__list_articles')`
+ *   客户    → `ctx.tools.execute('mcp__knowledge__list_clients')`
+ *   文章库  → `ctx.tools.execute('mcp__articles__list_articles')`
  *   技能    → `ctx.skills.list()`（dsh-skill-remote 注册的 provider）
  *
  * 好处：用户在「设置 → MCP」里换地址/换服务器，或者换技能服务，工作台自动跟着走。
@@ -51,8 +51,11 @@ const WORKSPACE_ROOT = '/home/dsh/生文'
 const LIBRARY_ROOT = '/srv/dsh-data/文章库'
 
 /** 默认服务器名；在 cordis.patch.yml 的 config 里可改。 */
-const DEFAULT_KNOWLEDGE_SERVER = 'sora-knowledge'
-const DEFAULT_LIBRARY_SERVER = 'sora-articles'
+const DEFAULT_KNOWLEDGE_SERVER = 'knowledge'
+const DEFAULT_LIBRARY_SERVER = 'articles'
+
+const KNOWLEDGE_SERVER_ALIASES = ['knowledge', 'sora-knowledge']
+const LIBRARY_SERVER_ALIASES = ['articles', 'sora-articles']
 
 /** 一次工具调用的预算。 */
 const TOOL_TIMEOUT_MS = 15000
@@ -77,7 +80,54 @@ function pickTool(ctx, server, configured, hints) {
     const hit = names.filter(name => hint.test(name))
     if (hit.length > 0) return hit[0]
   }
+  if (configured !== '') return ''
   return names.length > 0 ? names[0] : ''
+}
+
+/**
+ * Resolve a configured server to the first alias that has any registered tools.
+ * The configured name remains first so Noah's sora-* names continue to work.
+ */
+function resolveServer(ctx, preferred, fallbacks) {
+  const candidates = []
+  for (const server of [preferred, ...(Array.isArray(fallbacks) ? fallbacks : [])]) {
+    const name = firstString(server)
+    if (name !== '' && !candidates.includes(name)) candidates.push(name)
+  }
+  for (const server of candidates) {
+    if (toolsOf(ctx, server).length > 0) return server
+  }
+  return candidates[0] || ''
+}
+
+/** Pick a tool and its server, trying aliases when the preferred server has no match. */
+function resolveTool(ctx, preferred, fallbacks, configured, hints) {
+  const candidates = []
+  for (const server of [preferred, ...(Array.isArray(fallbacks) ? fallbacks : [])]) {
+    const name = firstString(server)
+    if (name !== '' && !candidates.includes(name)) candidates.push(name)
+  }
+  /* An explicitly configured tool must win on any alias before heuristic
+   * selection; otherwise a preferred server's read tool could mask a
+   * fallback server's list/write tool. */
+  if (configured !== '') {
+    for (const server of candidates) {
+      if (toolsOf(ctx, server).includes(configured)) return { server, tool: configured }
+    }
+    for (const server of candidates) {
+      const names = toolsOf(ctx, server)
+      for (const hint of hints) {
+        const hit = names.find(name => hint.test(name))
+        if (hit !== undefined) return { server, tool: hit }
+      }
+    }
+    return { server: resolveServer(ctx, preferred, fallbacks), tool: '' }
+  }
+  for (const server of candidates) {
+    const tool = pickTool(ctx, server, configured, hints)
+    if (tool !== '') return { server, tool }
+  }
+  return { server: resolveServer(ctx, preferred, fallbacks), tool: '' }
 }
 
 /**
@@ -135,7 +185,8 @@ function unwrapMcp(value) {
   if (structured !== undefined && structured !== null) {
     if (Array.isArray(structured)) return structured
     if (typeof structured === 'object'
-      && (Array.isArray(structured.customers) || Array.isArray(structured.clients) || Array.isArray(structured.items))) {
+      && (Array.isArray(structured.customers) || Array.isArray(structured.clients)
+        || Array.isArray(structured.items) || Array.isArray(structured.articles))) {
       return structured
     }
   }
@@ -230,7 +281,15 @@ function normalize(raw) {
 
 /** 文章列表可以是字符串数组，也可以是对象数组；统一成 {id,title}。 */
 function normalizeArticles(raw) {
-  const list = Array.isArray(raw) ? raw : (raw !== null && typeof raw === 'object' && Array.isArray(raw.items) ? raw.items : null)
+  const items = normalizeLibraryArticles(raw)
+  return items === null ? null : items.map(item => ({ id: item.id, title: item.title }))
+}
+
+/** Normalize article metadata while retaining the fields used by draft parity. */
+function normalizeLibraryArticles(raw) {
+  const list = Array.isArray(raw) ? raw : (raw !== null && typeof raw === 'object'
+    ? (Array.isArray(raw.items) ? raw.items : (Array.isArray(raw.articles) ? raw.articles : null))
+    : null)
   if (list === null) return null
   const out = []
   for (const item of list) {
@@ -241,9 +300,65 @@ function normalizeArticles(raw) {
     if (item === null || typeof item !== 'object') continue
     const title = firstString(item.title, item.name, item.file, item.id)
     if (title === '') continue
-    out.push({ id: firstString(item.id, item.key, title) || title, title })
+    const entry = { id: firstString(item.id, item.key, title) || title, title }
+    const status = firstString(item.status, item.state).toLowerCase()
+    if (status !== '') entry.status = status
+    if (Number.isFinite(Number(item.chars))) entry.chars = Number(item.chars)
+    const updatedAt = firstString(item.updatedAt, item.updated_at, item.updated)
+    if (updatedAt !== '') entry.updatedAt = updatedAt
+    out.push(entry)
   }
   return out
+}
+
+/** Read article content from the common Support MCP response shapes. */
+function articleContent(raw) {
+  const value = unwrapMcp(raw)
+  if (typeof value === 'string') return value
+  if (value === null || typeof value !== 'object') return null
+  for (const key of ['content', 'body_inline', 'body', 'text', 'markdown']) {
+    if (typeof value[key] === 'string') return value[key]
+  }
+  return null
+}
+
+/**
+ * Merge local filesystem entries with Support article metadata.
+ * Local ready entries remain in drafts for the existing locked-section UI;
+ * MCP ready entries are exposed through `library` and MCP drafts through `drafts`.
+ */
+function mergeDraftLists(localDrafts, localReady, mcpArticles) {
+  const drafts = Array.isArray(localDrafts) ? localDrafts.map(item => ({ ...item })) : []
+  const ready = Array.isArray(localReady) ? localReady : []
+  const draftTitles = new Set(drafts.map(item => firstString(item && item.title)).filter(Boolean))
+  const library = []
+  const addLibrary = title => {
+    const clean = firstString(title)
+    if (clean !== '' && !library.includes(clean)) library.push(clean)
+  }
+  for (const item of ready) {
+    const title = firstString(item && item.title)
+    if (title === '') continue
+    addLibrary(title)
+    if (!draftTitles.has(title)) {
+      drafts.push({ ...item, title })
+      draftTitles.add(title)
+    }
+  }
+  if (Array.isArray(mcpArticles)) {
+    for (const item of mcpArticles) {
+      const title = firstString(item && item.title)
+      if (title === '') continue
+      const status = firstString(item.status).toLowerCase()
+      if (status === 'ready') addLibrary(title)
+      if (status === 'draft' && !draftTitles.has(title)) {
+        drafts.push({ ...item, title })
+        draftTitles.add(title)
+      }
+    }
+  }
+  drafts.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')))
+  return { drafts, library }
 }
 
 /** 从 POST body 造 task-meta 落盘记录：强制字符串化 client_key / client。 */
@@ -406,7 +521,23 @@ function methodNotAllowed(res) {
 
 /* 归一化函数导出，只为离线自检用（宿主加载器只用 apply）：
  *   node --input-type=module -e "import('./lib/index.js').then(m => …)" */
-export { normalize, normalizeArticles, payloadOf, taskMetaRecordFromBody, readSessionClientIndex, writeSessionClientIndex, mergeSessionClientBinding, resolveBoundClientForConfirm, assertConfirmClientMatch, readTaskMetaRecord }
+export {
+  normalize,
+  normalizeArticles,
+  normalizeLibraryArticles,
+  payloadOf,
+  articleContent,
+  mergeDraftLists,
+  resolveServer,
+  resolveTool,
+  taskMetaRecordFromBody,
+  readSessionClientIndex,
+  writeSessionClientIndex,
+  mergeSessionClientBinding,
+  resolveBoundClientForConfirm,
+  assertConfirmClientMatch,
+  readTaskMetaRecord,
+}
 
 /**
  * 造出这一版实现的路由处理函数。壳（lib/index.js）每个请求调一次，
@@ -421,6 +552,8 @@ export function create(ctx, config) {
   const libraryServer = firstString(cfg.libraryServer) || DEFAULT_LIBRARY_SERVER
   const clientsTool = firstString(cfg.clientsTool)
   const articlesTool = firstString(cfg.articlesTool) || 'list_articles'
+  const knowledgeServers = [knowledgeServer, ...KNOWLEDGE_SERVER_ALIASES]
+  const libraryServers = [libraryServer, ...LIBRARY_SERVER_ALIASES]
 
   const hostCtx = ctx
   const handlers = {}
@@ -448,27 +581,28 @@ export function create(ctx, config) {
     /* ---- 知识库：客户名单（不缓存）-------------------------------- */
     handlers[CLIENTS_PATH] = async (req, res) => {
       if (req.method !== 'GET') { methodNotAllowed(res); return }
-      const tool = pickTool(hostCtx, knowledgeServer, clientsTool, [/hierarch/i, /(list|space|customer|client)/i])
-      if (tool === '') {
+      const resolved = resolveTool(hostCtx, knowledgeServer, knowledgeServers, clientsTool, [/hierarch/i, /(list|space|customer|client)/i])
+      if (resolved.tool === '') {
         sendJson(res, {
           ok: false,
           error: 'mcp-missing',
-          detail: `没找到 ${knowledgeServer} 的工具。设置 → MCP 里确认这台服务器已连接。`,
+          detail: `没找到 ${knowledgeServer} / knowledge / sora-knowledge 的工具。设置 → MCP 里确认这台服务器已连接。`,
           available: hostCtx.tools.schemas().map(schema => schema.name).filter(name => name.startsWith('mcp__')).sort(),
         })
         return
       }
-      const called = await callTool(hostCtx, knowledgeServer, tool, {})
+      const { server, tool } = resolved
+      const called = await callTool(hostCtx, server, tool, {})
       if (!called.ok) {
-        sendJson(res, { ok: false, error: called.error, detail: called.detail, server: knowledgeServer, tool })
+        sendJson(res, { ok: false, error: called.error, detail: called.detail, server, tool })
         return
       }
       const customers = normalize(called.value)
       if (customers === null) {
-        sendJson(res, { ok: false, error: 'bad-reply', detail: `认不出 ${tool} 的返回形状（收到 ${describe(called.value)}）`, server: knowledgeServer, tool })
+        sendJson(res, { ok: false, error: 'bad-reply', detail: `认不出 ${tool} 的返回形状（收到 ${describe(called.value)}）`, server, tool })
         return
       }
-      sendJson(res, { ok: true, customers, server: knowledgeServer, tool })
+      sendJson(res, { ok: true, customers, server, tool })
     }
 
     /* ---- 文章库：某个客户已有的文章 -------------------------------- */
@@ -480,26 +614,27 @@ export function create(ctx, config) {
         sendJson(res, { ok: false, error: 'bad-request', detail: '缺少 client 参数' })
         return
       }
-      const tool = pickTool(hostCtx, libraryServer, articlesTool, [/list/i, /article/i])
-      if (tool === '') {
+      const resolved = resolveTool(hostCtx, libraryServer, libraryServers, articlesTool, [/^list_articles$/i, /^list/i])
+      if (resolved.tool === '') {
         sendJson(res, {
           ok: false,
           error: 'mcp-missing',
-          detail: `没找到 ${libraryServer} 的工具。设置 → MCP 里确认这台服务器已连接。`,
+          detail: `没找到 ${libraryServer} / articles / sora-articles 的工具。设置 → MCP 里确认这台服务器已连接。`,
         })
         return
       }
-      const called = await callTool(hostCtx, libraryServer, tool, { client })
+      const { server, tool } = resolved
+      const called = await callTool(hostCtx, server, tool, { client })
       if (!called.ok) {
-        sendJson(res, { ok: false, error: called.error, detail: called.detail, server: libraryServer, tool })
+        sendJson(res, { ok: false, error: called.error, detail: called.detail, server, tool })
         return
       }
       const articles = normalizeArticles(called.value)
       if (articles === null) {
-        sendJson(res, { ok: false, error: 'bad-reply', detail: `认不出 ${tool} 的返回形状（收到 ${describe(called.value)}）`, server: libraryServer, tool })
+        sendJson(res, { ok: false, error: 'bad-reply', detail: `认不出 ${tool} 的返回形状（收到 ${describe(called.value)}）`, server, tool })
         return
       }
-      sendJson(res, { ok: true, articles, client, server: libraryServer, tool })
+      sendJson(res, { ok: true, articles, client, server, tool })
     }
 
     /* ---- Noah 左树兼容映射：session → 客户/topic ----------------------
@@ -715,45 +850,63 @@ export function create(ctx, config) {
       if (!s || s.includes('/') || s.includes('\\') || s.includes('..')) throw new Error('bad file name')
       return s.endsWith('.md') ? s : s + '.md'
     }
-    handlers[DRAFTS_PATH] = (req, res) => {
+    handlers[DRAFTS_PATH] = async (req, res) => {
       if (req.method !== 'GET') { methodNotAllowed(res); return }
       const url = new URL(req.url, 'http://localhost')
       const client = String(url.searchParams.get('client') ?? '').replace(/[/\\]/g, '')
       if (!client) { sendJson(res, { ok: false, error: 'no-client' }); return }
+      const localDrafts = []
+      const localReady = []
       try {
         const dir = draftDir(client)
-        const out = []
         for (const name of readdirSync(dir)) {
           if (!name.toLowerCase().endsWith('.md')) continue
           const st = statSync(join(dir, name))
-          out.push({ title: name.replace(/\.md$/i, ''), chars: st.size, updatedAt: new Date(st.mtimeMs).toISOString() })
+          localDrafts.push({ title: name.replace(/\.md$/i, ''), chars: st.size, updatedAt: new Date(st.mtimeMs).toISOString() })
         }
-        out.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
-        /* 正式库同名清单：确认后本地草稿会被挪走，前端仍需知道哪些稿已入库，
-         * 以便 ReviewTab 显示绿色锁定段；Support ready 仍由 confirm 的远端写入保证。 */
-        const library = []
-        try {
-          const libDir = join(LIBRARY_ROOT, client)
-          for (const name of readdirSync(libDir)) {
-            if (!name.toLowerCase().endsWith('.md')) continue
-            const clean = name.replace(/\.md$/i, '')
-            library.push(clean)
-            if (!out.some(draft => draft.title === clean)) {
-              const lst = statSync(join(libDir, name))
-              out.push({ title: clean, chars: lst.size, updatedAt: new Date(lst.mtimeMs).toISOString() })
-            }
-          }
-        } catch { /* 客户还没有正式库目录 */ }
-        sendJson(res, { ok: true, drafts: out, library })
-      } catch { sendJson(res, { ok: true, drafts: [] }) }
+      } catch { /* 本地草稿目录不存在时继续查 Support */ }
+      try {
+        const libDir = join(LIBRARY_ROOT, client)
+        for (const name of readdirSync(libDir)) {
+          if (!name.toLowerCase().endsWith('.md')) continue
+          const st = statSync(join(libDir, name))
+          localReady.push({ title: name.replace(/\.md$/i, ''), chars: st.size, updatedAt: new Date(st.mtimeMs).toISOString() })
+        }
+      } catch { /* 客户还没有正式库目录 */ }
+
+      /* Support 是正式站的权威源；MCP 不可用时仍返回本地兼容目录。 */
+      let mcpArticles = []
+      const resolved = resolveTool(hostCtx, libraryServer, libraryServers, articlesTool, [/^list_articles$/i, /^list/i])
+      if (resolved.tool !== '') {
+        const called = await callTool(hostCtx, resolved.server, resolved.tool, { client })
+        if (called.ok) {
+          const normalized = normalizeLibraryArticles(called.value)
+          if (normalized !== null) mcpArticles = normalized
+        }
+      }
+      const merged = mergeDraftLists(localDrafts, localReady, mcpArticles)
+      sendJson(res, { ok: true, drafts: merged.drafts, library: merged.library })
     }
-    handlers[DRAFT_PATH] = (req, res) => {
+    handlers[DRAFT_PATH] = async (req, res) => {
       if (req.method !== 'GET') { methodNotAllowed(res); return }
       const url = new URL(req.url, 'http://localhost')
       const client = String(url.searchParams.get('client') ?? '').replace(/[/\\]/g, '')
+      if (!client) { sendJson(res, { ok: false, error: 'not-found' }, 404); return }
+      const title = firstString(url.searchParams.get('title'))
       try {
-        const file = safeFile(url.searchParams.get('title'))
+        const file = safeFile(title)
         const text = readFileSync(join(draftDir(client), file), 'utf8')
+        res.writeHead(200, { 'content-type': 'text/markdown; charset=utf-8', 'cache-control': 'no-store' })
+        res.end(text)
+        return
+      } catch { /* Support fallback below */ }
+      try {
+        const resolved = resolveTool(hostCtx, libraryServer, libraryServers, 'read_article', [/read_article/i, /read/i])
+        if (title === '' || resolved.tool === '') throw new Error('article-missing')
+        const called = await callTool(hostCtx, resolved.server, resolved.tool, { client, title })
+        if (!called.ok) throw new Error('article-missing')
+        const text = articleContent(called.value)
+        if (text === null) throw new Error('article-missing')
         res.writeHead(200, { 'content-type': 'text/markdown; charset=utf-8', 'cache-control': 'no-store' })
         res.end(text)
       } catch { sendJson(res, { ok: false, error: 'not-found' }, 404) }
@@ -787,17 +940,34 @@ export function create(ctx, config) {
           const alt = join(draftDir(boundKey), fileName)
           if (existsSync(alt)) src = alt
         }
-        if (!existsSync(src)) {
-          sendJson(res, { ok: false, error: 'draft-missing', detail: `草稿不存在：${displayClient}/草稿/${fileName}` }, 404)
-          return
+        const localSource = existsSync(src)
+        let content = null
+        if (localSource) {
+          content = readFileSync(src, 'utf8')
+        } else {
+          /* Support-only draft：工作台卷没有镜像时，从权威文章库读正文再确认。 */
+          const readResolved = resolveTool(hostCtx, libraryServer, libraryServers, 'read_article', [/read_article/i, /read/i])
+          if (readResolved.tool === '') {
+            sendJson(res, { ok: false, error: 'draft-missing', detail: `草稿不存在：${displayClient}/草稿/${fileName}` }, 404)
+            return
+          }
+          const readCalled = await callTool(hostCtx, readResolved.server, readResolved.tool, { client: boundKey, title })
+          if (!readCalled.ok) {
+            sendJson(res, { ok: false, error: 'draft-missing', detail: `Support 草稿不存在：${title}` }, 404)
+            return
+          }
+          content = articleContent(readCalled.value)
+          if (content === null) {
+            sendJson(res, { ok: false, error: 'draft-missing', detail: `Support 草稿不存在：${title}` }, 404)
+            return
+          }
         }
-        const content = readFileSync(src, 'utf8')
         const dst = join(LIBRARY_ROOT, String(displayClient).replace(/[/\\]/g, ''), fileName)
         /* 先远端 write_article(draft:false) 用绑死的 client_key，再挪本地文件。 */
-        const writeTool = pickTool(hostCtx, libraryServer, 'write_article', [/write_article/i, /write/i])
+        const writeResolved = resolveTool(hostCtx, libraryServer, libraryServers, 'write_article', [/write_article/i, /write/i])
         let article = null
-        if (writeTool !== '') {
-          const called = await callTool(hostCtx, libraryServer, writeTool, {
+        if (writeResolved.tool !== '') {
+          const called = await callTool(hostCtx, writeResolved.server, writeResolved.tool, {
             client: boundKey,
             title,
             content,
@@ -809,18 +979,28 @@ export function create(ctx, config) {
               error: 'write-article-failed',
               detail: called.detail || called.error,
               client_key: boundKey,
-              server: libraryServer,
-              tool: writeTool,
+              server: writeResolved.server,
+              tool: writeResolved.tool,
             }, 502)
             return
           }
           article = called.value
         } else {
+          if (!localSource) {
+            sendJson(res, {
+              ok: false,
+              error: 'write-article-missing',
+              detail: 'Support 草稿已读取，但没有可用的 write_article 工具。',
+            }, 502)
+            return
+          }
           process.stderr.write('[dsh-workbench] confirm-draft：未找到 write_article，仅做本地 rename（Support 未更新）\n')
         }
         /* 本地卷：远端成功后挪/清草稿；仅本地路径时保持原 409 查重。 */
         let movedTo = null
-        if (existsSync(dst)) {
+        if (!localSource) {
+          /* Support-only draft has no local file to move. */
+        } else if (existsSync(dst)) {
           if (article === null) {
             sendJson(res, { ok: false, error: 'already-exists', detail: '正式库已有同名文章，未覆盖' }, 409)
             return

@@ -7,7 +7,7 @@
     - id: dsh-workbench
       name: dsh-workbench
       config:
-        knowledgeServer: sora-knowledge
-        libraryServer: sora-articles
+        knowledgeServer: knowledge
+        libraryServer: articles
         clientsTool: list_clients
         articlesTool: list_articles

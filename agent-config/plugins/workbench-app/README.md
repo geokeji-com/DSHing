@@ -6,7 +6,7 @@
 
 | 半边 | 干什么 |
 |---|---|
-| `lib/index.js`（宿主） | 浏览器做不到的事：调 MCP。**不自己配地址、不碰 bearer** —— 通过 `ctx.tools.execute()` 调你已经在「设置 → MCP」里挂好的服务器（默认 `sora-knowledge` / `sora-articles`）。你在设置里换地址/换服务器，工作台自动跟着走。路由含 `GET /api/workbench/clients`（**不缓存**）、`POST/GET /api/workbench/task-meta`（含 `client_key`）、`GET/POST /api/workbench/session-client`（会话↔客户索引）、`GET /api/workbench/client-map` + `POST /api/workbench/assign-client-group`（Noah 左树兼容 topic 映射）、`POST /api/workbench/confirm-draft`（**绑死 `client_key`** → Support `write_article(draft:false)`）、`GET /api/workbench/mcp`（诊断）。 |
+| `lib/index.js`（宿主） | 浏览器做不到的事：调 MCP。**不自己配地址、不碰 bearer** —— 通过 `ctx.tools.execute()` 调你已经在「设置 → MCP」里挂好的服务器（默认 `knowledge` / `articles`，兼容 `sora-knowledge` / `sora-articles`）。你在设置里换地址/换服务器，工作台自动跟着走。路由含 `GET /api/workbench/clients`（**不缓存**）、`POST/GET /api/workbench/task-meta`（含 `client_key`）、`GET/POST /api/workbench/session-client`（会话↔客户索引）、`GET /api/workbench/client-map` + `POST /api/workbench/assign-client-group`（Noah 左树兼容 topic 映射）、`POST /api/workbench/confirm-draft`（**绑死 `client_key`** → Support `write_article(draft:false)`）、`GET /api/workbench/mcp`（诊断）。 |
 | `lib/client.js`（浏览器） | 全部界面。注册 `main` 面板（key `workbench` 装配台）+ Noah 同构 `shell.overlay` 左栏；客户项目旧面板源码保留但不再注册为默认入口，令牌层从原型 `styles.css:8-80` 原样搬过来。 |
 
 ## 为什么是「新面板」而不是「换外壳」
