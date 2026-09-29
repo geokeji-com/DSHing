@@ -1112,7 +1112,13 @@ window.__ModuleLoader__.load({
 												onClick: function () { openSession(it.id); },
 											}, label);
 										}) : null);
-								}))));
+								}))),
+					h("div", {
+						className: "wb_nvFoot",
+						title: me.uid || me.label,
+					},
+						h("div", { className: "wb_nvFootName" }, me.label),
+						me.sub ? h("div", { className: "wb_nvFootSub" }, me.sub) : null));
 			}
 
 			/* ---- 挑篇（原型 C6 pick-row）--------------------------------
