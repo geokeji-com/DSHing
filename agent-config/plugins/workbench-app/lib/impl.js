@@ -25,9 +25,11 @@
  *   GET /api/workbench/mcp                  → 诊断：这台 Host 挂了哪些 MCP、各有哪些工具
  *   POST/GET /api/workbench/task-meta       → 装配参数；POST 持久化 client_key(CUS-*) + display client
  *   GET/POST /api/workbench/session-client  → session_id ↔ client_key 索引
+ *   POST /api/workbench/confirm-draft       → 绑死 client_key → write_article(draft:false) + 本地草稿挪正式
  */
 
-import { mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, existsSync, renameSync } from 'node:fs'
+
+import { mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, existsSync, renameSync, unlinkSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 
 const CLIENTS_PATH = '/api/workbench/clients'
@@ -291,8 +293,105 @@ function mergeSessionClientBinding(index, sessionId, entry) {
   return next
 }
 
-function sendJson(res, body) {
-  res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+
+/**
+ * 读 task-meta JSON；坏 id / 缺文件 → null。
+ * @param {string} metaId
+ * @returns {object|null}
+ */
+function readTaskMetaRecord(metaId) {
+  const id = firstString(metaId)
+  if (!/^wbtm-[a-z0-9-]+$/.test(id)) return null
+  try {
+    const raw = readFileSync(join(TASK_META_DIR, id + '.json'), 'utf8')
+    const parsed = JSON.parse(raw)
+    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed
+  } catch { /* missing / bad */ }
+  return null
+}
+
+/**
+ * 确认入库绑死客户：优先 session-client 索引，其次 task-meta。
+ * body 可带 session_id / meta_id / client_key / client。
+ * @returns {{ client_key: string, client: string, source: string }|null}
+ */
+function resolveBoundClientForConfirm(body) {
+  const parsed = body !== null && typeof body === 'object' && !Array.isArray(body) ? body : {}
+  const sessionId = firstString(parsed.session_id, parsed.session)
+  const metaId = firstString(parsed.meta_id, parsed.metaId)
+  if (sessionId !== '') {
+    const index = readSessionClientIndex()
+    const entry = index[sessionId]
+    if (entry !== null && typeof entry === 'object') {
+      const key = firstString(entry.client_key)
+      if (key !== '') {
+        return {
+          client_key: key,
+          client: firstString(entry.client, parsed.client),
+          source: 'session-client',
+        }
+      }
+      const viaMeta = firstString(entry.meta_id)
+      if (viaMeta !== '') {
+        const meta = readTaskMetaRecord(viaMeta)
+        const key2 = firstString(meta && meta.client_key)
+        if (key2 !== '') {
+          return {
+            client_key: key2,
+            client: firstString(meta && meta.client, entry.client, parsed.client),
+            source: 'session-task-meta',
+          }
+        }
+      }
+    }
+  }
+  if (metaId !== '') {
+    const meta = readTaskMetaRecord(metaId)
+    const key = firstString(meta && meta.client_key)
+    if (key !== '') {
+      return {
+        client_key: key,
+        client: firstString(meta && meta.client, parsed.client),
+        source: 'task-meta',
+      }
+    }
+  }
+  const bodyKey = firstString(parsed.client_key)
+  if (bodyKey !== '') {
+    return {
+      client_key: bodyKey,
+      client: firstString(parsed.client),
+      source: 'body',
+    }
+  }
+  return null
+}
+
+/**
+ * body 声明的 client / client_key 必须与会话绑定一致。
+ * @returns {{ ok:true }|{ ok:false, error:string, detail?:string }}
+ */
+function assertConfirmClientMatch(bound, body) {
+  if (bound === null || typeof bound !== 'object' || firstString(bound.client_key) === '') {
+    return { ok: false, error: 'client-unbound', detail: '会话未绑定 client_key，无法确认入库' }
+  }
+  const parsed = body !== null && typeof body === 'object' && !Array.isArray(body) ? body : {}
+  const reqKey = firstString(parsed.client_key)
+  const reqClient = firstString(parsed.client)
+  const boundKey = firstString(bound.client_key)
+  const boundClient = firstString(bound.client)
+  if (reqKey !== '' && reqKey !== boundKey) {
+    return { ok: false, error: 'client-mismatch', detail: `body.client_key=${reqKey} ≠ bound=${boundKey}` }
+  }
+  if (reqClient !== '' && boundClient !== '' && reqClient !== boundClient && reqClient !== boundKey) {
+    return { ok: false, error: 'client-mismatch', detail: `body.client=${reqClient} ≠ bound.client=${boundClient}` }
+  }
+  return { ok: true }
+}
+
+function sendJson(res, body, status) {
+  const code = Number.isFinite(status) && status >= 100 ? status : 200
+  res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
   res.end(JSON.stringify(body))
 }
 
@@ -303,7 +402,7 @@ function methodNotAllowed(res) {
 
 /* 归一化函数导出，只为离线自检用（宿主加载器只用 apply）：
  *   node --input-type=module -e "import('./lib/index.js').then(m => …)" */
-export { normalize, normalizeArticles, payloadOf, taskMetaRecordFromBody, readSessionClientIndex, writeSessionClientIndex, mergeSessionClientBinding }
+export { normalize, normalizeArticles, payloadOf, taskMetaRecordFromBody, readSessionClientIndex, writeSessionClientIndex, mergeSessionClientBinding, resolveBoundClientForConfirm, assertConfirmClientMatch, readTaskMetaRecord }
 
 /**
  * 造出这一版实现的路由处理函数。壳（lib/index.js）每个请求调一次，
@@ -596,22 +695,93 @@ export function create(ctx, config) {
         res.end(text)
       } catch { sendJson(res, { ok: false, error: 'not-found' }, 404) }
     }
-    handlers[CONFIRM_DRAFT_PATH] = (req, res) => {
+    handlers[CONFIRM_DRAFT_PATH] = async (req, res) => {
       if (req.method !== 'POST') { methodNotAllowed(res); return }
       let body = ''
       req.on('data', c => { body += c; if (body.length > 1e6) req.destroy() })
-      req.on('end', () => {
-        try {
-          const { client, title } = JSON.parse(body || '{}')
-          const src = join(draftDir(client), safeFile(title))
-          const dst = join(LIBRARY_ROOT, String(client).replace(/[/\\]/g, ''), safeFile(title))
-          if (!existsSync(src)) { sendJson(res, { ok: false, error: 'draft-missing' }, 404); return }
-          if (existsSync(dst)) { sendJson(res, { ok: false, error: 'already-exists', detail: '正式库已有同名文章，未覆盖' }, 409); return }
+      await new Promise(resolve => req.on('end', resolve))
+      let parsed
+      try { parsed = JSON.parse(body || '{}') } catch { parsed = {} }
+      try {
+        const title = firstString(parsed.title)
+        if (title === '') {
+          sendJson(res, { ok: false, error: 'bad-request', detail: '缺少 title' }, 400)
+          return
+        }
+        /* WB-SUP P2：绑死会话 client_key；跨客户确认失败关闭。 */
+        const bound = resolveBoundClientForConfirm(parsed)
+        const match = assertConfirmClientMatch(bound, parsed)
+        if (!match.ok) {
+          sendJson(res, { ok: false, error: match.error, detail: match.detail || '' }, 400)
+          return
+        }
+        const boundKey = bound.client_key
+        const displayClient = firstString(bound.client, parsed.client, boundKey)
+        const fileName = safeFile(title)
+        /* 草稿目录仍按显示名（现网 write draft:true 落盘约定）；再试 client_key 目录。 */
+        let src = join(draftDir(displayClient), fileName)
+        if (!existsSync(src) && displayClient !== boundKey) {
+          const alt = join(draftDir(boundKey), fileName)
+          if (existsSync(alt)) src = alt
+        }
+        if (!existsSync(src)) {
+          sendJson(res, { ok: false, error: 'draft-missing', detail: `草稿不存在：${displayClient}/草稿/${fileName}` }, 404)
+          return
+        }
+        const content = readFileSync(src, 'utf8')
+        const dst = join(LIBRARY_ROOT, String(displayClient).replace(/[/\\]/g, ''), fileName)
+        /* 先远端 write_article(draft:false) 用绑死的 client_key，再挪本地文件。 */
+        const writeTool = pickTool(hostCtx, libraryServer, 'write_article', [/write_article/i, /write/i])
+        let article = null
+        if (writeTool !== '') {
+          const called = await callTool(hostCtx, libraryServer, writeTool, {
+            client: boundKey,
+            title,
+            content,
+            draft: false,
+          })
+          if (!called.ok) {
+            sendJson(res, {
+              ok: false,
+              error: 'write-article-failed',
+              detail: called.detail || called.error,
+              client_key: boundKey,
+              server: libraryServer,
+              tool: writeTool,
+            }, 502)
+            return
+          }
+          article = called.value
+        } else {
+          process.stderr.write('[dsh-workbench] confirm-draft：未找到 write_article，仅做本地 rename（Support 未更新）\n')
+        }
+        /* 本地卷：远端成功后挪/清草稿；仅本地路径时保持原 409 查重。 */
+        let movedTo = null
+        if (existsSync(dst)) {
+          if (article === null) {
+            sendJson(res, { ok: false, error: 'already-exists', detail: '正式库已有同名文章，未覆盖' }, 409)
+            return
+          }
+          try { unlinkSync(src) } catch { /* 远端已 ready，草稿删不掉不挡 */ }
+          movedTo = dst
+        } else {
           mkdirSync(dirname(dst), { recursive: true })
           renameSync(src, dst)
-          sendJson(res, { ok: true, movedTo: dst })
-        } catch (e) { sendJson(res, { ok: false, error: 'confirm-failed', detail: String(e && e.message ? e.message : e) }, 500) }
-      })
+          movedTo = dst
+        }
+        sendJson(res, {
+          ok: true,
+          client_key: boundKey,
+          client: displayClient,
+          title,
+          draft: false,
+          movedTo,
+          article,
+          bound_source: bound.source,
+        })
+      } catch (e) {
+        sendJson(res, { ok: false, error: 'confirm-failed', detail: String(e && e.message ? e.message : e) }, 500)
+      }
     }
 
   return { handlers }

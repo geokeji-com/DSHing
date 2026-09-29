@@ -6,7 +6,7 @@
 
 | 半边 | 干什么 |
 |---|---|
-| `lib/index.js`（宿主） | 浏览器做不到的事：调 MCP。**不自己配地址、不碰 bearer** —— 通过 `ctx.tools.execute()` 调你已经在「设置 → MCP」里挂好的服务器（默认 `sora-knowledge` / `sora-articles`）。你在设置里换地址/换服务器，工作台自动跟着走。路由含 `GET /api/workbench/clients`（**不缓存**）、`POST/GET /api/workbench/task-meta`（含 `client_key`）、`GET/POST /api/workbench/session-client`（会话↔客户索引）、`GET /api/workbench/mcp`（诊断）。 |
+| `lib/index.js`（宿主） | 浏览器做不到的事：调 MCP。**不自己配地址、不碰 bearer** —— 通过 `ctx.tools.execute()` 调你已经在「设置 → MCP」里挂好的服务器（默认 `sora-knowledge` / `sora-articles`）。你在设置里换地址/换服务器，工作台自动跟着走。路由含 `GET /api/workbench/clients`（**不缓存**）、`POST/GET /api/workbench/task-meta`（含 `client_key`）、`GET/POST /api/workbench/session-client`（会话↔客户索引）、`POST /api/workbench/confirm-draft`（**绑死 `client_key`** → Support `write_article(draft:false)`）、`GET /api/workbench/mcp`（诊断）。 |
 | `lib/client.js`（浏览器） | 全部界面。注册 `main` 面板（key `workbench` 装配台 + key `workbench-clients` 客户项目）+ `sidebar.panellist` 两行，令牌层从原型 `styles.css:8-80` 原样搬过来。 |
 
 ## 为什么是「新面板」而不是「换外壳」
@@ -58,11 +58,11 @@ dsh plugin --profile web add /path/to/plugins/dsh-workbench
 - [x] 令牌层 + 面板 + 侧栏入口
 - [x] A1 给谁写：**接真数据**（客户 / 业务线 / 服务期，全部来自 knowledge MCP）
 - [x] WB-SUP P1：左栏客户=项目分组 + 新会话绑 `client_key`（见下）
+- [x] WB-SUP P2：确认入库绑死 `client_key` → Support 同客户 `ready`（见下）
 - [ ] A2 主题：只有两个标签的壳；A3 薄弱问句表（数据源未定，先留空）
 - [ ] A4 拖杆 / A5 怎么写 / A7 放大编辑（拖杆/怎么写已有壳）
 - [ ] C 区：会话页渲染形态
-- [ ] R 区：右栏审核（草稿审核 tab 已接；硬规则检查脚本还没写）
-- [ ] P2：确认入库改 Support API / 自动 ready（**本 PR 不做**）
+- [ ] R 区：右栏硬规则检查脚本还没写（草稿审核 tab / 确认入库已接 P2）
 
 ## 客户项目分组（WB-SUP P1）
 
@@ -72,7 +72,17 @@ dsh plugin --profile web add /path/to/plugins/dsh-workbench
 | 新会话 | 装配台发送 → `POST /api/workbench/task-meta` 带 `client_key`+`client` → `startSession` → PromptRelay 拿到 session id 后 `POST /api/workbench/session-client` |
 | 左栏 | 「客户项目」面板：每组 = `list_clients` 一个客户（一级）；组下为索引里该 `client_key` 的会话；「＋ 在此客户下新开会话」预填装配台客户 |
 | 未归类 | 索引里无 / 空 `client_key` 的绑定；**历史原生会话**若不在索引里，仍只出现在官方会话列表（本面板列不出全量官方会话 —— 原生 list API 未暴露时的已知局限） |
-| 落库 | 仍是确认入库 A；本阶段**不**改 confirm-draft 为自动 ready |
+| 落库 | 确认入库 A（见 P2） |
+
+## 确认入库绑死客户（WB-SUP P2）
+
+| 项 | 行为 |
+|---|---|
+| 策略 | **A 确认入库**：默认写作仍 `draft:true`；人点「确认入库」才变 Support `ready`；**不**自动外发 |
+| 强制键 | `POST /api/workbench/confirm-draft` 使用会话索引 / task-meta 的 `client_key`；审核 UI 带上解析到的 `client_key` |
+| 跨客户 | body `client` / `client_key` 与绑定不一致 → **400** `{ok:false,error:'client-mismatch'}`，不写库 |
+| Support | 确认时调 MCP `write_article`，参数 `client=<bound client_key>`、`draft:false`；文章落在该客户下且 `status=ready` |
+| 兼容 | 无 `write_article` 工具时退回本地 rename（打 stderr 警告）；有工具时先远端再挪本地草稿 |
 
 ## 不能忘的三条（来自原型说明.md）
 
