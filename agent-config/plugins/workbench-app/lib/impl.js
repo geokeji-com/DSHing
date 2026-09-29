@@ -23,6 +23,8 @@
  *   GET /api/workbench/skills               → { ok, skills:  [{name,description,whenToUse,source,provider}] }
  *   GET /api/workbench/articles?client=NAME → { ok, articles:[{id,title}] }
  *   GET /api/workbench/mcp                  → 诊断：这台 Host 挂了哪些 MCP、各有哪些工具
+ *   POST/GET /api/workbench/task-meta       → 装配参数；POST 持久化 client_key(CUS-*) + display client
+ *   GET/POST /api/workbench/session-client  → session_id ↔ client_key 索引
  */
 
 import { mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, existsSync, renameSync } from 'node:fs'
@@ -38,6 +40,8 @@ const TASK_STATUS_PATH = '/api/workbench/task-status'
 const DRAFTS_PATH = '/api/workbench/drafts'
 const DRAFT_PATH = '/api/workbench/draft'
 const CONFIRM_DRAFT_PATH = '/api/workbench/confirm-draft'
+const SESSION_CLIENT_PATH = '/api/workbench/session-client'
+const SESSION_CLIENT_INDEX = join(TASK_META_DIR, 'session-client-index.json')
 const WORKSPACE_ROOT = '/home/dsh/生文'
 const LIBRARY_ROOT = '/srv/dsh-data/文章库'
 
@@ -237,6 +241,56 @@ function normalizeArticles(raw) {
   return out
 }
 
+/** 从 POST body 造 task-meta 落盘记录：强制字符串化 client_key / client。 */
+function taskMetaRecordFromBody(parsed) {
+  const base = parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? { ...parsed } : {}
+  const clientKey = firstString(base.client_key)
+  const client = firstString(base.client)
+  if (clientKey !== '') base.client_key = clientKey
+  else delete base.client_key
+  if (client !== '') base.client = client
+  base.savedAt = new Date().toISOString()
+  return base
+}
+
+/** 读 session↔client 索引；坏文件当空对象。 */
+function readSessionClientIndex(filePath) {
+  const path = filePath || SESSION_CLIENT_INDEX
+  try {
+    const raw = readFileSync(path, 'utf8')
+    const parsed = JSON.parse(raw)
+    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed
+  } catch { /* 缺文件 / 坏 JSON → 空 */ }
+  return {}
+}
+
+/** 原子写索引。 */
+function writeSessionClientIndex(index, filePath) {
+  const path = filePath || SESSION_CLIENT_INDEX
+  mkdirSync(dirname(path), { recursive: true })
+  const tmp = path + '.tmp'
+  writeFileSync(tmp, JSON.stringify(index, null, 2))
+  renameSync(tmp, path)
+}
+
+/**
+ * 合并一条绑定。session_id 必填；client_key 可空（表示未归类占位）。
+ * @returns 更新后的 entry。
+ */
+function mergeSessionClientBinding(index, sessionId, entry) {
+  const id = firstString(sessionId)
+  if (id === '') throw new Error('missing-session-id')
+  const prev = (index[id] !== null && typeof index[id] === 'object') ? index[id] : {}
+  const next = {
+    client_key: firstString(entry && entry.client_key, prev.client_key),
+    client: firstString(entry && entry.client, prev.client),
+    meta_id: firstString(entry && entry.meta_id, prev.meta_id),
+    bound_at: firstString(entry && entry.bound_at) || new Date().toISOString(),
+  }
+  index[id] = next
+  return next
+}
+
 function sendJson(res, body) {
   res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
   res.end(JSON.stringify(body))
@@ -249,7 +303,7 @@ function methodNotAllowed(res) {
 
 /* 归一化函数导出，只为离线自检用（宿主加载器只用 apply）：
  *   node --input-type=module -e "import('./lib/index.js').then(m => …)" */
-export { normalize, normalizeArticles, payloadOf }
+export { normalize, normalizeArticles, payloadOf, taskMetaRecordFromBody, readSessionClientIndex, writeSessionClientIndex, mergeSessionClientBinding }
 
 /**
  * 造出这一版实现的路由处理函数。壳（lib/index.js）每个请求调一次，
@@ -393,11 +447,12 @@ export function create(ctx, config) {
         const id = 'wbtm-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6)
         try {
           mkdirSync(TASK_META_DIR, { recursive: true })
+          const record = taskMetaRecordFromBody(parsed)
           writeFileSync(
             join(TASK_META_DIR, id + '.json'),
-            JSON.stringify({ ...parsed, savedAt: new Date().toISOString() }, null, 2),
+            JSON.stringify(record, null, 2),
           )
-          sendJson(res, { ok: true, id })
+          sendJson(res, { ok: true, id, client_key: record.client_key || '', client: record.client || '' })
         } catch (error) {
           sendJson(res, { ok: false, error: 'save-failed', detail: String(error && error.message ? error.message : error) })
         }
@@ -413,6 +468,61 @@ export function create(ctx, config) {
           res.end(raw)
         } catch {
           sendJson(res, { ok: false, error: 'not-found' })
+        }
+        return
+      }
+      methodNotAllowed(res)
+    }
+
+    /* ---- session ↔ client 索引（WB-SUP P1）--------------------------
+     * 形状：{ "<session_id>": { client_key, client, meta_id, bound_at } }
+     * 存 /home/dsh/.dsh/workbench-meta/session-client-index.json。
+     * GET ?session= 单条；?client_key= 该客户下会话；无 query 全量。
+     * POST 绑定（装配台起会话后拿到 session id 时写）。失败不挡发消息。 */
+    handlers[SESSION_CLIENT_PATH] = async (req, res) => {
+      if (req.method === 'GET') {
+        const url = new URL(req.url ?? '/', 'http://dsh.invalid')
+        const session = (url.searchParams.get('session') ?? '').trim()
+        const clientKey = (url.searchParams.get('client_key') ?? '').trim()
+        const index = readSessionClientIndex()
+        if (session !== '') {
+          const binding = index[session] !== undefined ? index[session] : null
+          sendJson(res, { ok: true, session, binding })
+          return
+        }
+        if (clientKey !== '') {
+          const sessions = []
+          for (const [sid, entry] of Object.entries(index)) {
+            if (entry !== null && typeof entry === 'object' && firstString(entry.client_key) === clientKey) {
+              sessions.push({ session_id: sid, ...entry })
+            }
+          }
+          sessions.sort((a, b) => String(b.bound_at || '').localeCompare(String(a.bound_at || '')))
+          sendJson(res, { ok: true, client_key: clientKey, sessions })
+          return
+        }
+        sendJson(res, { ok: true, index })
+        return
+      }
+      if (req.method === 'POST') {
+        let body = ''
+        req.on('data', chunk => { body += chunk })
+        await new Promise(resolve => req.on('end', resolve))
+        let parsed
+        try { parsed = JSON.parse(body || '{}') } catch { parsed = {} }
+        const sessionId = firstString(parsed.session_id, parsed.session)
+        if (sessionId === '') {
+          sendJson(res, { ok: false, error: 'bad-request', detail: '缺少 session_id' })
+          return
+        }
+        try {
+          const index = readSessionClientIndex()
+          const entry = mergeSessionClientBinding(index, sessionId, parsed)
+          writeSessionClientIndex(index)
+          sendJson(res, { ok: true, session_id: sessionId, binding: entry })
+        } catch (error) {
+          process.stderr.write(`[dsh-workbench] session-client 绑定失败：${String(error && error.message ? error.message : error)}\n`)
+          sendJson(res, { ok: false, error: 'save-failed', detail: String(error && error.message ? error.message : error) })
         }
         return
       }
