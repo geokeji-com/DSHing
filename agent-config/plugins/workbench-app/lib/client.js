@@ -213,6 +213,9 @@ window.__ModuleLoader__.load({
 			".wb_nvItem{width:100%;border:none;background:none;text-align:left;font-size:12.5px;color:#4b5563;cursor:pointer;padding:6px 6px 6px 18px;border-radius:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}",
 			".wb_nvItem:hover{background:#eef2f7;color:#111827;}",
 			".wb_nvCur,.wb_nvItem.wb_nvCur{background:#e8f0fe;color:#1d4ed8;}",
+			".wb_nvFoot{margin-top:auto;padding:8px 6px 4px;border-top:1px solid #e5e7eb;display:flex;flex-direction:column;gap:2px;flex:0 0 auto;}",
+			".wb_nvFootName{font-size:13px;font-weight:600;color:#111827;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}",
+			".wb_nvFootSub{font-size:11px;color:#9ca3af;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}",
 
 			/* 挑篇条（原型 pick-row）：改哪几篇 + 编号格子 + 全选 + 红绿点（机器检查未接，置灰） */
 			".wb_pkRow{display:flex;align-items:center;gap:8px;margin:0 16px -7px;padding:8px 16px 10px;border:1px solid #e5e7eb;border-bottom:none;border-radius:14px 14px 0 0;background:#fff;position:relative;z-index:1;box-shadow:0 -1px 2px rgba(16,24,40,.03);}",
@@ -937,6 +940,29 @@ window.__ModuleLoader__.load({
 				/* shell.overlay 的 props 里没有 ctx —— 注册时用闭包把插件 ctx 传进来 */
 				var ctx = (props && props.wbCtx) ? props.wbCtx : (props && props.ctx ? props.ctx : null);
 				wbNavCtx = ctx;
+				var meSt = React.useState({ label: "…", sub: "", uid: "" });
+				var me = meSt[0];
+				React.useEffect(function () {
+					var cancelled = false;
+					fetch("/api/me", { credentials: "same-origin" }).then(function (r) {
+						if (!r.ok) throw new Error("me " + r.status);
+						return r.json();
+					}).then(function (j) {
+						if (cancelled || !j) return;
+						var uid = j.uid ? String(j.uid) : "";
+						var name = j.display_name ? String(j.display_name).trim() : "";
+						var email = j.email ? String(j.email).trim() : "";
+						var label = name || email || (uid ? uid.slice(0, 8) : "未识别登录");
+						var sub = "";
+						if (name && email) sub = email;
+						else if (!name && email && uid) sub = uid.slice(0, 8);
+						else if (name && uid) sub = uid.slice(0, 8);
+						meSt[1]({ label: label, sub: sub, uid: uid });
+					}).catch(function () {
+						if (!cancelled) meSt[1]({ label: "未识别登录", sub: "", uid: "" });
+					});
+					return function () { cancelled = true; };
+				}, []);
 				/* 右栏拖宽（原型 R1/R4）：拖动条贴在官方右栏列左缘，
 				 * 改官方 frame 的最后一列宽；宽度记 sessionStorage，下次恢复。
 				 * 官方重渲染会清掉注入节点 —— tick 里定期补挂。 */
