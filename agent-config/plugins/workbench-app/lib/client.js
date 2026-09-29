@@ -18,8 +18,8 @@ window.__ModuleLoader__.load({
 		 *    就渲染原型里那块表格/那排标签的**壳**加一句空态说明，不放编造的行。
 		 *    假数据会让人误以为接了，然后照着假形状去写后端。
 		 * 2. **只落在 DSH 的扩展点上。** 新的 `main` 面板 + `sidebar.panellist`
-		 *    + 客户项目面板。root / conversation / composer 仍不碰原生行为。
-		 *    WB-SUP P1：左栏「客户=项目」分组产品上放开（注入客户项目 UI）；
+		 *    + Noah 同构 `shell.overlay` 左栏。root / conversation / composer 仍不碰原生行为。
+		 *    WB-SUP P1：正式绑定索引仍保留；左树用 overlay 呈现客户分组，
 		 *    仍禁止用脆弱的 hash 类名刮官方 DOM。
 		 *
 		 * 类名全是自己的 `wb_` 前缀：CSS 是手写的（本包没有 tsdown 构建，
@@ -199,6 +199,36 @@ window.__ModuleLoader__.load({
 			".wb_refX{border:none; background:transparent; color:var(--wb-dim2); padding:0 4px; font-size:14px; line-height:1;}",
 			".wb_refX:hover{color:var(--wb-bad);}",
 
+			/* 自绘左侧栏 */
+			".wb_nv{position:fixed;left:0;top:0;bottom:0;width:248px;background:#f9fafb;border-right:1px solid #e5e7eb;display:flex;flex-direction:column;padding:12px 10px;gap:8px;z-index:40;}",
+			".wb_nvBrand{padding:2px 6px 6px;}",
+			".wb_nvBrandT{font-size:15px;font-weight:700;color:#111827;}",
+			".wb_nvNew{border:1px solid #e5e7eb;background:#fff;border-radius:8px;padding:8px 10px;font-size:13px;color:#111827;cursor:pointer;text-align:left;}",
+			".wb_nvNew{background:#2563eb;border-color:#2563eb;color:#fff;font-weight:600;}",
+			".wb_nvSearch{border:1px solid #e5e7eb;border-radius:8px;padding:6px 10px;font-size:12.5px;outline:none;background:#fff;}",
+			".wb_nvTree{flex:1 1 auto;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:2px;}",
+			".wb_nvHint{padding:10px 6px;font-size:12px;color:#9ca3af;}",
+			".wb_nvGroupName{width:100%;border:none;background:none;text-align:left;font-size:12.5px;font-weight:600;color:#374151;cursor:pointer;padding:6px 6px;border-radius:6px;}",
+			".wb_nvGroupName:hover{background:#eef2f7;}",
+			".wb_nvItem{width:100%;border:none;background:none;text-align:left;font-size:12.5px;color:#4b5563;cursor:pointer;padding:6px 6px 6px 18px;border-radius:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}",
+			".wb_nvItem:hover{background:#eef2f7;color:#111827;}",
+			".wb_nvCur,.wb_nvItem.wb_nvCur{background:#e8f0fe;color:#1d4ed8;}",
+
+			/* 挑篇条（原型 pick-row）：改哪几篇 + 编号格子 + 全选 + 红绿点（机器检查未接，置灰） */
+			".wb_pkRow{display:flex;align-items:center;gap:8px;margin:0 16px -7px;padding:8px 16px 10px;border:1px solid #e5e7eb;border-bottom:none;border-radius:14px 14px 0 0;background:#fff;position:relative;z-index:1;box-shadow:0 -1px 2px rgba(16,24,40,.03);}",
+			".wb_pkK{flex:0 0 auto;font-size:11.5px;color:#6b7280;}",
+			".wb_pkChips{flex:1 1 auto;min-width:0;display:flex;gap:4px;flex-wrap:wrap;}",
+			".wb_pkChip{flex:0 0 auto;min-width:26px;height:24px;border:1px solid #e5e7eb;border-radius:7px;background:#fff;font-size:11.5px;color:#6b7280;cursor:pointer;padding:0 6px;}",
+			".wb_pkChip.is-on{border-color:#2563eb;background:#eff6ff;color:#2563eb;font-weight:600;}",
+			".wb_pkAll{flex:0 0 auto;border:1px solid #e5e7eb;background:#fff;border-radius:7px;padding:3px 10px;font-size:11.5px;color:#374151;cursor:pointer;}",
+			".wb_pkDot{flex:0 0 auto;width:26px;height:24px;border-radius:7px;border:1px solid #e5e7eb;cursor:pointer;position:relative;padding:0;}",
+			".wb_pkDot::after{content:\"\";position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:9px;height:9px;border-radius:50%;}",
+			".wb_pkDot.red{background:#fdecec;}",
+			".wb_pkDot.red::after{background:#e5484d;}",
+			".wb_pkDot.green{background:#e8f6ee;}",
+			".wb_pkDot.green::after{background:#22a06b;}",
+			".wb_pkDot:disabled{opacity:.4;cursor:default;}",
+
 			/* 输入区精简：收掉 附件/访问模式/模型选择（生文工作台用不到，防误触） */
 			"button[aria-label='添加附件'],button[aria-label^='访问模式'],button[aria-label^='选择模型'],button[aria-label='指令']{display:none !important;}",
 
@@ -235,26 +265,40 @@ window.__ModuleLoader__.load({
 			".wb_rv{display:flex;flex-direction:column;height:100%;min-height:0;overflow:hidden;}",
 			".wb_rvHead{display:flex;align-items:center;gap:10px;padding:12px 14px 8px;}",
 			".wb_rvDot{color:#e5484d;font-size:10px;}",
+			".wb_rvDot.is-ok{color:#16a34a;}",
+			".wb_rvChev{margin-left:auto;color:#9ca3af;font-size:11px;}",
 			".wb_rvState{font-size:12.5px;font-weight:600;color:#111827;}",
 			".wb_rvSel{font-size:12px;color:#374151;background:#f3f4f6;border-radius:7px;padding:3px 10px;}",
-			".wb_rvCheck{margin-left:auto;border:1px solid #e5e7eb;background:#fff;border-radius:7px;padding:4px 12px;font-size:12px;cursor:pointer;}",
+			".wb_rvCheck{margin-left:auto;border:1px solid #e5e7eb;background:#fff;border-radius:7px;padding:3px 10px;font-size:11px;cursor:pointer;}",
 			".wb_rvCheck:disabled{opacity:.5;cursor:default;}",
-			".wb_rvProg{display:flex;justify-content:space-between;padding:2px 14px 10px;font-size:12.5px;font-weight:600;color:#374151;border-bottom:1px solid #eef0f3;}",
+			".wb_rvProg{display:flex;justify-content:space-between;align-items:center;padding:5px 12px;font-size:11px;color:#6b7280;border-bottom:1px solid #eef0f3;}",
+			".wb_rvCount{color:#374151;font-weight:600;}",
 			".wb_rv .wb_reviewMain{flex:1 1 0;min-width:0;min-height:0;overflow-y:auto;display:flex;flex-direction:column;padding:0 14px;background:#fff;}",
 			".wb_rvHint{color:#9ca3af;}",
 			".wb_rvEmpty2{padding:20px 14px;color:#9ca3af;font-size:12.5px;}",
 			".wb_rvCols{flex:1;display:flex;min-height:0;border-top:1px solid #eef0f3;}",
-			".wb_rv .wb_reviewList{flex:0 0 240px;width:240px;max-width:240px;min-height:0;overflow-y:auto;padding:8px;gap:6px;border-right:1px solid #eef0f3;}",
-			".wb_rv .wb_reviewItem{display:flex;flex-direction:column;align-items:flex-start;gap:2px;width:100%;padding:8px 10px;border:1px solid #eef0f3;border-radius:9px;background:#fff;cursor:pointer;text-align:left;}",
+			".wb_rv .wb_reviewList{flex:0 0 152px;width:152px;max-width:152px;min-height:0;overflow-y:auto;padding:0;gap:0;border-right:1px solid #eef0f3;background:#fafbfc;}",
+			".wb_rv .wb_reviewItem{display:none;}",
+			".wb_ri{display:flex;align-items:center;gap:6px;width:100%;text-align:left;padding:6px 8px;font-size:11.5px;color:#4b5563;cursor:pointer;border-bottom:1px solid #f1f2f4;}",
+			".wb_ri:hover{background:#f3f4f6;color:#111827;}",
+			".wb_ri.picked{background:#eff6ff;}",
+			".wb_ri.is-on{background:#eef1f5;color:#111827;box-shadow:inset 2px 0 0 #2563eb;}",
+			".wb_riNo{flex:0 0 auto;color:#9ca3af;font-variant-numeric:tabular-nums;}",
+			".wb_riT{flex:1;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;}",
+			".wb_ri.done{background:#eaf7f0;color:#15803d;}",
+			".wb_ri.done .wb_riNo{color:#15803d;font-weight:700;}",
+			".wb_ri.done .wb_riT{color:#15803d;}",
+			".wb_rvDoneSeg{flex:0 0 auto;max-height:38%;overflow-y:auto;border-top:1px solid #eef0f3;}",
+			".wb_rvSep{display:flex;align-items:center;gap:6px;padding:5px 8px;font-size:10.5px;color:#9ca3af;background:#fafbfc;border-bottom:1px solid #f1f2f4;}",
 			".wb_rv .wb_reviewItem[data-on='1']{border-color:#2563eb;background:#eff6ff;}",
-			".wb_rvChk{flex:0 0 auto;width:16px;height:16px;border:1.5px solid #d1d5db;border-radius:5px;background:#fff;font-size:11px;line-height:1;color:#fff;cursor:pointer;padding:0;}",
-			".wb_rvChk[data-on='1']{border-color:#2563eb;background:#2563eb;}",
 			".wb_rvItemBody{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1 1 auto;}",
 			".wb_rvNum{display:inline-block;min-width:18px;margin-right:6px;color:#9ca3af;font-variant-numeric:tabular-nums;}",
 			".wb_rv .wb_reviewItem{flex-direction:row;align-items:center;gap:8px;}",
 			".wb_rvIdx{font-size:12.5px;font-weight:600;color:#111827;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}",
 			".wb_rv .wb_reviewItemMeta{font-size:11px;color:#9ca3af;}",
-			".wb_rvFoot{display:flex;gap:10px;padding:12px 14px;border-top:1px solid #eef0f3;}",
+			".wb_rvFoot{display:flex;gap:8px;padding:10px;border-top:1px solid #eef0f3;flex-wrap:wrap;}",
+			".wb_rfHint{flex:1 1 100%;font-size:11px;color:#9ca3af;text-align:center;padding-bottom:2px;}",
+			".wb_rvFoot .wb_rvConfirm,.wb_rvFoot .wb_rvConfirmAll{padding:6px 0;font-size:12.5px;}",
 			".wb_rvConfirm{flex:1;padding:10px 0;border:1px solid #e5e7eb;background:#fff;color:#111827;border-radius:9px;font-size:13.5px;font-weight:600;cursor:pointer;}",
 			".wb_rvConfirm:disabled{opacity:.45;cursor:default;}",
 			".wb_rvConfirmAll{flex:1;padding:10px 0;border:none;background:#2563eb;color:#fff;border-radius:9px;font-size:13.5px;font-weight:600;cursor:pointer;}",
@@ -344,6 +388,7 @@ window.__ModuleLoader__.load({
 			".wb_cgNew:hover{border-style:solid;}",
 			".wb_cgNote{padding:10px 8px 0; font-size:11px; color:var(--wb-dim2); line-height:1.6;}",
 
+
 			/* 空态 */
 			".wb_empty{",
 			"  height:100%; min-height:110px; display:flex; flex-direction:column;",
@@ -373,6 +418,30 @@ window.__ModuleLoader__.load({
 		}
 
 		var WORKBENCH_KEY = "workbench";
+
+		/* Noah UI API/key registries. P1/P2 routes remain the formal source of truth. */
+		var WB_API = {
+			clients: "/api/workbench/clients",
+			skills: "/api/workbench/skills",
+			articles: "/api/workbench/articles",
+			clientMap: "/api/workbench/client-map",
+			assignGroup: "/api/workbench/assign-client-group",
+			taskMeta: "/api/workbench/task-meta",
+			taskStatus: "/api/workbench/task-status",
+			drafts: "/api/workbench/drafts",
+			draft: "/api/workbench/draft",
+			confirmDraft: "/api/workbench/confirm-draft",
+			sessionClient: "/api/workbench/session-client",
+		};
+		var WB_KEY = {
+			pendingMeta: "wb-pending-meta",
+			pendingClient: "wb-pending-client",
+			pendingTopic: "wb-pending-topic",
+			taskMetaId: "wb-task-meta-id",
+			metaFor: "wb-meta-for-",
+			navW: "wb-nav-w",
+			rightbarW: "wb-rightbar-w",
+		};
 		var CLIENT_PROJECTS_KEY = "workbench-clients";
 
 		/* ---- 侧栏那一行的图标 -------------------------------------------- */
@@ -537,6 +606,7 @@ window.__ModuleLoader__.load({
 					client_key: bind.client_key || "",
 					client: bind.client || "",
 					meta_id: bind.meta_id || "",
+					topic: bind.topic || "",
 				}),
 			})
 				.then(function (r) { return r.json().catch(function () { return {}; }); })
@@ -545,6 +615,11 @@ window.__ModuleLoader__.load({
 						console.warn("[dsh-workbench] session-client 绑定未成功：", body && (body.error || body.detail) || "unknown");
 						return;
 					}
+					/* Noah 兼容登记：保留 topic，旧壳/左树也能读到。 */
+					fetch(WB_API.assignGroup, {
+						method: "POST", headers: { "content-type": "application/json", accept: "application/json" },
+						body: JSON.stringify({ session: sessionId, client: bind.client || "", client_key: bind.client_key || "", topic: bind.topic || "", meta_id: bind.meta_id || "" }),
+					}).catch(function () { });
 					try { window.dispatchEvent(new Event("wb-session-bound")); } catch (e) { /* */ }
 				})
 				.catch(function (e) {
@@ -781,6 +856,290 @@ window.__ModuleLoader__.load({
 				}
 				loadDrafts();
 			}
+			/* ---- 自绘左侧栏（2026-09-26 定稿：官方栏整体藏掉）------------
+			 * "客户"只是前端分组：会话清单来自官方 ctx.sessions 服务，
+			 * "会话→客户"来自我们自己的映射表；新客户在装配台勾选即出现，
+			 * 不需要预先建任何组。绝不改动官方组件内部（历史教训：一改就崩）。 */
+			var WB_NAV_W = 248;
+			var wbNavState = { sessions: null, map: {}, bindings: {}, customers: [], q: "", open: {}, current: "", navW: 248 };
+			try {
+				var savedW = parseInt(sessionStorage.getItem(WB_KEY.navW) || "0", 10);
+				if (savedW >= 200 && savedW <= 480) wbNavState.navW = savedW;
+			} catch (e) { }
+			/* 官方会重设 frame 列宽（开右栏/resize 时写回），tick 里持续校正第一列 */
+			function wbNavTakeFrame() {
+				try {
+					var fr = document.querySelector('[class*="frame"]');
+					if (fr === null || fr.style.gridTemplateColumns === "") return;
+					var cols = fr.style.gridTemplateColumns.split(/\s+/);
+					var want = wbNavState.navW + "px";
+					if (cols[0] !== want) { cols[0] = want; fr.style.gridTemplateColumns = cols.join(" "); }
+				} catch (e) { }
+			}
+			var wbNavSubs = [];
+			function wbNavEmit() { wbNavSubs.forEach(function (f) { try { f(); } catch (e) { } }); }
+			function wbNavRefresh() {
+				/* 组装清单优先读正式 P1 session-client 索引，再合并 Noah 的
+				 * client-map（topic/旧会话兼容）。客户显示名来自 list_clients。
+				 * 单个兼容路由尚未热上的过渡期不应遮住正式索引。 */
+				function readNav(url) {
+					return fetch(url, { headers: { accept: "application/json" } }).then(readJson).catch(function () { return {}; });
+				}
+				Promise.all([
+					readNav(WB_API.sessionClient),
+					readNav(WB_API.clientMap),
+					readNav(WB_API.clients),
+				]).then(function (rows) {
+					var bindingBody = rows[0] || {};
+					var mapBody = rows[1] || {};
+					var clientBody = rows[2] || {};
+					if (bindingBody.ok === true) wbNavState.bindings = bindingBody.index || {};
+					if (mapBody.ok === true) wbNavState.map = mapBody.map || {};
+					if (clientBody.ok === true) wbNavState.customers = clientBody.customers || [];
+					wbNavEmit();
+				}).catch(function () { });
+			}
+			var wbNavCtx = null;
+			var wbNavHideDone = false;
+			function wbNavHideOfficial() {
+				var doc = typeof document === "undefined" ? null : document;
+				if (doc === null) return;
+				/* 定位：官方侧栏容器 class 确实含 "sidebar"，排除右栏。
+				 * 官方 frame 是 grid（sidebarCol|centerCol|rightbarCol）。
+				 * 千万不能 display:none —— grid item 消失后 centerCol 会前移
+				 * 挤进侧栏列（实测踩坑）。做法：侧栏 DOM 宽压 0 但留在第一列，
+				 * 第一列 = 自绘栏宽度 —— 主区正好从自绘栏右侧开始，贴左的
+				 * 内容（任务卡）不被盖。官方会重设列宽，tick 持续校正。 */
+				var cand = doc.querySelectorAll('div[class*="sidebar"]:not([class*="right"])');
+				for (var i = 0; i < cand.length; i++) {
+					var el = cand[i];
+					if (el.style.width === "0") continue;   /* 已压过，offsetWidth 也会变 0 */
+					var w = el.offsetWidth;
+					if (w > 150 && w < 460) {
+						el.style.width = "0";
+						el.style.minWidth = "0";
+						el.style.overflow = "hidden";
+						el.style.flexBasis = "0";
+						el.style.margin = "0";
+						el.style.padding = "0";
+						el.style.border = "none";
+					}
+				}
+				wbNavTakeFrame();
+			}
+
+			function SidebarNav(props) {
+				var st = React.useState(0);
+				React.useEffect(function () {
+					wbNavSubs.push(function () { st[1](function (x) { return x + 1; }); });
+					return function () { wbNavSubs = wbNavSubs.filter(function (x) { return x !== undefined; }); };
+				}, []);
+				/* shell.overlay 的 props 里没有 ctx —— 注册时用闭包把插件 ctx 传进来 */
+				var ctx = (props && props.wbCtx) ? props.wbCtx : (props && props.ctx ? props.ctx : null);
+				wbNavCtx = ctx;
+				/* 右栏拖宽（原型 R1/R4）：拖动条贴在官方右栏列左缘，
+				 * 改官方 frame 的最后一列宽；宽度记 sessionStorage，下次恢复。
+				 * 官方重渲染会清掉注入节点 —— tick 里定期补挂。 */
+				function ensureGrip() {
+					try {
+						var col = document.querySelector('[class*="rightbarCol"]');
+						if (col === null) return;
+						if (col.querySelector(".wb_grip") !== null) return;
+						var g = document.createElement("div");
+						g.className = "wb_grip";
+						g.title = "拖动调宽";
+						g.style.cssText = "position:absolute;left:-4px;top:0;bottom:0;width:8px;cursor:col-resize;z-index:60;";
+						g.addEventListener("mousedown", function (ev) {
+							ev.preventDefault();
+							var fr2 = col.closest('[class*="frame"]');
+							if (fr2 === null) return;
+							function mv(e) {
+								var cols = (fr2.style.gridTemplateColumns || "").split(/\s+/);
+								if (cols.length < 3) return;
+								var w = Math.max(320, Math.min(window.innerWidth - 560, window.innerWidth - e.clientX));
+								cols[cols.length - 1] = w + "px";
+								fr2.style.gridTemplateColumns = cols.join(" ");
+								try { sessionStorage.setItem(WB_KEY.rightbarW, String(w)); } catch (er) { }
+							}
+							function up() { window.removeEventListener("mousemove", mv); window.removeEventListener("mouseup", up); }
+							window.addEventListener("mousemove", mv);
+							window.addEventListener("mouseup", up);
+						});
+						col.appendChild(g);
+						if (!ensureGrip.restored) {
+							ensureGrip.restored = true;
+							var fr = col.closest('[class*="frame"]');
+							var saved = 0;
+							try { saved = parseInt(sessionStorage.getItem(WB_KEY.rightbarW) || "0", 10); } catch (er) { }
+							if (saved >= 320 && fr !== null) {
+								var cols = (fr.style.gridTemplateColumns || "").split(/\s+/);
+								if (cols.length >= 3) { cols[cols.length - 1] = saved + "px"; fr.style.gridTemplateColumns = cols.join(" "); }
+							}
+						}
+					} catch (e) { }
+				}
+				React.useEffect(function () {
+					wbNavRefresh();
+					var stop = false;
+					function tick() { if (!stop) { wbNavRefresh(); wbNavHideOfficial(); ensureGrip(); } }
+					setTimeout(ensureGrip, 600);
+					var timerId = setInterval(tick, 4000);
+					wbNavHideOfficial();
+					return function () { stop = true; clearInterval(timerId); };
+				}, []);
+				var q = wbNavState.q;
+				var records = {};
+				Object.keys(wbNavState.map || {}).forEach(function (id) { records[id] = Object.assign({}, wbNavState.map[id]); });
+				Object.keys(wbNavState.bindings || {}).forEach(function (id) { records[id] = Object.assign({}, records[id] || {}, wbNavState.bindings[id]); });
+				function displayClient(rec) {
+					var key = rec && rec.client_key ? String(rec.client_key) : "";
+					for (var ci = 0; ci < wbNavState.customers.length; ci++) {
+						var customer = wbNavState.customers[ci];
+						if (key !== "" && customerId(customer) === key) return customerName(customer);
+						if (key === "" && rec && rec.client && customerName(customer) === String(rec.client)) return customerName(customer);
+					}
+					return rec && rec.client ? String(rec.client) : "其他";
+				}
+				/* 组装：客户显示名 → [{id,title,at}]，按绑定时间倒序。 */
+				var groups = {};
+				Object.keys(records).forEach(function (id) {
+					var rec = records[id] || {};
+					var m = displayClient(rec);
+					var title = rec.topic || (rec.meta_id ? "任务 " + rec.meta_id : "未命名会话");
+					var at = rec.bound_at || rec.at || "";
+					if (q !== "" && title.indexOf(q) < 0 && m.indexOf(q) < 0) return;
+					if (groups[m] === undefined) groups[m] = [];
+					groups[m].push({ id: id, title: title, at: at });
+				});
+				Object.keys(groups).forEach(function (n) {
+					groups[n].sort(function (a, b) { return (a.at < b.at) - (a.at > b.at); });
+				});
+				var names = Object.keys(groups).sort(function (a, b) {
+					return (b === "其他") - (a === "其他") || a.localeCompare(b, "zh");
+				});
+				/* cordis 规矩：服务必须 ctx.get() 读，不能 ctx.xxx 直取 */
+				function openSession(id) {
+					/* 服务器重启后运行时会话清空，裸 select 会 unknown ——
+					 * 优先 uiWorkspace.openSession（内部处理挂载），传登记时的原样 id。 */
+					try {
+						var raw = String(id);
+						wbNavState.current = raw; wbNavEmit();   // 树里高亮当前位置
+						var w = ctx && typeof ctx.get === "function" ? ctx.get("uiWorkspace") : null;
+						if (w && typeof w.openSession === "function") { w.openSession(raw); return; }
+						var s = ctx && typeof ctx.get === "function" ? ctx.get("sessions") : null;
+						if (s && typeof s.open === "function") s.open(raw);
+					} catch (e) { console.warn("[dsh-workbench] 打开会话失败：", String(e)); }
+				}
+				function goCompose() {
+					try {
+						var l = ctx && typeof ctx.get === "function" ? ctx.get("layout") : null;
+						if (l && typeof l.selectPanel === "function") l.selectPanel(WORKBENCH_KEY);
+					} catch (e) { console.warn("[dsh-workbench] 打开新建任务失败：", String(e)); }
+				}
+				return h("div", { className: "wb_nv", style: { width: String(wbNavState.navW) + "px" } },
+					h("div", { className: "wb_nvBrand" }, h("span", { className: "wb_nvBrandT" }, "生文 Agent")),
+					h("button", { type: "button", className: "wb_nvNew", onClick: goCompose }, "＋ 新建任务"),
+					h("input", {
+						className: "wb_nvSearch", type: "search", placeholder: "搜索会话…",
+						value: q,
+						onChange: function (e) { wbNavState.q = e.target.value; wbNavEmit(); },
+					}),
+					h("div", {
+						className: "wb_grip", title: "拖动调宽",
+						style: { position: "absolute", top: "0", bottom: "0", right: "-4px", width: "8px", cursor: "col-resize", zIndex: "50" },
+						onMouseDown: function (ev) {
+							ev.preventDefault();
+							function mv(e) {
+								var w = Math.max(200, Math.min(480, e.clientX));
+								if (w === wbNavState.navW) return;
+								wbNavState.navW = w;
+								try { sessionStorage.setItem(WB_KEY.navW, String(w)); } catch (er) { }
+								wbNavTakeFrame();
+								wbNavEmit();
+							}
+							function up() { window.removeEventListener("mousemove", mv); window.removeEventListener("mouseup", up); }
+							window.addEventListener("mousemove", mv);
+							window.addEventListener("mouseup", up);
+						},
+					}),
+					h("div", { className: "wb_nvTree" },
+						names.length === 0
+							? h("div", { className: "wb_nvHint" }, "还没有会话，点上方发起")
+							: (names.length === 0
+								? h("div", { className: "wb_nvHint" }, "还没有会话")
+								: names.map(function (name) {
+									var open = wbNavState.open[name] !== false;
+									return h("div", { key: name, className: "wb_nvGroup" },
+										h("button", {
+											type: "button", className: "wb_nvGroupName",
+											onClick: function () {
+												wbNavState.open[name] = !open; wbNavEmit();
+											},
+										}, (open ? "▾ " : "▸ ") + name + "（" + groups[name].length + "）"),
+										open ? groups[name].map(function (it) {
+											/* 对齐原型："09-18 · 老榜单" —— 登记日期做前缀 */
+											var label = (it.at && it.at.length >= 10 ? it.at.slice(5, 10) + " · " : "") + it.title;
+											return h("button", {
+												type: "button", key: String(it.id),
+												className: "wb_nvItem" + (it.id === wbNavState.current ? " wb_nvCur" : ""),
+												title: label,
+												onClick: function () { openSession(it.id); },
+											}, label);
+										}) : null);
+								}))));
+			}
+
+			/* ---- 挑篇（原型 C6 pick-row）--------------------------------
+			 * 勾选（选哪几篇）只在输入框上方的"改哪几篇"编号条里做；
+			 * 右栏左列只负责点开看正文。两边共享这一份选中集。 */
+			var WB_PICK = { sel: {}, client: "", drafts: null, done: {}, subs: [] };
+			function wbPickEmit() {
+				WB_PICK.subs.forEach(function (f) { try { f(); } catch (e) { } });
+			}
+			function wbPickToggle(title) {
+				if (WB_PICK.sel[title]) delete WB_PICK.sel[title]; else WB_PICK.sel[title] = true;
+				wbPickEmit();
+			}
+			function wbPickSub(f) {
+				WB_PICK.subs.push(f);
+				return function () { WB_PICK.subs = WB_PICK.subs.filter(function (x) { return x !== f; }); };
+			}
+			function useWbPickTick() {
+				var s = React.useState(0);
+				React.useEffect(function () {
+					return wbPickSub(function () { s[1](function (x) { return x + 1; }); });
+				}, []);
+				return s[0];
+			}
+			function PickBar() {
+				useWbPickTick();
+				var drafts = WB_PICK.drafts || [];
+				var done = WB_PICK.done || {};
+				var pending = drafts.filter(function (d) { return done[d.title] !== true; });
+				if (pending.length === 0) return null;
+				var allOn = pending.every(function (d) { return WB_PICK.sel[d.title] === true; });
+				return h("div", { className: "wb_pkRow" },
+					h("span", { className: "wb_pkK" }, "改哪几篇"),
+					h("div", { className: "wb_pkChips" },
+						pending.map(function (d, idx) {
+							var on = WB_PICK.sel[d.title] === true;
+							return h("button", {
+								type: "button", key: d.title, className: "wb_pkChip" + (on ? " is-on" : ""),
+								title: d.title,
+								onClick: function () { wbPickToggle(d.title); },
+							}, String(idx + 1).padStart(2, "0"));
+						})),
+					h("button", {
+						type: "button", className: "wb_pkAll",
+						onClick: function () {
+							WB_PICK.sel = {};
+							if (!allOn) pending.forEach(function (d) { WB_PICK.sel[d.title] = true; });
+							wbPickEmit();
+						},
+					}, "全选"),
+					h("button", { type: "button", className: "wb_pkDot red", disabled: true, title: "机器检查还没接 —— 现在直接人工看" }),
+					h("button", { type: "button", className: "wb_pkDot green", disabled: true, title: "机器检查还没接 —— 现在直接人工看" }));
+			}
 
 			/* R 区：右侧栏"文章审核" tab（对齐原型）——
 			 * 头：●未审核 + 客户 + 开始检查（脚本后接）；进度：已通过 N/M · 确认=入库；
@@ -789,19 +1148,16 @@ window.__ModuleLoader__.load({
 			function ReviewTabBody(props) {
 				var sessionId = props.sessionId;
 				var useChat = props.useChat;
-				var st = React.useState({ client: "", client_key: "", drafts: null, sel: "", body: "", msg: "", confirmIdx: 0, checked: {} });
-				var client = st[0].client, clientKey = st[0].client_key, drafts = st[0].drafts, sel = st[0].sel, bodyText = st[0].body, msg = st[0].msg, checked = st[0].checked;
+				var st = React.useState({ client: "", client_key: "", drafts: null, sel: "", body: "", msg: "", done: {} });
+				var client = st[0].client, clientKey = st[0].client_key, drafts = st[0].drafts, sel = st[0].sel, bodyText = st[0].body, msg = st[0].msg, doneMap = st[0].done;
 				var setL = st[1];
-				function toggleCheck(title) {
-					setL(function (p) {
-						var next = Object.assign({}, p.checked);
-						if (next[title]) delete next[title]; else next[title] = true;
-						return Object.assign({}, p, { checked: next });
-					});
-				}
-				var checkedCount = Object.keys(checked).length;
+				useWbPickTick();   // 勾选集合在输入框挑篇条里维护 —— 订阅它，选中变化时这里跟着重渲
+				var checked = WB_PICK.sel;
+				var checkedCount = drafts === null ? 0 : drafts.filter(function (d) {
+					return doneMap[d.title] !== true && checked[d.title] === true;
+				}).length;
 
-				/* 客户解析：params → 当前会话首条 user 消息的编号 → meta.client */
+				/* 客户解析：params → 当前会话首条 user 消息的任务编号 → meta.client */
 				var clientFromParams = null;
 				var clientKeyFromParams = null;
 				try {
@@ -815,9 +1171,33 @@ window.__ModuleLoader__.load({
 					chatSnap = useChat(function (s) { return s; });
 				}
 				var metaId = "";
+				try {
+					var info2 = typeof props.useTabInfo === "function" ? props.useTabInfo() : null;
+					var pm = info2 && info2.navigation && info2.navigation.params ? info2.navigation.params.meta : null;
+					if (typeof pm === "string" && pm !== "") metaId = pm;
+				} catch (e) { }
 				var legacyNodes = (chatSnap && chatSnap.legacy && chatSnap.legacy.nodes) || null;
-				var list = Array.isArray(legacyNodes) ? legacyNodes : [];
-				for (var i = 0; i < list.length; i++) {
+				/* 本会话产物归属：数消息流里成功的 write_article 调用（argsRaw 带 title）。
+				 * 文件时刻会串会话（别的会话后入库也会晚于本任务发起），
+				 * 消息流留痕才是真正的会话归属。 */
+				var writeTitles = {};
+				if (Array.isArray(legacyNodes)) {
+					for (var wsi = 0; wsi < legacyNodes.length; wsi++) {
+						var wsn = legacyNodes[wsi];
+						if (wsn && wsn.kind === "tool-result" && wsn.call
+							&& wsn.call.name === "mcp__sora-articles__write_article" && wsn.isError !== true) {
+							try {
+								var wargs = JSON.parse(wsn.call.argsRaw || "{}");
+								var wtitle = String(wargs.title || wargs.file || "").replace(/\.md$/i, "");
+								if (wtitle !== "") writeTitles[wtitle] = true;
+							} catch (e) { }
+						}
+					}
+				}
+				var writeCount = 0;
+				for (var wtk in writeTitles) writeCount++;
+				var list = (metaId === "" && Array.isArray(legacyNodes)) ? legacyNodes : null;
+				for (var i = 0; list !== null && i < list.length; i++) {
 					var node = list[i];
 					if (node && node.kind === "user") {
 						var content = Array.isArray(node.content) ? node.content : null;
@@ -834,76 +1214,79 @@ window.__ModuleLoader__.load({
 					var alive = true;
 					function applyClient(disp, key) {
 						if (!alive) return;
-						setL(function (p) {
-							return Object.assign({}, p, {
-								client: disp || p.client || "",
-								client_key: key || p.client_key || "",
-							});
-						});
-					}
-					/* 优先会话索引绑死的 client_key */
-					if (typeof sessionId === "string" && sessionId !== "") {
-						fetch("/api/workbench/session-client?session=" + encodeURIComponent(sessionId), { headers: { accept: "application/json" } })
-							.then(function (r) { return r.json(); })
-							.then(function (body) {
-								var b = body && body.binding ? body.binding : null;
-								if (b && typeof b.client_key === "string" && b.client_key !== "") {
-									applyClient(b.client || clientFromParams || "", b.client_key);
-									return;
-								}
-								fallbackMeta();
-							})
-							.catch(function () { fallbackMeta(); });
-					} else {
-						fallbackMeta();
+						setL(function (p) { return Object.assign({}, p, { client: disp || p.client || "", client_key: key || p.client_key || "" }); });
 					}
 					function fallbackMeta() {
-						if (clientFromParams || clientKeyFromParams) {
-							applyClient(clientFromParams || "", clientKeyFromParams || "");
-							return;
-						}
+						if (clientFromParams || clientKeyFromParams) { applyClient(clientFromParams || "", clientKeyFromParams || ""); return; }
 						if (metaId === "") { applyClient("", ""); return; }
-						fetch("/api/workbench/task-meta?id=" + encodeURIComponent(metaId), { headers: { accept: "application/json" } })
+						fetch(WB_API.taskMeta + "?id=" + encodeURIComponent(metaId), { headers: { accept: "application/json" } })
 							.then(function (r) { return r.json(); })
-							.then(function (body) {
-								if (!body) return;
-								applyClient(
-									typeof body.client === "string" ? body.client : "",
-									typeof body.client_key === "string" ? body.client_key : ""
-								);
-							})
+							.then(function (body) { if (body) applyClient(typeof body.client === "string" ? body.client : "", typeof body.client_key === "string" ? body.client_key : ""); })
 							.catch(function () { });
 					}
+					if (typeof sessionId === "string" && sessionId !== "") {
+						fetch(WB_API.sessionClient + "?session=" + encodeURIComponent(sessionId), { headers: { accept: "application/json" } })
+							.then(function (r) { return r.json(); })
+							.then(function (body) {
+								var binding = body && body.binding ? body.binding : null;
+								if (binding && binding.client_key) applyClient(binding.client || clientFromParams || "", binding.client_key);
+								else fallbackMeta();
+							})
+							.catch(function () { fallbackMeta(); });
+					} else fallbackMeta();
 					return function () { alive = false; };
 				}, [clientFromParams, clientKeyFromParams, metaId, sessionId]);
 
-				/* 草稿列表 */
+				/* 本任务发起时刻：草稿列表只显示该时刻之后落盘的（C1 口径 ——
+				 * 否则同客户的旧会话草稿会混进来）。时刻拿不到就退回全列。 */
+				var at = st[0].at;
 				React.useEffect(function () {
-					if (!client) { setL(function (p) { return Object.assign({}, p, { drafts: null, sel: "", body: "" }); }); return; }
+					if (metaId === "") { setL(function (p) { return Object.assign({}, p, { at: "" }); }); return; }
 					var alive = true;
-					fetch("/api/workbench/drafts?client=" + encodeURIComponent(client), { headers: { accept: "application/json" } })
+					fetch(WB_API.taskMeta + "?id=" + encodeURIComponent(metaId), { headers: { accept: "application/json" } })
+						.then(function (r) { return r.json(); })
+						.then(function (b) {
+							if (alive && b && typeof b.savedAt === "string") setL(function (p) { return Object.assign({}, p, { at: b.savedAt }); });
+						})
+						.catch(function () { });
+					return function () { alive = false; };
+				}, [metaId]);
+				React.useEffect(function () {
+					if (!client) { setL(function (p) { return Object.assign({}, p, { drafts: null, sel: "", body: "", checked: {}, done: {} }); }); return; }
+					var alive = true;
+					fetch(WB_API.drafts + "?client=" + encodeURIComponent(client), { headers: { accept: "application/json" } })
 						.then(function (r) { return r.json(); })
 						.then(function (b) {
 							if (alive && b && b.ok === true) setL(function (p) {
-								var titles = {}; (b.drafts || []).forEach(function (d) { titles[d.title] = true; });
-								var next = {};
-								Object.keys(p.checked).forEach(function (k) { if (titles[k]) next[k] = true; });
-								return Object.assign({}, p, { drafts: b.drafts || [], checked: next });
+								var scope = at ? (b.drafts || []).filter(function (d) { return d.updatedAt >= at; }) : (b.drafts || []);
+								/* 会话归属：消息流里有 write 调用 → 只显示本会话写的那几篇。
+								 * 没有（还没开写 / 已终止）→ 列表为空，别的会话的产物不串进来。 */
+								if (writeCount > 0) scope = scope.filter(function (d) { return writeTitles[d.title] === true; });
+								else scope = [];
+								var titles = {}; scope.forEach(function (d) { titles[d.title] = true; });
+								var nextD = {};
+								Object.keys(p.done).forEach(function (k) { if (titles[k]) nextD[k] = true; });
+								/* 已入库的（同名出现在正式库）直接标绿 —— 刷新后状态不丢 */
+								(b.library || []).forEach(function (lt) { if (titles[lt] && writeTitles[lt] === true) nextD[lt] = true; });
+								Object.keys(WB_PICK.sel).forEach(function (k) { if (!titles[k]) delete WB_PICK.sel[k]; });
+								WB_PICK.client = client; WB_PICK.drafts = scope; WB_PICK.done = nextD;
+								wbPickEmit();
+								return Object.assign({}, p, { drafts: scope, done: nextD });
 							});
 						})
 						.catch(function () { });
 					return function () { alive = false; };
-				}, [client]);
+				}, [client, at, writeCount]);   /* at / writeCount 回来要重拉重过滤 */
 
 				function openDraft(title) {
 					setL(function (p) { return Object.assign({}, p, { sel: title, body: "加载中…" }); });
-					fetch("/api/workbench/draft?client=" + encodeURIComponent(client) + "&title=" + encodeURIComponent(title), { headers: { accept: "text/markdown" } })
+					fetch(WB_API.draft + "?client=" + encodeURIComponent(client) + "&title=" + encodeURIComponent(title), { headers: { accept: "text/markdown" } })
 						.then(function (r) { return r.text(); })
 						.then(function (text) { setL(function (p) { return Object.assign({}, p, { body: text }); }); })
 						.catch(function (e) { setL(function (p) { return Object.assign({}, p, { body: "读取失败：" + String(e) }); }); });
 				}
-				function confirmOne(title, done) {
-					return fetch("/api/workbench/confirm-draft", {
+				function confirmOne(title) {
+					return fetch(WB_API.confirmDraft, {
 						method: "POST", headers: { "content-type": "application/json", accept: "application/json" },
 						body: JSON.stringify({
 							client: client,
@@ -916,96 +1299,104 @@ window.__ModuleLoader__.load({
 						.then(function (r) { return r.json().then(function (b) { return { code: r.status, body: b }; }); })
 						.then(function (res) {
 							var ok = res.body && res.body.ok === true;
-							var m = ok ? "已入库 ✓（" + title + "）"
-								: res.code === 409 ? "跳过：正式库已有同名（" + title + "）"
-								: (res.body && res.body.error === "client-mismatch") ? "失败：客户不匹配（禁止串客户入库）"
-								: "失败：" + ((res.body && (res.body.error || res.body.detail)) || res.code);
-							if (done) setL(function (p) { return Object.assign({}, p, { msg: m }); });
+							if (res.body && res.body.error === "client-mismatch") setL(function (p) { return Object.assign({}, p, { msg: "失败：客户不匹配（禁止串客户入库）" }); });
+							if (ok || res.code === 409) setL(function (p) {
+								var nextD = Object.assign({}, p.done); nextD[title] = true;
+								delete WB_PICK.sel[title];
+								WB_PICK.done = nextD;
+								return Object.assign({}, p, { done: nextD });
+							});
+							wbPickEmit();
 							return ok;
 						});
 				}
-				function confirmAll() {
-					if (!drafts || drafts.length === 0) return;
-					setL(function (p) { return Object.assign({}, p, { msg: "批量入库中 0/" + drafts.length + " …" }) });
-					var seq = drafts.slice();
-					var idx = 0;
+				function confirmTargets(targets, label) {
+					var idx2 = 0, okN = 0, skipN = 0, failN = 0;
+					setL(function (p) { return Object.assign({}, p, { msg: (label || "入库") + "中 0/" + targets.length + " …" }) });
 					function next() {
-						if (idx >= seq.length) {
-							setL(function (p) { return Object.assign({}, p, { msg: "全部处理完成 ✓", sel: "", body: "" }) });
+						if (idx2 >= targets.length) {
+							var m = "已入库 ✓ " + okN + " 篇";
+							if (skipN > 0) m += "，跳过 " + skipN + " 篇（正式库已有同名）";
+							if (failN > 0) m += "，失败 " + failN + " 篇";
+							setL(function (p) { return Object.assign({}, p, { msg: m }) });
 							return;
 						}
-						var title = seq[idx].title;
-						confirmOne(title, false).then(function () {
-							idx += 1;
-							setL(function (p) { return Object.assign({}, p, { msg: "批量入库中 " + idx + "/" + seq.length + " …", confirmIdx: idx }) });
+						confirmOne(targets[idx2]).then(function (r3) {
+							if (r3 === true) okN += 1; else if (r3 === false) skipN += 1; else failN += 1;
+							idx2 += 1;
+							setL(function (p) { return Object.assign({}, p, { msg: (label || "入库") + "中 " + idx2 + "/" + targets.length + " …" }) });
 							next();
-						});
+						}).catch(function () { failN += 1; idx2 += 1; next(); });
 					}
 					next();
 				}
 
 				var n = (drafts || []).length;
+				var doneCount = drafts ? drafts.filter(function (d) { return doneMap[d.title] === true; }).length : 0;
+				var pending = drafts ? drafts.filter(function (d) { return doneMap[d.title] !== true; }) : [];
+
 				if (!client) return h("div", { className: "wb_rvEmpty" }, "没有正在进行的任务 —— 从装配台发起后，这里会自动打开");
 				return h("div", { className: "wb_rv" },
 					h("div", { className: "wb_rvHead" },
-						h("span", { className: "wb_rvDot" }, "●"),
-						h("span", { className: "wb_rvState" }, "未审核"),
+						h("span", { className: "wb_rvDot" + (doneCount === n && n > 0 ? " is-ok" : "") }, "●"),
+						h("span", { className: "wb_rvState" }, doneCount === n && n > 0 ? "已审完" : "未审核"),
 						h("span", { className: "wb_rvSel" }, client + " · 草稿审核"),
 						h("button", {
 							type: "button", className: "wb_rvCheck", disabled: true,
 							title: "机器硬检脚本还没接 —— 先人工看正文",
-						}, "开始检查")),
+						}, "开始检查"),
+						h("span", { className: "wb_rvChev" }, "▸")),
 					h("div", { className: "wb_rvProg" },
-						h("span", null, "待审 " + n + " 篇"),
+						h("span", { className: "wb_rvCount" }, "已通过 " + doneCount + " / " + n),
 						h("span", { className: "wb_rvHint" }, "确认 = 入库")),
 					msg ? h("div", { className: "wb_reviewMsg" }, msg) : null,
 					n === 0
 						? h("div", { className: "wb_rvEmpty2" }, drafts === null ? "草稿列表加载中…" : "草稿区是空的 —— agent 写完会出现在这里")
 						: h("div", { className: "wb_rvCols" },
 							h("div", { className: "wb_reviewList" },
-								drafts.map(function (d, idx) {
-									var on = checked[d.title] === true;
+								pending.map(function (d, idx) {
+									var picked = checked[d.title] === true;
 									return h("div", {
-										key: d.title, className: "wb_reviewItem", "data-on": sel === d.title ? "1" : "0",
+										key: d.title, className: "wb_ri" + (picked ? " picked" : "") + (sel === d.title ? " is-on" : ""),
 										onClick: function () { openDraft(d.title); },
+										/* 2026-09-26 按用户设计澄清：右栏点条目只负责"看正文 + 知道是几号"，
+										 * 勾选只发生在输入框挑篇条 —— 看和选是 1:1 两个独立动作，不联动。 */
 									},
-										h("button", {
-											type: "button", className: "wb_rvChk", "data-on": on ? "1" : "0",
-											onClick: function (e) { e.stopPropagation(); toggleCheck(d.title); },
-										}, on ? "✓" : ""),
-										h("div", { className: "wb_rvItemBody" },
-											h("span", { className: "wb_rvIdx" },
-												h("span", { className: "wb_rvNum" }, String(idx + 1).padStart(2, "0")),
-												d.title),
-											h("span", { className: "wb_reviewItemMeta" }, Math.round(d.chars / 100) / 10 + "k 字")));
+										h("span", { className: "wb_riNo" }, String(idx + 1).padStart(2, "0")),
+										h("span", { className: "wb_riT" }, d.title));
 								})),
 							h("div", { className: "wb_reviewMain" },
 								sel ? h("div", { className: "wb_reviewMainTitle" }, sel) : null,
 								bodyText && bodyText !== "加载中…"
 									? h("div", { className: "wb_reviewText wb_rvMd", dangerouslySetInnerHTML: { __html: wbMdToHtml(bodyText) } })
 									: h("div", { className: "wb_reviewText" }, bodyText || "← 点左侧草稿看正文"))),
+					n > 0 && doneCount > 0
+						? h("div", { className: "wb_rvDoneSeg" },
+							h("div", { className: "wb_rvSep" }, "已入库 " + doneCount),
+							drafts.filter(function (d) { return doneMap[d.title] === true; }).map(function (d) {
+								return h("div", {
+									key: d.title, className: "wb_ri done" + (sel === d.title ? " is-on" : ""),
+									onClick: function () { openDraft(d.title); },
+								},
+									h("span", { className: "wb_riNo" }, "🔒"),
+									h("span", { className: "wb_riT" }, d.title));
+							}))
+						: null,
 					n > 0
 						? h("div", { className: "wb_rvFoot" },
+							h("div", { className: "wb_rfHint" }, "机器检查脚本还没接 —— 现在直接人工确认"),
 							h("button", {
 								type: "button", className: "wb_rvConfirm", disabled: checkedCount === 0 && sel === "",
 								onClick: function () {
-									var targets = checkedCount > 0
-										? drafts.filter(function (d) { return checked[d.title] === true; }).map(function (d) { return d.title; })
-										: [sel];
-									var idx2 = 0;
-									function runOne() {
-										if (idx2 >= targets.length) {
-											return fetch("/api/workbench/drafts?client=" + encodeURIComponent(client), { headers: { accept: "application/json" } }).then(function (r) { return r.json(); }).then(function (b) {
-												if (b && b.ok === true) setL(function (p) { return Object.assign({}, p, { drafts: b.drafts || [], checked: {}, msg: "已入库 ✓（" + targets.length + " 篇）" }); });
-											});
-										}
-										var title = targets[idx2];
-										confirmOne(title, false).then(function () { idx2 += 1; runOne(); });
-									}
-									runOne();
+									var targets = pending.filter(function (d) { return WB_PICK.sel[d.title] === true; }).map(function (d) { return d.title; });
+									if (targets.length === 0 && sel !== "") targets = [sel];
+									confirmTargets(targets, "入库");
 								},
-							}, checkedCount > 0 ? "确认（" + checkedCount + " 篇）" : "确认"),
-							h("button", { type: "button", className: "wb_rvConfirmAll", onClick: confirmAll }, "全部确认"))
+							}, checkedCount > 0 ? "确认入库（" + checkedCount + " 篇）" : "确认入库"),
+							h("button", {
+								type: "button", className: "wb_rvConfirmAll", disabled: pending.length === 0,
+								onClick: function () { confirmTargets(pending.map(function (d) { return d.title; }), "批量入库"); },
+							}, "全部确认"))
 						: null);
 			}
 
@@ -1084,7 +1475,7 @@ window.__ModuleLoader__.load({
 					if (sessionId === undefined || sessionId === null) return;
 					if (metaId === "") { setState({ status: "none", meta: null, net: "-" }); return; }
 					var alive = true;
-					fetch("/api/workbench/task-meta?id=" + encodeURIComponent(metaId), { headers: { accept: "application/json" } })
+					fetch(WB_API.taskMeta + "?id=" + encodeURIComponent(metaId), { headers: { accept: "application/json" } })
 						.then(function (r) {
 							var code = String(r.status);
 							return r.json().then(function (body) { return { code: code, body: body }; });
@@ -1123,7 +1514,7 @@ window.__ModuleLoader__.load({
 				React.useEffect(function () {
 					if (meta === null || typeof meta !== "object" || !meta.client) return;
 					var alive = true;
-					fetch("/api/workbench/task-status?client=" + encodeURIComponent(meta.client) + "&since=" + encodeURIComponent(String(meta.savedAt || "")), { headers: { accept: "application/json" } })
+					fetch(WB_API.taskStatus + "?client=" + encodeURIComponent(meta.client) + "&since=" + encodeURIComponent(String(meta.savedAt || "")), { headers: { accept: "application/json" } })
 						.then(function (r) { return r.json(); })
 						.then(function (body) {
 							if (alive && body && body.ok === true) setSt({ ws: body.workspace || null, lib: body.library || null });
@@ -1134,7 +1525,7 @@ window.__ModuleLoader__.load({
 				React.useEffect(function () {
 					refreshStatusRef.current = function () {
 						if (meta === null || typeof meta !== "object" || !meta.client) return;
-						fetch("/api/workbench/task-status?client=" + encodeURIComponent(meta.client) + "&since=" + encodeURIComponent(String(meta.savedAt || "")), { headers: { accept: "application/json" } })
+						fetch(WB_API.taskStatus + "?client=" + encodeURIComponent(meta.client) + "&since=" + encodeURIComponent(String(meta.savedAt || "")), { headers: { accept: "application/json" } })
 							.then(function (r) { return r.json(); })
 							.then(function (body) { if (body && body.ok === true) setSt({ ws: body.workspace || null, lib: body.library || null }); })
 							.catch(function () { });
@@ -1150,22 +1541,40 @@ window.__ModuleLoader__.load({
 				React.useEffect(function () {
 					if (drafts === null || drafts.length === 0) return;
 					if (autoRef.current === metaId) return;
-					autoRef.current = metaId;
 					var ctrl = WbCtx && WbCtx.sidebarRight;
 					if (ctrl && typeof ctrl.openTab === "function") {
-						try { ctrl.openTab("wb-review", { params: { client: meta.client, client_key: meta.client_key || "" } }); }
-						catch (e) { console.log("[dsh-workbench] 打开审核侧栏失败：", String(e)); }
+						try {
+							/* 2026-09-26：openTab 在右栏 surface 未挂载时直接 throw
+							 * （sidebarRight: no session surface is mounted）。
+							 * 先弹成功、后记号 —— 失败不占位，下一条会话消息再重试；
+							 * 以前先记号，agent 写第一篇时弹失败一次就永远不弹了。 */
+							ctrl.openTab("wb-review", { params: { client: meta.client, meta: metaId } });
+							autoRef.current = metaId;
+						}
+						catch (e) { console.warn("[dsh-workbench] 打开审核侧栏失败（下条消息重试）：", String(e)); }
 					}
 				}, [drafts, metaId]);
 				React.useEffect(function () {
 					if (meta === null || typeof meta !== "object" || !meta.client) return;
 					var alive = true;
-					fetch("/api/workbench/drafts?client=" + encodeURIComponent(meta.client), { headers: { accept: "application/json" } })
+					fetch(WB_API.drafts + "?client=" + encodeURIComponent(meta.client), { headers: { accept: "application/json" } })
 						.then(function (r) { return r.json(); })
-						.then(function (b) { if (alive && b && b.ok === true) setRv(function (p) { return Object.assign({}, p, { drafts: b.drafts || [] }); }); })
+						.then(function (b) {
+							if (alive && b && b.ok === true) {
+								var scope = b.drafts || [];
+								var sessionTitles = Object.keys(writeTitles || {});
+								if (sessionTitles.length > 0) scope = scope.filter(function (draft) { return writeTitles[draft.title] === true; });
+								else scope = [];
+								var done = {};
+								(b.library || []).forEach(function (title) { if (writeTitles[title] === true) done[title] = true; });
+								setRv(function (p) { return Object.assign({}, p, { drafts: scope }); });
+								WB_PICK.client = meta.client; WB_PICK.drafts = scope; WB_PICK.done = done;
+								wbPickEmit();
+							}
+						})
 						.catch(function () { });
 					return function () { alive = false; };
-				}, [metaId, meta && meta.client]);
+				}, [metaId, meta && meta.client, chatSnap]);
 				if (meta === null || typeof meta !== "object") {
 					return h("div", { className: "wb_task" },
 						h("span", { className: "wb_taskTitle" }, title === "" ? "会话" : title),
@@ -1178,11 +1587,8 @@ window.__ModuleLoader__.load({
 						h("span", { className: "wb_label" }, label),
 						h("span", { className: "wb_value" }, value));
 				}
-				/* 显示优先 display_name（meta.client）；稳定键 client_key 旁注小号字在客户名后 */
 				var clientDisp = meta.client || meta.client_key || "";
-				if (meta.client_key && meta.client && meta.client_key !== meta.client) {
-					clientDisp = meta.client + "（" + meta.client_key + "）";
-				}
+				if (meta.client_key && meta.client && meta.client_key !== meta.client) clientDisp = meta.client + "（" + meta.client_key + "）";
 				var clientText = [clientDisp, meta.line, meta.period].filter(Boolean).join(" · ");
 				var materialText = (meta.refs && meta.refs.urls && meta.refs.urls.length > 0)
 					? "参考文章 · " + meta.refs.urls.length + " 篇" + (meta.refs.style ? " · " + meta.refs.style : "")
@@ -1192,21 +1598,70 @@ window.__ModuleLoader__.load({
 				var wsText = (st.ws && st.ws.exists) ? "工作区共 " + st.ws.files + " 个文件" + (st.ws.recent > 0 ? "（本任务新增 " + st.ws.recent + "）" : "") : "暂无";
 				var libText = (st.lib && st.lib.exists) ? "文章库共 " + st.lib.files + " 篇" + (st.lib.recent > 0 ? "（本任务新增 " + st.lib.recent + "）" : "") : "暂无";
 				var subRows = subsText === "" ? [] : subsText.split("§");
+				/* 真进度（2026-09-26 用户指出旧两行是静态假话）：数会话消息流里
+				 * 成功落地的 write_article 调用 —— 节点 kind='tool-result'，
+				 * call.name 匹配、isError 不为 true 才算数。agent 每写完一篇，
+				 * 消息流更新 → 这里跟着变，是真数据不是推导。 */
+				var writeDone = 0;
+				var writeTitles = {};
+				for (var wi = 0; wi < list.length; wi++) {
+					var tn = list[wi];
+					if (tn && tn.kind === "tool-result" && tn.call
+						&& tn.call.name === "mcp__sora-articles__write_article" && tn.isError !== true) {
+						writeDone += 1;
+						try {
+							var targs = JSON.parse(tn.call.argsRaw || "{}");
+							var ttitle = String(targs.title || targs.file || "").replace(/\.md$/i, "");
+							if (ttitle !== "") writeTitles[ttitle] = true;
+						} catch (e) { }
+					}
+				}
+				var skillTotal = (meta.skills || []).length;
 				/* 任务清单样式的行：[状态, 文本] —— done=绿勾，run=进行中，wait=待办 */
 				var taskRows = [];
-				if (subRows.length > 0) {
-					subRows.forEach(function (rowText, i) {
-						var parts = rowText.split("｜");
-						var s = /complet|done|成功|完成/i.test(parts[1] || "") ? "done" : "run";
-						taskRows.push([s, "子任务：" + parts[0]]);
-					});
+				if (writeDone > 0) {
+					var scopeTxt = skillTotal > 0 ? writeDone + "/" + skillTotal : String(writeDone);
+					var finished = skillTotal > 0 && writeDone >= skillTotal;
+					taskRows.push([finished ? "done" : "run",
+						(finished ? "草稿已写完：" : "写作中 · 已写 ") + scopeTxt + " 篇（草稿区待审）"]);
+				} else if (chatSnap && chatSnap.legacy
+					&& (chatSnap.legacy.partial !== null
+						|| (chatSnap.legacy.runningCalls && chatSnap.legacy.runningCalls.length > 0))) {
+					taskRows.push(["run", "写作中：还没有文章落草稿区"]);
 				} else {
-					taskRows.push(["wait", "子任务：暂无"]);
+					taskRows.push(["wait", "已停止：还没有文章落草稿区（可继续追问让它写）"]);
 				}
-				taskRows.push((st.ws && st.ws.exists && st.ws.files > 0)
-					? ["done", (st.ws.recent > 0 ? "产物已落盘：" : "产物在库（本任务暂未新增）：") + wsText]
-					: ["wait", "产物未落盘"]);
-				if (st.lib && st.lib.exists && st.lib.recent > 0) taskRows.push(["done", "文章已入库：本任务新增 " + st.lib.recent + " 篇"]);
+				/* 入库数按会话归属：本会话 write 过的 title ∩ 正式库清单（st.lib.list）。
+				 * 时刻口径会串会话（别的会话晚入库也算进来），文件名交集才是真的。 */
+				var libHit = 0;
+				var libList = (st.lib && st.lib.list) || [];
+				for (var li = 0; li < libList.length; li++) {
+					if (writeTitles[String(libList[li]).replace(/\.md$/i, "")] === true) libHit++;
+				}
+				if (libHit > 0) taskRows.push(["done", "文章已入库：本任务新增 " + libHit + " 篇"]);
+				/* 右上任务进程与下方任务清单同源：取消息流里最后一次成功的
+				 * todo_write（agent 维护的任务清单，last-write-wins），直接镜像。
+				 * 有清单 → 只显示清单（真正同步）；没有 → 保留上面的推导行。 */
+				for (var pi = list.length - 1; pi >= 0; pi--) {
+					var pn = list[pi];
+					if (pn && pn.kind === "tool-result" && pn.call && pn.call.name === "todo_write" && pn.isError !== true) {
+						try {
+							var pargs = JSON.parse(pn.call.argsRaw || "{}");
+							var ptodos = Array.isArray(pargs.todos) ? pargs.todos : null;
+							if (ptodos !== null && ptodos.length > 0) {
+								taskRows = [];
+								for (var pj = 0; pj < ptodos.length; pj++) {
+									var pit = ptodos[pj] || {};
+									var ptext = String(pit.content || "").trim();
+									if (ptext === "") continue;
+									var pst = String(pit.status || "pending");
+									taskRows.push([pst === "completed" ? "done" : pst === "in_progress" ? "run" : "wait", ptext]);
+								}
+							}
+						} catch (e) { }
+						break;   // 只看最后一次 todo_write
+					}
+				}
 
 
 
@@ -1468,6 +1923,7 @@ window.__ModuleLoader__.load({
 					sessionStorage.setItem("wb-pending-bind", JSON.stringify({
 						client_key: pick.key,
 						client: clientName,
+						topic: topic,
 						meta_id: metaId,
 					}));
 				} catch (error) { /* 隐身模式就算了 */ }
@@ -1940,20 +2396,8 @@ window.__ModuleLoader__.load({
 					order: 20,
 				}, WorkbenchIcon);
 			});
-			/* WB-SUP P1：客户=项目（左栏一级）。独立 main 面板，避免刮官方 workspaces DOM。 */
-			ctx.slots.inject("main", function () {
-				return ctx.slots.register({ name: "main", key: CLIENT_PROJECTS_KEY }, function () {
-					return h(ClientProjectsPage, { ctx: ctx });
-				});
-			});
-			ctx.slots.inject("sidebar.panellist", function () {
-				return ctx.slots.register({
-					name: "sidebar.panellist",
-					id: CLIENT_PROJECTS_KEY,
-					label: "客户项目",
-					order: 15,
-				}, ClientProjectsIcon);
-			});
+			/* WB-SUP P1：客户项目页保留在源码供回滚/诊断，但从默认 panellist 下线；
+			 * Noah SidebarNav 是正式站唯一左树，避免用户看到两套客户入口。 */
 
 			/* ---- 没收设置入口（2026-09-23 用户决策）--------------------------
 			 * 产品形态：使用者只写文章，不做任何配置。`sidebar.settings` 是
@@ -2021,6 +2465,23 @@ window.__ModuleLoader__.load({
 					id: "workbench-prompt-relay-hero",
 					order: 90,
 				}, PromptRelay);
+			});
+			ctx.slots.inject("conversation.input.dock", function () {
+				return ctx.slots.register({
+					name: "conversation.input.dock",
+					id: "workbench-pick-bar",
+					order: 85,
+				}, PickBar);
+			});
+			/* 覆盖官方左栏但保留其 grid 列，避免主区横向跳动。 */
+			ctx.slots.inject("shell.overlay", function () {
+				return ctx.slots.register({
+					name: "shell.overlay",
+					id: "workbench-sidebar-nav",
+					order: 5,
+				}, function (props) {
+					return h(SidebarNav, Object.assign({}, props, { wbCtx: ctx }));
+				});
 			});
 
 			/* 进来就落在装配台。布局自己的初始选择在我们后面才落定，所以延后。 */

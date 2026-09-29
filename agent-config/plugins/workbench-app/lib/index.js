@@ -29,6 +29,8 @@ const ROUTES = [
   '/api/workbench/mcp',
   '/api/workbench/task-meta',
   '/api/workbench/session-client',
+  '/api/workbench/client-map',
+  '/api/workbench/assign-client-group',
   '/api/workbench/task-status',
   '/api/workbench/drafts',
   '/api/workbench/draft',

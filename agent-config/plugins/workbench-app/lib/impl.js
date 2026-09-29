@@ -44,6 +44,9 @@ const DRAFT_PATH = '/api/workbench/draft'
 const CONFIRM_DRAFT_PATH = '/api/workbench/confirm-draft'
 const SESSION_CLIENT_PATH = '/api/workbench/session-client'
 const SESSION_CLIENT_INDEX = join(TASK_META_DIR, 'session-client-index.json')
+const ASSIGN_GROUP_PATH = '/api/workbench/assign-client-group'
+const CLIENT_MAP_PATH = '/api/workbench/client-map'
+const CLIENT_MAP_FILE = join(TASK_META_DIR, 'client-map.json')
 const WORKSPACE_ROOT = '/home/dsh/生文'
 const LIBRARY_ROOT = '/srv/dsh-data/文章库'
 
@@ -287,6 +290,7 @@ function mergeSessionClientBinding(index, sessionId, entry) {
     client_key: firstString(entry && entry.client_key, prev.client_key),
     client: firstString(entry && entry.client, prev.client),
     meta_id: firstString(entry && entry.meta_id, prev.meta_id),
+    topic: firstString(entry && entry.topic, prev.topic),
     bound_at: firstString(entry && entry.bound_at) || new Date().toISOString(),
   }
   index[id] = next
@@ -498,6 +502,49 @@ export function create(ctx, config) {
       sendJson(res, { ok: true, articles, client, server: libraryServer, tool })
     }
 
+    /* ---- Noah 左树兼容映射：session → 客户/topic ----------------------
+     * P1 的正式索引仍是 session-client；这份 map 只保留 Noah 旧壳需要的
+     * topic/登记时间，并与 session-client 合并读取，不参与 confirm 鉴权。 */
+    handlers[ASSIGN_GROUP_PATH] = async (req, res) => {
+      if (req.method !== 'POST') { methodNotAllowed(res); return }
+      let body = ''
+      req.on('data', chunk => { body += chunk })
+      await new Promise(resolve => req.on('end', resolve))
+      let parsed
+      try { parsed = JSON.parse(body || '{}') } catch { parsed = {} }
+      const sessionId = firstString(parsed.session_id, parsed.session)
+      const client = firstString(parsed.client)
+      if (sessionId === '') { sendJson(res, { ok: false, error: 'no-args' }, 400); return }
+      try {
+        let map = {}
+        try {
+          const raw = readFileSync(CLIENT_MAP_FILE, 'utf8')
+          const value = JSON.parse(raw)
+          if (value !== null && typeof value === 'object' && !Array.isArray(value)) map = value
+        } catch { /* first registration */ }
+        map[sessionId] = {
+          client,
+          client_key: firstString(parsed.client_key),
+          topic: firstString(parsed.topic),
+          meta_id: firstString(parsed.meta_id),
+          at: new Date().toISOString(),
+        }
+        mkdirSync(dirname(CLIENT_MAP_FILE), { recursive: true })
+        writeFileSync(CLIENT_MAP_FILE, JSON.stringify(map, null, 2))
+        sendJson(res, { ok: true, session_id: sessionId, entry: map[sessionId] })
+      } catch (error) {
+        sendJson(res, { ok: false, error: 'map-failed', detail: String(error && error.message ? error.message : error) }, 500)
+      }
+    }
+    handlers[CLIENT_MAP_PATH] = (req, res) => {
+      if (req.method !== 'GET') { methodNotAllowed(res); return }
+      try {
+        const raw = readFileSync(CLIENT_MAP_FILE, 'utf8')
+        const map = JSON.parse(raw)
+        sendJson(res, { ok: true, map: map !== null && typeof map === 'object' && !Array.isArray(map) ? map : {} })
+      } catch { sendJson(res, { ok: true, map: {} }) }
+    }
+
     /* ---- 技能：dsh-skill-remote 注册的 provider 目录 ---------------- */
     handlers[SKILLS_PATH] = async (req, res) => {
       if (req.method !== 'GET') { methodNotAllowed(res); return }
@@ -574,7 +621,7 @@ export function create(ctx, config) {
     }
 
     /* ---- session ↔ client 索引（WB-SUP P1）--------------------------
-     * 形状：{ "<session_id>": { client_key, client, meta_id, bound_at } }
+     * 形状：{ "<session_id>": { client_key, client, meta_id, topic, bound_at } }
      * 存 /home/dsh/.dsh/workbench-meta/session-client-index.json。
      * GET ?session= 单条；?client_key= 该客户下会话；无 query 全量。
      * POST 绑定（装配台起会话后拿到 session id 时写）。失败不挡发消息。 */
@@ -650,9 +697,10 @@ export function create(ctx, config) {
           for (const name of files) {
             try { if (statSync(join(dir, name)).mtimeMs > since) recent += 1 } catch { }
           }
-          return { exists: true, files: files.length, recent }
+          const list = files.filter(name => name.toLowerCase().endsWith('.md')).map(name => name.replace(/\.md$/i, ''))
+          return { exists: true, files: files.length, recent, list }
         } catch {
-          return { exists: false, files: 0, recent: 0 }
+          return { exists: false, files: 0, recent: 0, list: [] }
         }
       }
       sendJson(res, { ok: true, workspace: probe(WORKSPACE_ROOT), library: probe(LIBRARY_ROOT) })
@@ -681,7 +729,22 @@ export function create(ctx, config) {
           out.push({ title: name.replace(/\.md$/i, ''), chars: st.size, updatedAt: new Date(st.mtimeMs).toISOString() })
         }
         out.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
-        sendJson(res, { ok: true, drafts: out })
+        /* 正式库同名清单：确认后本地草稿会被挪走，前端仍需知道哪些稿已入库，
+         * 以便 ReviewTab 显示绿色锁定段；Support ready 仍由 confirm 的远端写入保证。 */
+        const library = []
+        try {
+          const libDir = join(LIBRARY_ROOT, client)
+          for (const name of readdirSync(libDir)) {
+            if (!name.toLowerCase().endsWith('.md')) continue
+            const clean = name.replace(/\.md$/i, '')
+            library.push(clean)
+            if (!out.some(draft => draft.title === clean)) {
+              const lst = statSync(join(libDir, name))
+              out.push({ title: clean, chars: lst.size, updatedAt: new Date(lst.mtimeMs).toISOString() })
+            }
+          }
+        } catch { /* 客户还没有正式库目录 */ }
+        sendJson(res, { ok: true, drafts: out, library })
       } catch { sendJson(res, { ok: true, drafts: [] }) }
     }
     handlers[DRAFT_PATH] = (req, res) => {
