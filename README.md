@@ -5,7 +5,7 @@
 仓库分两个区：
 
 - **`plugins/`** —— 能被 `dsh plugin add` 装的插件。`安装全部.sh` 扫的就是这里（认 `package.json`）
-- **`workbench/`** —— 不是插件的（云上生文 Agent 的工作台），装了也没用，别往 `plugins/` 里放
+- **其余目录** —— 不是插件的（工作台原型、文章硬检脚本），装了也没用，别往 `plugins/` 里放
 
 ## 给同事：一条命令全装
 
@@ -41,6 +41,7 @@ dsh plugin --profile web add "git+ssh://git@github.com/Zoeoetheroad/DSH.git#path
 | `plugins/sidebar-glass` | 侧边栏毛玻璃 + 工作区行底色/标题加粗居中 | **需要 `deepseek-harness-background`，并开启壁纸** |
 | `workbench/` | 云上生文 Agent 的工作台（**交互原型，不是插件**），入口看 `workbench/README.md` | 无 |
 | `agent-config/` | Agent 的配置：工作台插件 + 配置片段 + 安装脚本 + 截图工具 + `TASKS.md`。自成一体，看它自己的 README | 无 |
+| `文章硬检/` | 文章发出去前的**硬检脚本**（**不是插件**）：查工程痕迹暴露 / 广告法合规 / Markdown 结构坏没坏。纯正则不花 token，`node 硬检.mjs --规则` 看它查什么 | 无（只要 Node） |
 
 ## 加新东西（我自己用）
 
