@@ -29,7 +29,7 @@
  */
 
 
-import { mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, existsSync, renameSync, unlinkSync } from 'node:fs'
+import { mkdirSync, realpathSync, readFileSync, writeFileSync, readdirSync, statSync, existsSync, renameSync, unlinkSync } from 'node:fs'
 import { join, dirname, basename, resolve } from 'node:path'
 
 const CLIENTS_PATH = '/api/workbench/clients'
@@ -48,8 +48,40 @@ const sessionClientIndex = () => join(taskMetaDir(), 'session-client-index.json'
 const ASSIGN_GROUP_PATH = '/api/workbench/assign-client-group'
 const CLIENT_MAP_PATH = '/api/workbench/client-map'
 const clientMapFile = () => join(taskMetaDir(), 'client-map.json')
-const workspaceRoot = () => process.env.DSH_WORKBENCH_WORKSPACE_ROOT || '/home/dsh/生文'
+const personalWorkspacePath = () => process.env.DSH_WORKBENCH_PERSONAL_WORKSPACE
+  || (process.env.DSH_HOME ? join(process.env.DSH_HOME, 'workspaces', 'default') : null)
+const workspaceRoot = () => process.env.DSH_WORKBENCH_WORKSPACE_ROOT || personalWorkspacePath()
 const libraryRoot = () => process.env.DSH_WORKBENCH_LIBRARY_ROOT || '/srv/dsh-data/文章库'
+
+// Missing legacy directories still have registry rows; never recreate them.
+function canonicalWorkspacePath(path) {
+  try { return realpathSync(path) } catch { return resolve(path) }
+}
+
+const legacySharedRoot = () => canonicalWorkspacePath(process.env.DSH_WORKBENCH_LEGACY_SHARED_ROOT || '/home/dsh/生文')
+
+/** Runs on the hot-loaded request path, independently of index.js startup. */
+async function resolvePersonalWorkspace(hostCtx) {
+  const path = personalWorkspacePath()
+  if (!path) throw new Error('DSH_HOME 未设置，无法确定个人工作区')
+  const registry = hostCtx.workspaceRegistry
+  if (!registry) throw new Error('workspaceRegistry 不可用')
+  if (canonicalWorkspacePath(path) === legacySharedRoot()) throw new Error('个人工作区不能使用旧共享目录')
+  mkdirSync(path, { recursive: true })
+  const canonical = realpathSync(path)
+  const row = registry.list().find(w => canonicalWorkspacePath(w.path) === canonical)
+    || await registry.create(canonical, '我的工作区')
+  if (!row || typeof row.id !== 'string' || !row.id) throw new Error('个人工作区缺少 ID')
+  return { id: row.id, path: canonical }
+}
+
+async function workspaceInfo(hostCtx) {
+  const personal = await resolvePersonalWorkspace(hostCtx)
+  const legacy = legacySharedRoot()
+  const legacySharedIds = hostCtx.workspaceRegistry.list()
+    .filter(w => canonicalWorkspacePath(w.path) === legacy).map(w => w.id)
+  return { personal, legacySharedIds }
+}
 
 const clientPathName = value => String(value ?? '').replace(/[/\\]/g, '')
 
@@ -606,6 +638,8 @@ function methodNotAllowed(res) {
 /* 归一化函数导出，只为离线自检用（宿主加载器只用 apply）：
  *   node --input-type=module -e "import('./lib/index.js').then(m => …)" */
 export {
+  resolvePersonalWorkspace,
+  workspaceRoot,
   normalize,
   normalizeArticles,
   normalizeLibraryArticles,
@@ -678,11 +712,16 @@ export function create(ctx, config) {
     /* ---- 知识库：客户名单（不缓存）-------------------------------- */
     handlers[CLIENTS_PATH] = async (req, res, scope) => {
       if (req.method !== 'GET') { methodNotAllowed(res); return }
+      let workspace = null
+      try { workspace = await workspaceInfo(hostCtx) } catch {
+        process.stderr.write('[dsh-workbench] 个人工作区暂不可用，新会话需重试\n')
+      }
       const resolved = resolveTool(hostCtx, knowledgeServer, knowledgeServers, clientsTool, [/hierarch/i, /(list|space|customer|client)/i])
       if (resolved.tool === '') {
         sendJson(res, {
           ok: false,
           error: 'mcp-missing',
+          workspace,
           detail: `没找到 ${knowledgeServer} / knowledge / sora-knowledge 的工具。设置 → MCP 里确认这台服务器已连接。`,
           available: hostCtx.tools.schemas().map(schema => schema.name).filter(name => name.startsWith('mcp__')).sort(),
         })
@@ -691,15 +730,15 @@ export function create(ctx, config) {
       const { server, tool } = resolved
       const called = await callTool(hostCtx, server, tool, {})
       if (!called.ok) {
-        sendJson(res, { ok: false, error: called.error, detail: called.detail, server, tool })
+        sendJson(res, { ok: false, error: called.error, detail: called.detail, server, tool, workspace })
         return
       }
       const customers = normalize(called.value)
       if (customers === null) {
-        sendJson(res, { ok: false, error: 'bad-reply', detail: `认不出 ${tool} 的返回形状（收到 ${describe(called.value)}）`, server, tool })
+        sendJson(res, { ok: false, error: 'bad-reply', detail: `认不出 ${tool} 的返回形状（收到 ${describe(called.value)}）`, server, tool, workspace })
         return
       }
-      sendJson(res, { ok: true, customers: scope.cloud ? customers.filter(customer => scope.allowed.has(customer.id)) : customers, server, tool })
+      sendJson(res, { ok: true, customers: scope.cloud ? customers.filter(customer => scope.allowed.has(customer.id)) : customers, server, tool, workspace })
     }
 
     /* ---- 文章库：某个客户已有的文章 -------------------------------- */
@@ -946,8 +985,9 @@ export function create(ctx, config) {
       const sinceParsed = Date.parse(sinceRaw)
       const since = Number.isFinite(sinceParsed) && sinceParsed > 0 ? sinceParsed : Date.now() - 24 * 3600 * 1000
       function probe(root) {
-        const dir = join(root, client)
         try {
+          if (!root) return { exists: false, files: 0, recent: 0, list: [] }
+          const dir = join(root, client)
           const entries = readdirSync(dir, { withFileTypes: true })
           const files = entries.filter(e => e.isFile()).map(e => e.name)
           let recent = 0
