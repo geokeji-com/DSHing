@@ -8,7 +8,7 @@ function load() {
   let api
   const media = { matches: false }
   const window = { matchMedia: () => media, __ModuleLoader__: { load({ factory }) { api = factory(() => ({})) } } }
-  vm.runInNewContext(source.replace('return module.exports;', 'return {periodsFor, firstPeriodId, splitRefs, buildTaskMetaPayload, wbKeyboardInset, wbSessionStatus, wbNavTakeFrame};'), {window})
+  vm.runInNewContext(source.replace('return module.exports;', 'return {periodsFor, firstPeriodId, splitRefs, buildTaskMetaPayload, wbKeyboardInset, wbSessionStatus, wbMobileProgress, wbNavTakeFrame};'), {window})
   return { api, media }
 }
 const { api } = load()
@@ -44,4 +44,18 @@ test('drawer states are based on evidence, unknown is never labelled stopped', (
 test('mobile frame forcing exits before accessing the DOM', () => {
   const {api,media}=load();media.matches=true
   assert.doesNotThrow(()=>api.wbNavTakeFrame())
+})
+
+
+test('mobile progress uses the latest todo list, not earlier success or failed writes', () => {
+  const todo=(status,isError=false)=>({kind:'tool-result',isError,call:{name:'todo_write',argsRaw:JSON.stringify({todos:[{content:'Current task',status}]})}})
+  assert.equal(api.wbMobileProgress([todo('completed'),todo('in_progress'),todo('completed',true)],null,[],{})[0][0],'run')
+  const cleared={kind:'tool-result',call:{name:'todo_write',argsRaw:'{"todos":[]}'}}
+  assert.equal(api.wbMobileProgress([todo('completed'),cleared],null,[],{}).length,0)
+})
+test('mobile progress counts unique written articles without treating template count as a quota', () => {
+  const write={kind:'tool-result',call:{name:'mcp__articles__write_article',argsRaw:'{"title":"Article"}'}}
+  const rows=api.wbMobileProgress([write,write],{partial:null,runningCalls:[]},[{title:'Article'}],{Article:true})
+  assert.equal(rows[0][1],'本会话已写 1 篇文章')
+  assert.equal(rows[1][1],'已入库 1 篇')
 })
