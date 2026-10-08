@@ -2,35 +2,38 @@
  * npm install --no-save playwright esbuild react react-dom
  * npx playwright install chromium
  * node test/mobile-screens.mjs [output-directory]
- * WB_BASELINE_REF can override the immutable pre-polish desktop comparison.
+ * WB_BASELINE_REF overrides the pre-polish desktop comparison; WB_LIGHT_REF
+ * overrides the pre-dark mobile/review comparison. All browser routes are in memory.
  */
 import { createRequire } from 'node:module'
 import { readFileSync, mkdirSync, writeFileSync } from 'node:fs'
-import { execFileSync } from 'node:child_process'
+import { execFile } from 'node:child_process'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { createServer } from 'node:http'
 import assert from 'node:assert/strict'
-import { isDeepStrictEqual } from 'node:util'
+import { isDeepStrictEqual, promisify } from 'node:util'
+import { darkPalette, auditDarkPage } from './theme-audit.mjs'
 const require = createRequire(import.meta.url)
 const { chromium } = require('playwright')
 const { build } = require('esbuild')
 const here = dirname(fileURLToPath(import.meta.url))
 const out = resolve(process.argv[2] || '/tmp/workbench-mobile-screens')
+const lightRef = process.env.WB_LIGHT_REF || '1be6b0a5eded774af43fe82d7e791d15f3d8bc03'
 const baselineRef = process.env.WB_BASELINE_REF || 'cc166cbc8c179cf598ccac03ac87eb4f3966fdb7'
 mkdirSync(out, { recursive: true })
 const source = readFileSync(resolve(here, '../lib/client.js'), 'utf8')
-const baseline = execFileSync('git', ['show', baselineRef + ':agent-config/plugins/workbench-app/lib/client.js'], { cwd: here, encoding: 'utf8' })
+const baseline = (await promisify(execFile)('git', ['show', baselineRef + ':agent-config/plugins/workbench-app/lib/client.js'], { cwd: here, encoding: 'utf8' })).stdout
+const lightSource = (await promisify(execFile)('git', ['show', lightRef + ':agent-config/plugins/workbench-app/lib/client.js'], { cwd: here, encoding: 'utf8' })).stdout
 function fixture(plugin) {
   return `
 import React from 'react';import {createRoot} from 'react-dom/client';import * as ReactDOM from 'react-dom';
 window.__ModuleLoader__={load({factory}){window.wb=factory(name=>name==='react'?React:ReactDOM)}};
-${plugin.replace('return module.exports;', 'return {apply, WorkbenchPage, SidebarNav, TaskBar, MobileQuickPrompts};')}
+${plugin.replace('return module.exports;', 'return {apply, WorkbenchPage, SidebarNav, TaskBar, MobileQuickPrompts, ReviewTabBody, PickBar};')}
 const h=React.createElement, query=new URLSearchParams(location.search);
 const name=query.has('long')?'北京市海淀区超长名字测试教育科技集团有限公司（华北大区）':'Fixture client A';
 const customers=[{id:'CUS-a',name,files:4,business_lines:[{id:'line-a',name:'Line A'},{id:'line-b',name:'Line B'}],service_periods:[{id:'period-a',name:query.has('duplicate')?name:'Period A',business_line_id:'line-a'},{id:'period-b',name:'Period B',business_line_id:'line-b'}]},{id:'CUS-b',name:'Fixture client B',business_lines:[],service_periods:[]}];
 const ready=query.has('ready');
-const todos=Array.from({length:query.has('many')?24:2},(_,i)=>({content:i?'Write article '+i:'Read knowledge',status:ready||i===0?'completed':'in_progress'}));
+const todos=Array.from({length:query.has('many')?24:2},(_,i)=>({content:i?'Write article '+i:'Read knowledge',status:ready||i===0?'completed':query.has('wait')?'pending':'in_progress'}));
 const nodes=[{kind:'user',content:[{type:'text',text:'Fixture task [任务编号：fixture-1]'}]},{kind:'tool-result',call:{name:'todo_write',argsRaw:JSON.stringify({todos})}},{kind:'tool-result',call:{name:'mcp__articles__write_article',argsRaw:JSON.stringify({title:'Fixture article'})}}];
 const chat={legacy:{nodes,partial:null,runningCalls:[]}};
 window.fixtureWrites=[];
@@ -66,15 +69,15 @@ function Conversation(){
      h('div',{className:'fixture_trailing'},h('button',{className:'fixture_primary','aria-label':'发送'},'↑')))))))));
 }
 function App(){
- const [view,setView]=React.useState(query.has('chat')?'chat':'compose');show=setView;window.fixtureShow=setView;
+ const [view,setView]=React.useState(query.has('review')?'review':query.has('chat')?'chat':'compose');show=setView;window.fixtureShow=setView;
  return h(React.Fragment,null,
   h('div',{className:'fixture_frame',style:{display:'grid',gridTemplateColumns:'248px minmax(0,1fr) 0px',height:'100%'}},
-   h('div',{className:'fixture_sidebarCol'}),h('div',{className:'fixture_centerCol'},view==='compose'?h(wb.WorkbenchPage,{ctx}):h(Conversation)),h('div',{className:'fixture_rightbarCol'})),h(wb.SidebarNav,{wbCtx:ctx}));
+   h('div',{className:'fixture_sidebarCol'}),h('div',{className:'fixture_centerCol'},view==='compose'?h(wb.WorkbenchPage,{ctx}):view==='review'?h(React.Fragment,null,h('div',{style:{height:'calc(100% - 60px)'}},h(wb.ReviewTabBody,{sessionId:'fixture-session',useChat:fn=>fn(chat)})),h(wb.PickBar)):h(Conversation)),h('div',{className:'fixture_rightbarCol'})),h(wb.SidebarNav,{wbCtx:ctx}));
 }
 createRoot(document.getElementById('root')).render(h(App));
 `;
 }
-const bundles = await Promise.all([source, baseline].map(plugin => build({stdin:{contents:fixture(plugin),resolveDir:dirname(require.resolve('react/package.json')),loader:'js'},bundle:true,write:false,format:'iife',define:{'process.env.NODE_ENV':'"development"'},nodePaths:(process.env.NODE_PATH||'').split(':').filter(Boolean)})))
+const bundles = await Promise.all([source, baseline, lightSource].map(plugin => build({stdin:{contents:fixture(plugin),resolveDir:dirname(require.resolve('react/package.json')),loader:'js'},bundle:true,write:false,format:'iife',define:{'process.env.NODE_ENV':'"development"'},nodePaths:(process.env.NODE_PATH||'').split(':').filter(Boolean)})))
 // Reproduce the upstream public scroll/seat contract: header above a flex body,
 // transcript and sticky seat inside one scrollport. The old plain-text fixture
 // had neither a scrollport nor message nodes, so it could not catch W2.
@@ -89,17 +92,62 @@ const html = `<!doctype html><meta charset="utf-8"><meta name="viewport" content
 .fixture_composerSeat{display:flex;flex:none;flex-direction:column;position:sticky;bottom:0;background:white}
 @media(max-width:767px){html{--dsh-tabbar-h:52px}#root{height:calc(100dvh - var(--dsh-tabbar-h))}dsh-tabbar{display:flex;position:fixed;bottom:0;left:0;right:0;height:52px;background:white;z-index:200}dsh-tabbar a{flex:1;text-align:center;padding:12px 0}html[data-dsh-chrome=flow]{--dsh-tabbar-h:0px}html[data-dsh-chrome=flow] dsh-tabbar{display:none}}
 </style><div id="root"></div><dsh-tabbar>${['工作台','文章','投放','计划','更多'].map(x=>`<a href="#">${x}</a>`).join('')}</dsh-tabbar><script src="BUNDLE"></script>`
-const server = createServer((req,res) => {
- const old = req.url.startsWith('/baseline')
- const script = req.url.split('?')[0].endsWith('.js')
- res.setHeader('Content-Type', script ? 'text/javascript; charset=utf-8' : 'text/html; charset=utf-8')
- res.end(script ? bundles[old?1:0].outputFiles[0].text : html.replace('BUNDLE',old?'/baseline.js':'/fixture.js'))
-})
-await new Promise(r=>server.listen(0,'127.0.0.1',r))
-const base = `http://127.0.0.1:${server.address().port}`
-const browser = await chromium.launch({headless:true})
-const errors = [], results = [], skipped = [], metrics = [], desktop = []
+// Route fulfillment is entirely in-memory: no HTTP server or network host.
+const base = 'http://workbench.fixture.invalid'
+let browser
+try { browser = await chromium.launch({headless:true}) } catch(error) {
+ writeFileSync(out+'/run-status.json',JSON.stringify({status:'blocked',stage:'chromium-launch',message:error.message,baselineRef,lightRef,screenshots:[],network:'All fixture routes fulfilled in memory; no host contacted'},null,2))
+ throw error
+}
+const errors = [], results = [], skipped = [], metrics = [], desktop = [], contrast = [], light = []
+async function newPage(options) {
+ const page = await browser.newPage({...options,serviceWorkers:'block'})
+ page.on('pageerror',e=>errors.push(e.message))
+ await page.route('**/*',route=>{
+  const url=new URL(route.request().url())
+  if(url.origin!==base || !/^\/(?:baseline|light-ref|fixture)?(?:\.js)?$/.test(url.pathname)){
+   errors.push('Blocked unexpected request: '+url.href);return route.abort()
+  }
+  const index=url.pathname.startsWith('/baseline')?1:url.pathname.startsWith('/light-ref')?2:0
+  const script=url.pathname.endsWith('.js')
+  return route.fulfill({contentType:script?'text/javascript; charset=utf-8':'text/html; charset=utf-8',body:script?bundles[index].outputFiles[0].text:html.replace('BUNDLE',index===1?'/baseline.js':index===2?'/light-ref.js':'/fixture.js')})
+ })
+ return page
+}
 function pass(name) { results.push(name) }
+function firstSnapshotDifference(expected,actual,path='$') {
+ if(isDeepStrictEqual(expected,actual))return null
+ if(Array.isArray(expected)&&Array.isArray(actual)){
+  for(let i=0;i<Math.max(expected.length,actual.length);i++){
+   const difference=firstSnapshotDifference(expected[i],actual[i],path+'['+i+']')
+   if(difference)return difference
+  }
+ }else if(expected&&actual&&typeof expected==='object'&&typeof actual==='object'){
+  // Prefer an element/property over the full serialized DOM when both differ.
+  const keys=[...new Set([...Object.keys(expected),...Object.keys(actual)])].sort((a,b)=>Number(a==='dom')-Number(b==='dom'))
+  for(const key of keys){
+   const difference=firstSnapshotDifference(expected[key],actual[key],path+'['+JSON.stringify(key)+']')
+   if(difference)return difference
+  }
+ }
+ let offset=0
+ if(typeof expected==='string'&&typeof actual==='string'){
+  while(offset<Math.min(expected.length,actual.length)&&expected[offset]===actual[offset])offset++
+  path+=' (character '+offset+')'
+ }
+ const brief=value=>{
+  if(value===undefined)return '<missing>'
+  const text=typeof value==='string'?JSON.stringify(value.slice(Math.max(0,offset-40))):JSON.stringify(value)
+  return text.length>180?text.slice(0,180)+'…':text
+ }
+ return path+': expected '+brief(expected)+'; actual '+brief(actual)
+}
+function assertSnapshotsEqual(actual,expected,name,file) {
+ if(isDeepStrictEqual(actual,expected))return
+ const difference=firstSnapshotDifference(expected,actual), path=resolve(out,file)
+ writeFileSync(path,JSON.stringify({expected,actual,firstDifference:difference},null,2))
+ assert.fail(name+'; first difference: '+difference+'; snapshots: '+path)
+}
 async function assertRoundCircles(page,selector,name) {
  const shapes=await page.locator(selector).evaluateAll(elements=>CSS.supports('corner-shape','round')?elements.map(el=>getComputedStyle(el).getPropertyValue('corner-shape').trim()):null)
  if(shapes===null){skipped.push(name+' (corner-shape unsupported)');return}
@@ -131,6 +179,17 @@ async function assertKeyboard(page,height,offset=0) {
  await noOverflow(page)
 }
 async function snapshot(page) {
+ if(page.viewportSize().width>=768){
+  // SidebarNav schedules ensureGrip after 600 ms and repeats tick every 4000 ms
+  // in client.js (including both references). Let a full tick run after each
+  // navigation/state/viewport/theme change, then require the real injection.
+  // Keep the grip in both DOM and style/geometry comparisons.
+  await page.waitForTimeout(4000)
+  await page.waitForFunction(()=>{
+   const col=document.querySelector('[class*="rightbarCol"]')
+   return !col||!!col.querySelector('.wb_grip')
+  },null,{timeout:12000})
+ }
  await page.evaluate(()=>{document.activeElement?.blur();document.querySelectorAll('[data-conversation-scroll]').forEach(el=>el.scrollTop=0)})
  await settle(page)
  return page.evaluate(()=>{
@@ -141,10 +200,39 @@ async function snapshot(page) {
   return {dom:tree.outerHTML,elements:elements.map(el=>{const s=getComputedStyle(el),r=el.getBoundingClientRect();return {tag:el.tagName,class:el.className,rect:[r.x,r.y,r.width,r.height],styles:Object.fromEntries(Array.from(s).filter(k=>!k.startsWith('--')).map(k=>[k,s.getPropertyValue(k)]))}})};
  })
 }
+async function dark(page) {
+ await page.addStyleTag({content:darkPalette})
+ const station=await page.evaluate(()=>{const station=document.documentElement.getAttribute('data-dsh-station');document.documentElement.setAttribute('data-dsh-station','workbench');document.body.setAttribute('data-ds-dark-theme','');return station})
+ await settle(page)
+ return station
+}
+async function inspectDark(page,name) {
+ await settle(page);await noOverflow(page);await screenshot(page,name)
+ contrast.push(await auditDarkPage(page,name))
+ writeFileSync(out+'/contrast.json',JSON.stringify(contrast,null,2))
+}
+async function lightStates(page,mobile) {
+ const states={}
+ await page.locator(mobile?'.wb_mStart:not(:disabled)':'.wb_nv').waitFor()
+ if(!mobile)await page.getByText('Fixture client A',{exact:true}).first().waitFor({state:'attached'});await page.waitForTimeout(150)
+ states.assembly=await snapshot(page)
+ if(mobile){
+  await page.locator('.wb_mContext').click();states.sheet=await snapshot(page)
+  await page.getByRole('button',{name:'确定',exact:true}).click()
+  await page.getByRole('button',{name:'打开会话抽屉'}).click();states.drawer=await snapshot(page)
+  await page.locator('.wb_mSession').click();await page.getByRole('button',{name:/去审核/}).waitFor();states.chat=await snapshot(page)
+  await page.locator('.wb_mProgress summary').click();states.progress=await snapshot(page);await page.locator('.wb_mProgress summary').click()
+  await page.getByRole('button',{name:/去审核/}).click();await page.locator('.wb_mReviewItem').waitFor();states.review=await snapshot(page)
+  await page.locator('.wb_mReviewItem').click();await page.getByText('Fixture article body',{exact:true}).waitFor();states.article=await snapshot(page)
+ }else{
+  await page.evaluate(()=>fixtureShow('review'));await page.locator('.wb_ri').waitFor();states.review=await snapshot(page)
+  await page.locator('.wb_ri').click();await page.getByText('Fixture article body',{exact:true}).waitFor();states.article=await snapshot(page)
+ }
+ return states
+}
 try {
  for (const [width,height,kb] of [[375,667,400],[393,852,511],[430,932,591]]) {
-  const page=await browser.newPage({viewport:{width,height},deviceScaleFactor:3,isMobile:true,hasTouch:true})
-  page.on('pageerror',e=>errors.push(e.message))
+  const page=await newPage({viewport:{width,height},deviceScaleFactor:3,isMobile:true,hasTouch:true})
   await page.goto(base);await page.locator('.wb_mStart:not(:disabled)').waitFor()
   const geometry=await page.evaluate(()=>{const frame=document.querySelector('[class*="_frame"]'),btn=document.querySelector('.wb_mStart'),r=btn.getBoundingClientRect(),bar=document.querySelector('dsh-tabbar').getBoundingClientRect();return {cols:getComputedStyle(frame).gridTemplateColumns,nav:!!document.querySelector('.wb_nv'),bottom:r.bottom,bar:bar.top,hit:btn.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2))}})
   await noOverflow(page);assert.equal(geometry.nav,false);assert.ok(geometry.cols.startsWith('0px '+width+'px'));assert.ok(geometry.bottom<=geometry.bar);assert.equal(geometry.hit,true)
@@ -201,7 +289,7 @@ try {
   assert.deepEqual(await page.evaluate(()=>fixtureWrites),[]);await page.close()
  }
  // Long and duplicate names use the real components and the same fixture APIs.
- const page=await browser.newPage({viewport:{width:375,height:667},deviceScaleFactor:3,isMobile:true,hasTouch:true});page.on('pageerror',e=>errors.push(e.message))
+ const page=await newPage({viewport:{width:375,height:667},deviceScaleFactor:3,isMobile:true,hasTouch:true})
  await page.goto(base+'/?long');await page.locator('.wb_mStart:not(:disabled)').waitFor()
  const long=await page.locator('.wb_mContext').evaluate(el=>{const t=el.querySelector('b'),r=el.getBoundingClientRect(),c=el.querySelector('svg').getBoundingClientRect();return {height:t.offsetHeight,clamp:getComputedStyle(t).webkitLineClamp,center:r.y+r.height/2-c.y-c.height/2}})
  assert.ok(long.height<=48);assert.equal(long.clamp,'2');assert.equal(long.center,0);await noOverflow(page);await screenshot(page,'long-context')
@@ -216,17 +304,71 @@ try {
  for (const width of [768,1024,1440]) {
   const height=width===1440?900:852, pair=[]
   for (const prefix of ['/baseline','']) {
-   const p=await browser.newPage({viewport:{width,height}});p.on('pageerror',e=>errors.push(e.message));await p.goto(base+prefix);await p.locator('.wb_nv').waitFor();await p.getByText('Fixture client A',{exact:true}).first().waitFor({state:'attached'});await p.waitForTimeout(150)
+   const p=await newPage({viewport:{width,height}});await p.goto(base+prefix);await p.locator('.wb_nv').waitFor();await p.getByText('Fixture client A',{exact:true}).first().waitFor({state:'attached'});await p.waitForTimeout(150)
    assert.equal((await p.locator('.wb_nv').boundingBox()).width,248);assert.equal(await p.locator('.wb_mAssembly').count(),0)
    const compose=await snapshot(p);await screenshot(p,(prefix?'baseline-':'')+'desktop-'+width)
    await p.locator('.wb_nvItem').click();await p.locator('.wb_taskbar, .wb_task').waitFor();await p.waitForTimeout(150);const chat=await snapshot(p)
    await screenshot(p,(prefix?'baseline-':'')+'desktop-chat-'+width);pair.push({compose,chat})
-   if(!prefix){await p.setViewportSize({width:393,height:852});await p.locator('.wb_mPinned').waitFor();await viewport(p,511);await p.setViewportSize({width,height});await p.locator('.wb_taskbar, .wb_task').waitFor();await settle(p);const restored=await snapshot(p);writeFileSync(out+'/desktop-roundtrip-'+width+'.json',JSON.stringify({before:chat,after:restored}));assert.ok(isDeepStrictEqual(restored,chat),'desktop roundtrip differs at '+width+'; see desktop-roundtrip JSON');pass(width+': mobile keyboard to desktop restores DOM/styles/geometry')}
+   if(!prefix){await p.setViewportSize({width:393,height:852});await p.locator('.wb_mPinned').waitFor();await viewport(p,511);await p.setViewportSize({width,height});await p.locator('.wb_taskbar, .wb_task').waitFor();await settle(p);const restored=await snapshot(p);writeFileSync(out+'/desktop-roundtrip-'+width+'.json',JSON.stringify({before:chat,after:restored}));assertSnapshotsEqual(restored,chat,'desktop roundtrip differs at '+width,'desktop-roundtrip-'+width+'-diff.json');pass(width+': mobile keyboard to desktop restores DOM/styles/geometry')}
    await p.close()
   }
-  writeFileSync(out+'/desktop-'+width+'.json',JSON.stringify(pair));assert.ok(isDeepStrictEqual(pair[1],pair[0]),'desktop baseline differs at '+width+'; see desktop JSON');desktop.push({width,states:['compose','chat'],nodes:pair[0].compose.elements.length+pair[0].chat.elements.length,differences:0});pass(width+': desktop equals baseline DOM/styles/geometry')
+  writeFileSync(out+'/desktop-'+width+'.json',JSON.stringify(pair));assertSnapshotsEqual(pair[1],pair[0],'desktop baseline differs at '+width,'desktop-'+width+'-diff.json');desktop.push({width,states:['compose','chat'],nodes:pair[0].compose.elements.length+pair[0].chat.elements.length,differences:0});pass(width+': desktop equals baseline DOM/styles/geometry')
  }
+ // Compare every standard computed property/rectangle with the immutable pre-dark source,
+ // including mobile surfaces absent from the older desktop regression baseline.
+ for(const width of [393,1440]){
+  const pair=[]
+  for(const prefix of ['/light-ref','']){
+   const p=await newPage({viewport:{width,height:width===393?852:900},...(width===393?{deviceScaleFactor:3,isMobile:true,hasTouch:true}:{})})
+   await p.goto(base+prefix);pair.push(await lightStates(p,width===393));await p.close()
+  }
+  writeFileSync(out+'/light-'+width+'.json',JSON.stringify(pair))
+  assertSnapshotsEqual(pair[1],pair[0],'light identity differs at '+width,'light-'+width+'-diff.json')
+  light.push({width,states:Object.keys(pair[0]),differences:0});pass(width+': light identity against pre-dark source')
+ }
+ // The fixture uses real components for review and PickBar as well as assembly/chat.
+ const d=await newPage({viewport:{width:1440,height:900}})
+ await d.goto(base);await d.locator('.wb_nvItem').waitFor();await d.waitForTimeout(150)
+ const lightBefore=await snapshot(d), desktopStation=await dark(d);await inspectDark(d,'dark-desktop-assembly-1440')
+ assert.equal(await d.locator('.wb_nv').evaluate(el=>getComputedStyle(el).backgroundColor),'rgb(27, 27, 28)')
+ await d.evaluate(station=>{document.body.removeAttribute('data-ds-dark-theme');if(station===null)document.documentElement.removeAttribute('data-dsh-station');else document.documentElement.setAttribute('data-dsh-station',station)},desktopStation)
+ assertSnapshotsEqual(await snapshot(d),lightBefore,'desktop live toggle restores light DOM/styles/geometry','desktop-live-toggle-diff.json')
+ pass('desktop live dark/light switch without reload');await dark(d)
+ await d.locator('.wb_nvItem').hover();await inspectDark(d,'dark-desktop-sidebar-hover-1440')
+ await d.locator('.wb_nvItem').click();await d.locator('.wb_taskbar, .wb_task').waitFor();await inspectDark(d,'dark-desktop-chat-1440')
+ await d.evaluate(()=>fixtureShow('review'));await d.locator('.wb_ri').waitFor();await inspectDark(d,'dark-desktop-review-empty-1440')
+ await d.locator('.wb_pkChip').click();await d.locator('.wb_ri').click();await d.getByText('Fixture article body',{exact:true}).waitFor();await inspectDark(d,'dark-desktop-review-1440')
+ await d.goto(base+'/?review&ready');await d.locator('.wb_ri.done').waitFor();await dark(d);await d.locator('.wb_ri.done').click();await d.getByText('Fixture article body',{exact:true}).waitFor();await inspectDark(d,'dark-desktop-review-done-1440');await d.close()
+ const m=await newPage({viewport:{width:393,height:852},deviceScaleFactor:3,isMobile:true,hasTouch:true})
+ await m.goto(base);await m.locator('.wb_mStart:not(:disabled)').waitFor();await m.waitForTimeout(150)
+ const mobileLight=await snapshot(m), mobileStation=await dark(m);await inspectDark(m,'dark-mobile-assembly-393')
+ await m.evaluate(station=>{document.body.removeAttribute('data-ds-dark-theme');if(station===null)document.documentElement.removeAttribute('data-dsh-station');else document.documentElement.setAttribute('data-dsh-station',station)},mobileStation)
+ assertSnapshotsEqual(await snapshot(m),mobileLight,'mobile live toggle restores light DOM/styles/geometry','mobile-live-toggle-diff.json')
+ pass('mobile live dark/light switch without reload');await dark(m)
+ await m.locator('.wb_mStyles .wb_mChip').first().click();await inspectDark(m,'dark-mobile-selected-style-393')
+ await m.locator('.wb_mAdd').click();await inspectDark(m,'dark-mobile-reference-editor-393')
+ await m.getByRole('textbox',{name:'参考链接或正文'}).fill('https://example.test/reference');await m.getByRole('button',{name:'完成',exact:true}).click();await inspectDark(m,'dark-mobile-reference-393')
+ await m.getByRole('button',{name:/用模板/}).click();await m.getByRole('button',{name:'Fixture personal template',exact:true}).click();await inspectDark(m,'dark-mobile-templates-393')
+ await m.locator('.wb_mExtra').click();await inspectDark(m,'dark-mobile-extra-editor-393');await m.getByRole('button',{name:'完成',exact:true}).click()
+ await m.getByRole('button',{name:'自己输入',exact:true}).click();await inspectDark(m,'dark-mobile-topic-393')
+ await m.locator('.wb_mContext').click();await inspectDark(m,'dark-mobile-sheet-393');await m.getByRole('button',{name:'确定',exact:true}).click()
+ await m.getByRole('button',{name:'打开会话抽屉'}).click();await inspectDark(m,'dark-mobile-drawer-393')
+ await m.locator('.wb_mSession').click();await m.getByRole('button',{name:/去审核/}).waitFor();await inspectDark(m,'dark-mobile-chat-393')
+ await m.locator('.wb_mProgress summary').click();await inspectDark(m,'dark-mobile-progress-393');await m.locator('.wb_mProgress summary').click()
+ await m.getByRole('button',{name:'会话更多操作'}).click();await inspectDark(m,'dark-mobile-menu-393');await m.getByRole('button',{name:'重命名',exact:true}).click();await inspectDark(m,'dark-mobile-rename-393');await m.getByRole('button',{name:'关闭',exact:true}).click()
+ await m.getByRole('button',{name:/去审核/}).click();await m.locator('.wb_mReviewItem').waitFor();await inspectDark(m,'dark-mobile-review-393')
+ await m.locator('.wb_mReviewItem').click();await m.getByText('Fixture article body',{exact:true}).waitFor();await inspectDark(m,'dark-mobile-article-393')
+ await m.goto(base+'/?chat&wait');await m.getByRole('button',{name:/去审核/}).waitFor();await dark(m);await m.locator('.wb_mProgress summary').click();await inspectDark(m,'dark-mobile-progress-wait-393')
+ await m.goto(base+'/?chat&ready');await m.getByRole('button',{name:/查看文章/}).waitFor();await dark(m);await inspectDark(m,'dark-mobile-chat-ready-393')
+ await m.goto(base+'/?empty');await m.getByText('还没有分配给你的客户',{exact:true}).waitFor();await dark(m);await inspectDark(m,'dark-mobile-disabled-393')
+ await m.locator('.wb_mContext').click();await inspectDark(m,'dark-mobile-empty-sheet-393')
+ assert.deepEqual(await m.evaluate(()=>fixtureWrites),[]);await m.close()
+ const violations=contrast.flatMap(r=>[...r.failures,...r.nearWhite].map(v=>({page:r.name,...v})))
+ assert.deepEqual(violations,[],'dark contrast/near-white violations; see contrast.json')
+ pass('dark text, placeholders, state indicators and surface audit: '+contrast.length+' pages')
  assert.deepEqual(errors,[])
- const report={passed:results.length,skipped,errors,mobileDPR:3,baselineRef,screenshots:out,checks:results,metrics,desktop}
- writeFileSync(out+'/results.json',JSON.stringify(report,null,2));console.log(JSON.stringify({passed:results.length,skipped,errors,desktop,screenshots:out}))
-} finally { await browser.close();server.close() }
+ const report={passed:results.length,skipped,errors,mobileDPR:3,baselineRef,lightRef,light,contrast:contrast.map(({name,checked,states,failures,nearWhite,intentional})=>({name,texts:checked.length,states:states.length,failures,nearWhite,intentional})),screenshots:out,checks:results,metrics,desktop}
+ writeFileSync(out+'/run-status.json',JSON.stringify({status:'passed'},null,2));writeFileSync(out+'/results.json',JSON.stringify(report,null,2));console.log(JSON.stringify({passed:results.length,skipped,errors,desktop,screenshots:out}))
+} catch(error) {
+ writeFileSync(out+'/run-status.json',JSON.stringify({status:'failed',message:error.message,completed:results,screenshots:out},null,2));throw error
+} finally { await browser.close() }
