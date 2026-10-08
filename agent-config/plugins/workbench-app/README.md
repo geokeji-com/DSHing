@@ -117,7 +117,11 @@ npm test
 npm install --no-save playwright esbuild react react-dom
 npx playwright install chromium
 npm run test:mobile -- /tmp/workbench-mobile-screens
-# 本工作区已有测试依赖时（从仓库根目录运行）：
+```
+
+本工作区已有测试依赖时，从仓库根目录运行：
+
+```sh
 NODE_PATH=/workspace/mobile-audit/tool/node_modules:/workspace/dsh-cloud/publish-web/node_modules \
   node agent-config/plugins/workbench-app/test/mobile-screens.mjs /tmp/wb-polish-r1
 ```

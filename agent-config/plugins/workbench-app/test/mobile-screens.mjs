@@ -160,7 +160,7 @@ try {
   await page.getByRole('button',{name:'打开会话抽屉'}).click();await page.locator('.wb_mSession').click();await page.getByRole('button',{name:/去审核/}).waitFor();await settle(page)
   assert.equal(await page.locator('html').getAttribute('data-dsh-chrome'),'flow');assert.equal(await page.locator('dsh-tabbar').isVisible(),false)
   const rest=await chatMetrics(page);metrics.push({width,state:'rest',...rest});assert.ok(rest.pinned<=56);assert.ok(rest.scrollTop-rest.top<=56,'all pinned chrome under top bar must fit in 56px');assert.ok(rest.visible);assert.equal(rest.scrollBottom,rest.composerTop)
-  const summary=page.locator('.wb_mProgress summary');assert.ok((await summary.boundingBox()).height>=44);assert.equal(await summary.locator('svg').count(),1)
+  const summary=page.locator('.wb_mProgress summary');assert.ok((await summary.boundingBox()).height>=44);assert.equal(await summary.locator('svg').count(),1);assert.equal(await summary.evaluate(el=>getComputedStyle(el).fontSize),'16px')
   await screenshot(page,'c-'+width);await summary.click();assert.equal(await page.locator('.wb_mProgress').getAttribute('open'),'');assert.ok((await page.locator('.wb_mChecklist').boundingBox()).height<=height*.4)
   await screenshot(page,'c-progress-'+width);await summary.click();assert.equal(await page.locator('.wb_mProgress').getAttribute('open'),null);await noOverflow(page);pass(width+': compact pinned row and progress toggle')
   await page.getByRole('button',{name:'会话更多操作'}).click()

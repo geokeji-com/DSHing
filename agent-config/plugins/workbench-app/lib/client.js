@@ -771,7 +771,7 @@ html[data-wb-mobile] .wb_mChat .wb_mTop{background:#fff;border-bottom:1px solid 
 html[data-wb-mobile] .wb_mChat .wb_mHeading b{font-size:17px;line-height:22px}
 html[data-wb-mobile] .wb_mPinned{position:relative;display:flex;align-items:center;gap:8px;height:56px;padding:4px 16px;background:var(--dsh-card,#fff);border-bottom:1px solid var(--wb-line)}
 html[data-wb-mobile] .wb_mPinned:empty{display:none}
-html[data-wb-mobile] .wb_mProgress{flex:1;min-width:0;margin:0;padding:0;font-size:14px;line-height:24px}
+html[data-wb-mobile] .wb_mProgress{flex:1;min-width:0;margin:0;padding:0;font-size:16px;line-height:24px}
 html[data-wb-mobile] .wb_mProgress summary{display:flex;align-items:center;gap:4px;list-style:none;font-weight:700;cursor:pointer;min-height:48px;white-space:nowrap}
 html[data-wb-mobile] .wb_mProgress summary::-webkit-details-marker{display:none}
 html[data-wb-mobile] .wb_mProgress summary::marker{content:''}
@@ -779,7 +779,7 @@ html[data-wb-mobile] .wb_mProgress summary small{font-size:13px;color:var(--dsh-
 html[data-wb-mobile] .wb_mProgress summary svg{flex:none;width:24px;height:24px}
 html[data-wb-mobile] .wb_mProgress[open] summary svg{transform:rotate(180deg)}
 html[data-wb-mobile] .wb_mChecklist{position:absolute;top:100%;left:16px;right:16px;z-index:1200;max-height:calc(var(--wb-vv-h,100dvh) * .4);overflow:auto;overscroll-behavior:contain;padding:16px;border-radius:var(--dsh-r-m,14px);background:var(--dsh-card,#fff);box-shadow:var(--dsh-shadow-2,0 8px 24px #0e14301a)}
-html[data-wb-mobile] .wb_mProgress .wb_trow{padding:3px 0;font-size:15px;gap:10px}
+html[data-wb-mobile] .wb_mProgress .wb_trow{padding:3px 0;font-size:16px;gap:10px}
 html[data-wb-mobile] .wb_mProgress .wb_ticon{width:22px;height:22px;flex:none;border-radius:50%;font-size:18px;display:grid;place-items:center}
 html[data-wb-mobile] .wb_mProgress .wb_ticon[data-s=done]{background:var(--dsh-green,#14a05a);color:#fff}
 html[data-wb-mobile] .wb_mPinned .wb_mPending{display:flex;align-items:center;justify-content:center;gap:4px;min-width:0;max-width:60%;min-height:48px;margin:0 0 0 auto;padding:0 8px;border:0;border-radius:var(--dsh-r-s,10px);background:var(--dsh-orange-50,#fff1e6);color:var(--dsh-orange-700,#d9480f)}
