@@ -5,6 +5,171 @@ window.__ModuleLoader__.load({
 		var exports = module.exports;
 		var React = require("react");
 		var h = React.createElement;
+		var createPortal = require("react-dom").createPortal;
+		/* Mobile adapters: keep the desktop tree and every write handler intact. */
+		var WB_MOBILE = window.matchMedia('(max-width: 767px)');
+		function useWbMobile() {
+			var st = React.useState(WB_MOBILE.matches);
+			React.useEffect(function () {
+				function changed() { st[1](WB_MOBILE.matches); }
+				WB_MOBILE.addEventListener('change', changed);
+				return function () { WB_MOBILE.removeEventListener('change', changed); };
+			}, []);
+			return st[0];
+		}
+		function wbKeyboardInset(height, viewport) {
+			return !viewport || viewport.scale !== 1 ? 0 : Math.max(0, height - viewport.height - viewport.offsetTop);
+		}
+		function wbSessionStatus(record) {
+			if (record && record.running === true) return { tone: 'blue', label: '写作中' };
+			if (record && record.pending > 0) return { tone: 'orange', label: record.pending + ' 篇草稿待审' };
+			if (record && record.confirmed > 0) return { tone: 'green', label: '已入库 ' + record.confirmed + ' 篇' };
+			return { tone: 'grey', label: record && record.running === false ? '已停止' : '状态未同步' };
+		}
+		function wbInstallMobile() {
+			var root = document.documentElement;
+			var previousFrame = null, previousColumns = '';
+			function viewport() {
+				if (!WB_MOBILE.matches) return;
+				root.style.setProperty('--wb-kb', wbKeyboardInset(window.innerHeight, window.visualViewport) + 'px');
+				root.style.setProperty('--wb-vv-top', (window.visualViewport ? window.visualViewport.offsetTop : 0) + 'px');
+				root.style.setProperty('--wb-vv-h', (window.visualViewport ? window.visualViewport.height : window.innerHeight) + 'px');
+			}
+			function changed() {
+				root.toggleAttribute('data-wb-mobile', WB_MOBILE.matches);
+				if (WB_MOBILE.matches) {
+					// Only this adapter knows the upstream frame structure. CSS handles later mounts.
+					var frame = document.querySelector('[class*="_frame"]');
+					if (frame && !previousFrame) { previousFrame = frame; previousColumns = frame.style.gridTemplateColumns; frame.style.removeProperty('grid-template-columns'); }
+					viewport();
+				} else {
+					if (previousFrame) previousFrame.style.gridTemplateColumns = previousColumns;
+					previousFrame = null;
+					delete root.dataset.wbScene;
+					if (root.dataset.wbFlow === '1') { delete root.dataset.wbFlow; delete root.dataset.dshChrome; }
+					root.style.removeProperty('--wb-kb');
+					wbNavTakeFrame();
+				}
+			}
+			changed(); WB_MOBILE.addEventListener('change', changed);
+			var vv = window.visualViewport;
+			if (vv) { vv.addEventListener('resize', viewport); vv.addEventListener('scroll', viewport); }
+			window.addEventListener('resize', viewport);
+			return function () {
+				WB_MOBILE.removeEventListener('change', changed);
+				window.removeEventListener('resize', viewport);
+				if (vv) { vv.removeEventListener('resize', viewport); vv.removeEventListener('scroll', viewport); }
+				if (previousFrame) previousFrame.style.gridTemplateColumns = previousColumns;
+				root.removeAttribute('data-wb-mobile'); delete root.dataset.wbScene;
+				if (root.dataset.wbFlow === '1') { delete root.dataset.wbFlow; delete root.dataset.dshChrome; }
+			};
+		}
+		function useWbScene(mobile, scene) {
+			React.useEffect(function () {
+				if (!mobile) return;
+				var root = document.documentElement;
+				root.dataset.wbScene = scene;
+				if (scene !== 'compose') { root.dataset.dshChrome = 'flow'; root.dataset.wbFlow = '1'; }
+				else if (root.dataset.wbFlow === '1') { delete root.dataset.dshChrome; delete root.dataset.wbFlow; }
+				return function () {
+					if (root.dataset.wbScene === scene) delete root.dataset.wbScene;
+					if (root.dataset.wbFlow === '1') { delete root.dataset.dshChrome; delete root.dataset.wbFlow; }
+				};
+			}, [mobile, scene]);
+		}
+		function wbIcon(name) {
+			var paths = { menu: 'M4 6h16M4 12h16M4 18h10', back: 'M15 5l-7 7 7 7', close: 'M6 6l12 12M18 6L6 18', next: 'M9 6l6 6-6 6', plus: 'M12 5v14M5 12h14', star: 'M12 3l2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5z' };
+			return h('svg', {width:24,height:24,viewBox:'0 0 24 24',fill:'none',stroke:'currentColor',strokeWidth:2,strokeLinecap:'round',strokeLinejoin:'round','aria-hidden':true}, h('path',{d:paths[name] || paths.next}));
+		}
+		function MobileTopBar(p) {
+			return h('header',{className:'wb_mTop'},
+				h('button',{type:'button',className:'wb_mIcon','aria-label':p.back?'返回':'打开会话抽屉',onClick:p.back || function(){wbNavState.drawer=true;wbNavEmit();}},wbIcon(p.back?'back':'menu')),
+				h('div',{className:'wb_mHeading'},h('b',null,p.title),p.sub?h('small',null,p.sub):null),
+				p.more?h('button',{type:'button',className:'wb_mIcon','aria-label':'会话更多操作',onClick:p.more},'⋯'):null);
+		}
+		function MobileModal(p) {
+			var ref=React.useRef(null);
+			React.useEffect(function(){
+				var previous=document.activeElement, el=ref.current;
+				if(el) el.focus();
+				function key(e){
+					if(e.key==='Escape'){e.preventDefault();p.close();}
+					if(e.key==='Tab' && el){var items=Array.from(el.querySelectorAll('button:not(:disabled),input,textarea,[tabindex="0"]'));var first=items[0],last=items[items.length-1];if(e.shiftKey && (document.activeElement===first || document.activeElement===el)){e.preventDefault();last&&last.focus();}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first&&first.focus();}}
+				}
+				document.addEventListener('keydown',key);
+				return function(){document.removeEventListener('keydown',key);if(previous&&previous.isConnected)previous.focus({preventScroll:true});};
+			},[]);
+			return createPortal(h('div',{className:'wb_mScrim',onClick:function(e){if(e.target===e.currentTarget)p.close();}},
+				h('section',{ref:ref,tabIndex:-1,role:'dialog','aria-modal':true,'aria-label':p.title,className:p.full?'wb_mEditor':'wb_mSheet'},
+					!p.full?h('div',{className:'wb_mGrab'}):null,
+					h('div',{className:'wb_mSheetHead'},h('h2',null,p.title),h('button',{type:'button',className:'wb_mIcon','aria-label':'关闭',onClick:p.close},wbIcon('close'))),p.children)),document.body);
+		}
+		function MobileAssembly(p) {
+			var sheet=React.useState(false), editor=React.useState(''), addText=React.useState(''), fileError=React.useState('');
+			var close=function(){editor[1]('');};
+			var setClient=function(c){p.onClient({target:{value:customerId(c)}});};
+			function chip(label,on,click,key){return h('button',{type:'button',key:key||label,className:'wb_mChip','aria-pressed':on,onClick:click},on?'✓ '+label:label);}
+			function segment(items,value,set){return h('div',{className:'wb_mSegment'},items.map(function(item){return h('button',{type:'button',key:item[0],'aria-pressed':value===item[0],onClick:function(){set(item[0]);}},item[1]);}));}
+			var empty=p.clients.status==='ready'&&p.clients.customers.length===0;
+			var contextText=[p.clientName,p.lineName,p.periodName].filter(Boolean).join(' · ');
+			var layers=[['personal','个人层'],['middle','个人中间层'],['public','公共层'],['other','其他技能']];
+			function skillLayer(s){var raw=String(s.layer||'');return raw==='personal'||raw==='个人'?'personal':raw==='middle'||raw==='_middle'||raw.indexOf('中')>=0?'middle':raw==='public'||raw==='公共'?'public':'other';}
+			return h('div',{className:'wb_mAssembly'},h(MobileTopBar,{title:'新建任务'}),
+				h('div',{className:'wb_mForm'},
+					h('button',{type:'button',className:'wb_mContext',onClick:function(){sheet[1](true);}},h('span',{className:'wb_mAvatar'},(p.clientName||'客').slice(0,1)),h('span',{className:'wb_mGrow'},h('small',null,'写给'),h('b',null,contextText||(empty?'请选择客户':p.clients.status==='loading'?'客户加载中…':'请选择客户'))),wbIcon('next')),
+					empty?h('div',{className:'wb_mEmpty'},h('b',null,'还没有分配给你的客户'),h('p',null,'联系管理员')):null,
+					p.clients.status==='error'?h('div',{className:'wb_mEmpty',role:'status'},'客户暂时无法加载，请稍后刷新重试'):null,
+					h('h3',null,'主题'),segment([['weak','薄弱问句'],['free','自己输入']],p.mode,p.setMode),
+					p.mode==='weak'?h('div',{className:'wb_mEmpty'},h('p',null,'薄弱问句库还未接入，先输入你想写的主题'),h('button',{type:'button',className:'wb_mLink',onClick:function(){p.setMode('free');}},'改为自己输入')):h('textarea',{className:'wb_mTopic','aria-label':'主题',placeholder:'想写什么选题，直接打。',value:p.topic,onChange:function(e){p.setTopic(e.target.value);},rows:2}),
+					h('h3',null,'怎么写'),segment([['copy','仿写'+(p.refCount?' '+p.refCount:'')],['skill','用模板'+(p.picked.length?' '+p.picked.length:'')]],p.refTab,p.setRefTab),
+					p.refTab==='copy'?h(React.Fragment,null,
+						h('div',{className:'wb_mReferences'},p.refs.urls.map(function(url,i){return h('div',{className:'wb_mReference',key:i},h('span',{className:'wb_mRefIcon'},'↗'),h('span',{className:'wb_mGrow'},url),h('button',{type:'button',className:'wb_mIcon','aria-label':'删除参考链接',onClick:function(){p.setRefText(p.refs.urls.filter(function(_,j){return j!==i;}).concat(p.refs.body?[p.refs.body]:[]).join('\n'));}},wbIcon('close')));}),
+						p.refs.body?h('div',{className:'wb_mReference'},h('span',{className:'wb_mRefIcon'},'▤'),h('span',{className:'wb_mGrow'},'粘贴的正文'),h('small',null,p.refs.body.length+' 字'),h('button',{type:'button',className:'wb_mIcon','aria-label':'删除参考正文',onClick:function(){p.setRefText(p.refs.urls.join('\n'));}},wbIcon('close'))):null,
+						h('button',{type:'button',className:'wb_mAdd',onClick:function(){addText[1]('');fileError[1]('');editor[1]('reference');}},wbIcon('plus'),'添加链接、正文或文件')),
+						h('div',{className:'wb_mChips wb_mStyles'},REF_STYLES.map(function(s){return chip(s,p.refStyle===s,function(){p.setRefStyle(s);});})))
+					:h('div',{className:'wb_mSkills'},p.skills.status==='loading'?h('p',null,'技能加载中…'):p.skills.status==='error'?h('p',null,'技能暂时无法加载，请稍后重试'):p.skills.skills.length===0?h('p',null,'还没有可用模板'):layers.map(function(layer){var list=p.skills.skills.filter(function(s){return skillLayer(s)===layer[0];});return list.length?h('section',{key:layer[0]},h('small',null,layer[1]),h('div',{className:'wb_mChips'},list.map(function(s){var on=p.picked.indexOf(s.name)>=0;return chip(s.name,on,function(){p.setPicked(on?p.picked.filter(function(n){return n!==s.name;}):p.picked.concat([s.name]));});}))):null;})),
+					h('button',{type:'button',className:'wb_mExtra',onClick:function(){editor[1]('base');}},h('b',null,'补充要求'),h('span',{className:'wb_mGrow'},p.base||'选填'),wbIcon('next'))),
+				h('div',{className:'wb_mAction wb_mAboveTabs'},p.sending?h('p',{role:'status'},p.sending):null,h('button',{type:'button',className:'wb_mPrimary wb_mStart',disabled:!p.clientName||!!p.sending,onClick:p.dispatch},wbIcon('star'),'开始生文')),
+				sheet[0]?h(MobileModal,{title:'写给谁',close:function(){sheet[1](false);}},
+					h('small',{className:'wb_mCaption'},'客户'),empty?h('div',{className:'wb_mEmpty'},'还没有分配给你的客户 · 联系管理员'):h('div',{role:'radiogroup','aria-label':'客户'},p.clients.customers.map(function(c){var on=customerId(c)===p.pick.key;var bits=[];if(typeof c.files==='number')bits.push('知识库 '+c.files+' 条');if(on&&p.articles.status==='ready')bits.push('文章库 '+p.articles.articles.length+' 篇');return h('button',{type:'button',role:'radio','aria-checked':on,key:customerId(c),className:'wb_mClient',onClick:function(){setClient(c);}},h('span',{className:'wb_mAvatar'},customerName(c).slice(0,1)),h('span',{className:'wb_mGrow'},h('b',null,customerName(c)),bits.length?h('small',null,bits.join(' · ')):null),h('span',{className:'wb_mRadio','data-on':on?'1':'0'},on?'✓':''));})),
+					!empty?h(React.Fragment,null,h('small',{className:'wb_mCaption'},'产品线'),h('div',{className:'wb_mChips'},p.lines.length?p.lines.map(function(l){return chip(l.name||l.id,p.pick.line===String(l.id),function(){p.onLine({target:{value:String(l.id)}});},l.id);}):h('p',null,'暂无产品线')),h('small',{className:'wb_mCaption'},'期数'),h('div',{className:'wb_mChips'},p.periods.length?p.periods.map(function(v){return chip(v.name||v.id,p.pick.period===String(v.id),function(){p.setPick({key:p.pick.key,line:p.pick.line,period:String(v.id)});},v.id);}):h('p',null,'暂无期数'))):null,
+					h('button',{type:'button',className:'wb_mPrimary',disabled:!p.clientName,onClick:function(){sheet[1](false);}},'确定')):null,
+				editor[0]?h(MobileModal,{full:true,title:editor[0]==='base'?'补充要求':'添加参考',close:close},
+					h('textarea',{'aria-label':editor[0]==='base'?'补充要求':'参考链接或正文',placeholder:editor[0]==='base'?'还有什么写作要求？':'一行一个链接，或粘贴正文',value:editor[0]==='base'?p.base:addText[0],onChange:function(e){(editor[0]==='base'?p.setBase:addText[1])(e.target.value);}}),
+					editor[0]==='reference'?h('label',{className:'wb_mFile'},'选择文本文件（.txt / .md）',h('input',{type:'file',accept:'.txt,.md,text/plain,text/markdown',onChange:function(e){var f=e.target.files[0];if(!f)return;if(f.size>1024*1024){fileError[1]('请选择 1 MB 以内的文本文件');return;}f.text().then(function(text){addText[1](function(old){return [old,text].filter(Boolean).join('\n');});});}})):null,
+					fileError[0]?h('p',{role:'status'},fileError[0]):null,
+					h('button',{type:'button',className:'wb_mPrimary',onClick:function(){if(editor[0]==='reference')p.setRefText([p.refText,addText[0]].filter(Boolean).join('\n'));close();}},'完成')):null);
+		}
+
+
+		function MobileDrawer(p) {
+			var start=React.useRef(0), ref=React.useRef(null);
+			React.useEffect(function(){var previous=document.activeElement;ref.current&&ref.current.focus();function key(e){if(e.key==='Escape')p.close();if(e.key==='Tab'){var items=Array.from(ref.current.querySelectorAll('button,input'));var first=items[0],last=items[items.length-1];if(e.shiftKey&&(document.activeElement===first||document.activeElement===ref.current)){e.preventDefault();last.focus();}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first.focus();}}}document.addEventListener('keydown',key);return function(){document.removeEventListener('keydown',key);if(previous&&previous.isConnected)previous.focus({preventScroll:true});};},[]);
+			return createPortal(h('div',{className:'wb_mScrim',onClick:function(e){if(e.target===e.currentTarget)p.close();}},
+				h('aside',{className:'wb_mDrawer',ref:ref,tabIndex:-1,role:'dialog','aria-modal':true,'aria-label':'会话列表',onTouchStart:function(e){start.current=e.touches[0].clientX;},onTouchEnd:function(e){if(start.current-e.changedTouches[0].clientX>70)p.close();}},
+					h('div',{className:'wb_mDrawerHead'},h('b',null,'生文 Agent'),h('button',{type:'button',className:'wb_mIcon','aria-label':'关闭会话抽屉',onClick:p.close},wbIcon('close'))),
+					h('div',{className:'wb_mDrawerTools'},h('button',{type:'button',className:'wb_mPrimary',onClick:p.compose},wbIcon('plus'),'新建任务'),h('input',{type:'search','aria-label':'搜索会话',placeholder:'搜索会话',value:wbNavState.q,onChange:function(e){wbNavState.q=e.target.value;wbNavEmit();}})),
+					h('div',{className:'wb_mTree'},p.names.map(function(name){var open=wbNavState.open[name]!==false;return h('section',{key:name},h('button',{type:'button',className:'wb_mGroup','aria-expanded':open,onClick:function(){wbNavState.open[name]=!open;wbNavEmit();}},h('span',{className:'wb_mAvatar'},name.slice(0,1)),h('b',null,name),h('small',null,p.groups[name].length),h('span',null,open?'⌄':'›')),open?p.groups[name].map(function(it){var status=wbSessionStatus(wbNavState.statuses&&wbNavState.statuses[it.id]);return h('button',{key:it.id,type:'button',className:'wb_mSession','aria-current':it.id===wbNavState.current,onClick:function(){p.openSession(it.id);}},h('span',{className:'wb_mStatus','data-tone':status.tone}),h('span',{className:'wb_mGrow'},h('b',null,it.title),h('small',null,[it.at?it.at.slice(5,10).replace('-','月')+'日':'',status.label].filter(Boolean).join(' · '))));}):null);}),p.names.length===0?h('p',{className:'wb_mEmpty'},wbNavState.q?'没有匹配的会话':'还没有会话，点上方新建任务'):null),
+					h('div',{className:'wb_mAccount'},h('span',{className:'wb_mAvatar'},p.me.label.slice(0,1)),h('div',null,h('b',null,p.me.label),p.me.sub?h('small',null,p.me.sub):null)))),document.body);
+		}
+		function MobileQuickPrompts(p) {
+			var mobile=useWbMobile();
+			if(!mobile || !p.inputActions) return null;
+			return h('div',{className:'wb_mQuick'},['再写 1 篇','换个语气'].map(function(text){return h('button',{type:'button',className:'wb_mChip',key:text,onClick:function(){p.inputActions.setDraft(text);var el=document.querySelector('[data-slot="conversation.composer.bar"] [contenteditable]');if(el)el.focus();}},text);}));
+		}
+		function MobileChatHeader(p) {
+			var menu=React.useState(false), preset=React.useState(false), rename=React.useState(false), newTitle=React.useState(""), renameError=React.useState("");
+			var meta=p.meta||{}, binding=wbNavState.bindings[p.sessionId]||{};
+			var title=p.title||meta.topic||binding.topic||'会话';
+			var refCount=meta.refs?((meta.refs.urls||[]).length+(meta.refs.body?1:0)):0;
+			var sub=[meta.client||binding.client,meta.period,refCount?'仿写 '+refCount+' 篇':''].filter(Boolean).join(' · ');
+			return h('div',{className:'wb_mChat'},h(MobileTopBar,{title:title,sub:sub,back:function(){var layout=WbCtx&&WbCtx.get?WbCtx.get('layout'):null;if(layout)layout.selectPanel(WORKBENCH_KEY);},more:function(){menu[1](true);}}),
+				p.rows.length?h('details',{className:'wb_mProgress',open:true},h('summary',null,'任务进度'),p.rows.map(function(row,i){return h('div',{className:'wb_trow',key:i},h('span',{className:'wb_ticon','data-s':row[0]},row[0]==='done'?'✓':row[0]==='run'?'◷':'○'),h('span',null,row[1]));})):null,
+				h(ReviewTabBody,Object.assign({},p.reviewProps,{mobileInline:true})),
+				menu[0]?h(MobileModal,{title:'会话操作',close:function(){menu[1](false);}},h('button',{type:'button',className:'wb_mExtra',onClick:function(){menu[1](false);newTitle[1](title);rename[1](true);}},'重命名'),h('button',{type:'button',className:'wb_mExtra',onClick:function(){menu[1](false);preset[1](true);}},'这次发起时的预设'),h('button',{type:'button',className:'wb_mExtra',onClick:function(){menu[1](false);wbNavState.drawer=true;wbNavEmit();}},'会话列表'),h('button',{type:'button',className:'wb_mExtra',onClick:function(){menu[1](false);preset[1]('desktop');}},'在电脑上打开')):null,
+				rename[0]?h(MobileModal,{title:'重命名',close:function(){rename[1](false);}},h('input',{className:'wb_mRename',value:newTitle[0],'aria-label':'会话名称',onChange:function(e){newTitle[1](e.target.value);}}),renameError[0]?h('p',{role:'status'},renameError[0]):null,h('button',{type:'button',className:'wb_mPrimary',disabled:!newTitle[0].trim(),onClick:async function(){try{var svc=WbCtx.get('sessions');var binding=svc.binding(p.sessionId);var result=await binding.session.rename(newTitle[0].trim());if(!result.ok)throw Error(result.error.message);rename[1](false);}catch(e){renameError[1]('重命名失败，请稍后重试');}}},'保存')):null,
+				preset[0]?h(MobileModal,{title:preset[0]==='desktop'?'在电脑上打开':'这次发起时的预设',close:function(){preset[1](false);}},h('div',{className:'wb_mPreset'},preset[0]==='desktop'?'在电脑上登录同一账号，从会话列表打开「'+title+'」。':[meta.client,meta.line,meta.period,meta.topic,meta.refs&&meta.refs.style,(meta.skills||[]).join('、'),meta.base].filter(Boolean).join('\n')||'此会话没有装配台预设')):null);
+		}
 
 		/* ==================================================================
 		 * dsh-workbench — browser half.
@@ -23,7 +188,7 @@ window.__ModuleLoader__.load({
 		 *    仍禁止用脆弱的 hash 类名刮官方 DOM。
 		 *
 		 * 类名全是自己的 `wb_` 前缀：CSS 是手写的（本包没有 tsdown 构建，
-		 * 没有 class-name hashing 可依赖），所以也绝不写指向别人 hash 类名的选择器。
+		 * 没有 class-name hashing 可依赖），手机适配的集中 suffix 选择器例外见 Upstream compatibility boundary。
 		 *
 		 * 令牌照搬 workbench/原型v2暂定版/styles.css:8-80。
 		 * ================================================================== */
@@ -406,6 +571,158 @@ window.__ModuleLoader__.load({
 		 * data-plugin-css, injected from apply() — HMR removes
 		 * <style data-plugin=...> tags on a reload, so a top-level injection
 		 * would simply vanish. */
+		/* Mobile CSS: tokens/components adapted from screens/ds.css. */
+		CSS += `
+/* Derived from mobile-redesign/screens/ds.css. Runtime colors come from PR-1 tokens.css. */
+html[data-wb-mobile] body{--wb-bg:var(--dsh-bg,#f5f3ee);--wb-text:var(--dsh-ink,#0e1430);--wb-accent:var(--dsh-blue,#002fa7);--wb-line:var(--dsh-line,#e9e6e0);--wb-dim:var(--dsh-ink-2,#4a5170);--wb-dim2:var(--dsh-ink-3,#8b90a6);--wb-elev:#fff;--wb-side:var(--wb-bg);--wb-content:100%;color:var(--wb-text)}
+html[data-wb-mobile] :is(.wb_mAssembly,.wb_mScrim,.wb_mDrawer,.wb_mChat,.wb_mReview){box-sizing:border-box;font:16px/24px var(--wb-font);color:var(--wb-text)}
+html[data-wb-mobile] :is(.wb_mAssembly,.wb_mScrim,.wb_mDrawer,.wb_mChat,.wb_mReview) *{box-sizing:border-box}
+html[data-wb-mobile] :is(.wb_mAssembly,.wb_mScrim,.wb_mDrawer,.wb_mChat,.wb_mReview) :is(button,input,textarea){font:inherit;color:inherit}
+html[data-wb-mobile] button{cursor:pointer}
+html[data-wb-mobile] .wb_mAssembly{height:100%;display:flex;flex-direction:column;background:var(--wb-bg);overflow:hidden}
+html[data-wb-mobile] .wb_mTop{flex:none;height:52px;display:flex;align-items:center;gap:4px;padding:0 8px 0 4px;background:var(--wb-bg)}
+html[data-wb-mobile] .wb_mHeading{flex:1;min-width:0;display:flex;flex-direction:column}
+html[data-wb-mobile] .wb_mHeading b{font-size:20px;line-height:28px;font-weight:750;white-space:nowrap;text-overflow:ellipsis;overflow:hidden}
+html[data-wb-mobile] .wb_mHeading small{font-size:13px;line-height:16px;white-space:nowrap;text-overflow:ellipsis;overflow:hidden;color:var(--wb-dim2)}
+html[data-wb-mobile] .wb_mIcon{border:0;background:transparent;flex:0 0 44px;width:44px;height:44px;display:grid;place-items:center;padding:0;border-radius:12px;font-size:24px!important}
+html[data-wb-mobile] .wb_mForm{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;padding:16px 16px 96px}
+html[data-wb-mobile] .wb_mForm h3{font-size:17px;line-height:24px;margin:24px 4px 10px;font-weight:700}
+html[data-wb-mobile] .wb_mContext{display:flex;align-items:center;gap:12px;width:100%;text-align:left;border:0;background:#fff;border-radius:14px;padding:12px;box-shadow:0 1px 2px #0e14300f}
+html[data-wb-mobile] .wb_mGrow{flex:1;min-width:0}
+html[data-wb-mobile] .wb_mContext b{font-weight:650;display:block;overflow-wrap:anywhere}
+html[data-wb-mobile] :is(.wb_mContext,.wb_mClient) small{display:block;font-size:13px;line-height:18px;color:var(--wb-dim2)}
+html[data-wb-mobile] .wb_mContext>svg{color:var(--wb-dim2);flex:none}
+html[data-wb-mobile] .wb_mAvatar{width:40px;height:40px;border-radius:12px;background:var(--wb-accent);color:#fff;display:grid;place-items:center;font-size:17px;font-weight:750;flex:none}
+html[data-wb-mobile] .wb_mSegment{display:flex;padding:4px;gap:2px;border-radius:12px;background:var(--dsh-sunken,#efece6);margin-bottom:12px}
+html[data-wb-mobile] .wb_mSegment button{flex:1;position:relative;min-width:0;height:36px;border:0;border-radius:9px;background:transparent;font-size:15px;font-weight:600;color:var(--wb-dim)}
+html[data-wb-mobile] .wb_mSegment button::after{content:'';position:absolute;inset:-4px 0}
+html[data-wb-mobile] .wb_mSegment button[aria-pressed=true]{background:#fff;color:var(--wb-text);box-shadow:0 1px 2px #0e14300f}
+html[data-wb-mobile] .wb_mTopic{display:block;width:100%;resize:vertical;min-height:72px;border:1px solid var(--wb-line);border-radius:14px;padding:12px 14px;background:#fff;outline-color:var(--wb-accent)}
+html[data-wb-mobile] .wb_mEmpty{padding:16px;border-radius:14px;background:#fff;color:var(--wb-dim);margin-top:12px}
+html[data-wb-mobile] .wb_mEmpty p{margin:0;font-size:15px;line-height:24px}
+html[data-wb-mobile] .wb_mLink{border:0;background:transparent;color:var(--wb-accent)!important;min-height:44px;padding:8px 0;font-weight:600!important}
+html[data-wb-mobile] .wb_mReferences{border-radius:14px;background:#fff;box-shadow:0 1px 2px #0e14300f;overflow:hidden}
+html[data-wb-mobile] .wb_mReference{display:flex;align-items:center;gap:10px;padding:8px 4px 8px 16px;min-height:64px;border-bottom:1px solid var(--wb-line)}
+html[data-wb-mobile] .wb_mReference .wb_mGrow{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+html[data-wb-mobile] .wb_mReference small{font-size:13px;color:var(--wb-dim2);white-space:nowrap}
+html[data-wb-mobile] .wb_mRefIcon{display:grid;place-items:center;flex:none;width:36px;height:36px;border-radius:10px;background:var(--dsh-blue-50,#eef2fd);color:var(--wb-accent)}
+html[data-wb-mobile] .wb_mAdd{display:flex;align-items:center;gap:12px;border:0;background:transparent;min-height:56px;padding:12px 16px;width:100%;text-align:left;color:var(--wb-accent)!important;font-weight:600!important}
+html[data-wb-mobile] .wb_mChips{display:flex;flex-wrap:wrap;gap:8px;padding:2px 0}
+html[data-wb-mobile] .wb_mStyles{margin-top:12px}
+html[data-wb-mobile] .wb_mChip{position:relative;min-height:40px;max-width:100%;padding:7px 14px;border:1px solid var(--wb-line);border-radius:999px;background:#fff;font-size:15px!important;overflow-wrap:anywhere}
+html[data-wb-mobile] .wb_mChip::after{content:'';position:absolute;inset:-2px 0}
+html[data-wb-mobile] .wb_mChip[aria-pressed=true]{border-color:var(--wb-accent);background:var(--dsh-blue-50,#eef2fd);color:var(--wb-accent)}
+html[data-wb-mobile] .wb_mStyles .wb_mChip[aria-pressed=true]{border-color:var(--wb-text);background:var(--wb-text);color:#fff}
+html[data-wb-mobile] .wb_mSkills section{margin:16px 0}
+html[data-wb-mobile] .wb_mSkills small{display:block;margin:8px 0;color:var(--wb-dim2);font-size:13px}
+html[data-wb-mobile] .wb_mExtra{display:flex;align-items:center;gap:10px;width:100%;text-align:left;background:#fff;border:0;border-radius:14px;padding:12px 16px;margin-top:24px;min-height:56px}
+html[data-wb-mobile] .wb_mExtra span{overflow:hidden;white-space:nowrap;text-overflow:ellipsis;color:var(--wb-dim2);font-size:14px}
+html[data-wb-mobile] .wb_mAction{position:fixed;left:0;right:0;bottom:var(--wb-kb,0px);padding:12px 16px calc(12px + env(safe-area-inset-bottom));border-top:1px solid var(--wb-line);background:rgba(255,255,255,.96);backdrop-filter:blur(20px);z-index:1100}
+html[data-wb-mobile] .wb_mAboveTabs{bottom:calc(var(--dsh-tabbar-h,52px) + env(safe-area-inset-bottom) + var(--wb-notice-h,0px));padding-bottom:12px}
+html[data-wb-mobile] .wb_mAction p{margin:0 0 8px;font-size:13px}
+html[data-wb-mobile] .wb_mPrimary{display:flex;align-items:center;justify-content:center;gap:8px;height:52px;min-height:52px;width:100%;border:0;border-radius:16px;background:var(--wb-accent);color:#fff!important;font-size:17px!important;font-weight:700!important}
+html[data-wb-mobile] .wb_mPrimary:disabled{background:var(--dsh-ink-4,#b9bccb);cursor:default}
+html[data-wb-mobile] .wb_mScrim{position:fixed;inset:0;background:rgba(14,20,48,.45);z-index:16000;display:flex;align-items:flex-end}
+html[data-wb-mobile] .wb_mSheet{background:#fff;border-radius:28px 28px 0 0;padding:8px 20px calc(16px + env(safe-area-inset-bottom));width:100%;max-height:calc(var(--wb-vv-h,100dvh) - 20px);overflow:auto;overscroll-behavior:contain;outline:none}
+html[data-wb-mobile] .wb_mGrab{width:36px;height:5px;border-radius:3px;background:var(--dsh-ink-4,#b9bccb);margin:0 auto 12px}
+html[data-wb-mobile] .wb_mSheetHead{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+html[data-wb-mobile] .wb_mSheetHead h2{font-size:20px;font-weight:800;margin:0}
+html[data-wb-mobile] .wb_mCaption{display:block;color:var(--wb-dim2);font-size:13px;margin:20px 0 10px}
+html[data-wb-mobile] .wb_mClient{display:flex;width:100%;align-items:center;text-align:left;gap:12px;padding:12px 0;border:0;border-bottom:1px solid var(--wb-line);background:#fff;min-height:76px}
+html[data-wb-mobile] .wb_mRadio{display:grid;place-items:center;flex:none;width:26px;height:26px;border-radius:50%;border:2px solid var(--dsh-ink-4,#b9bccb)}
+html[data-wb-mobile] .wb_mRadio[data-on='1']{background:var(--wb-accent);border-color:var(--wb-accent);color:#fff}
+html[data-wb-mobile] .wb_mSheet>.wb_mPrimary{margin-top:24px}
+html[data-wb-mobile] .wb_mEditor{position:absolute;top:var(--wb-vv-top,0px);left:0;right:0;height:var(--wb-vv-h,100dvh);background:#fff;padding:8px 16px calc(16px + env(safe-area-inset-bottom));display:flex;flex-direction:column;gap:12px}
+html[data-wb-mobile] .wb_mEditor textarea{flex:1;min-height:80px;resize:none;border:1px solid var(--wb-line);padding:16px;border-radius:14px;outline-color:var(--wb-accent)}
+html[data-wb-mobile] .wb_mFile{font-size:14px;display:flex;flex-direction:column;gap:8px}
+html[data-wb-mobile] .wb_mFile input{max-width:100%}
+html[data-wb-mobile] .wb_mDrawer{position:fixed;left:0;top:0;bottom:0;width:min(328px,calc(100vw - 32px));padding-top:env(safe-area-inset-top);background:var(--wb-bg);border-radius:0 24px 24px 0;box-shadow:12px 0 40px #0e143033;display:flex;flex-direction:column;overflow:hidden;outline:none}
+html[data-wb-mobile] .wb_mDrawerHead{display:flex;align-items:center;padding:4px 8px 4px 20px;height:52px;flex:none}
+html[data-wb-mobile] .wb_mDrawerHead b{flex:1;font-size:20px}
+html[data-wb-mobile] .wb_mDrawerTools{padding:4px 16px 0}
+html[data-wb-mobile] .wb_mDrawerTools input{width:100%;height:44px;background:#fff;border:1px solid var(--wb-line);border-radius:12px;padding:0 12px;margin-top:12px}
+html[data-wb-mobile] .wb_mTree{padding:16px 8px;overflow:auto;flex:1;min-height:0;overscroll-behavior:contain}
+html[data-wb-mobile] .wb_mGroup{display:flex;align-items:center;gap:10px;width:100%;min-height:48px;padding:8px 12px;border:0;background:none;text-align:left}
+html[data-wb-mobile] .wb_mGroup b{flex:1;font-size:15px}
+html[data-wb-mobile] .wb_mGroup .wb_mAvatar{width:28px;height:28px;font-size:13px;border-radius:8px}
+html[data-wb-mobile] .wb_mSession{display:flex;align-items:flex-start;gap:12px;width:100%;min-height:64px;padding:10px 12px;text-align:left;border:0;border-radius:14px;background:none}
+html[data-wb-mobile] .wb_mSession[aria-current=true]{background:#fff;box-shadow:0 1px 2px #0e14300f}
+html[data-wb-mobile] .wb_mSession[aria-current=true] b{color:var(--wb-accent);font-weight:700}
+html[data-wb-mobile] .wb_mSession b{display:block;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-size:16px;line-height:22px;font-weight:500}
+html[data-wb-mobile] .wb_mSession small{display:block;margin-top:2px;font-size:14px;line-height:20px;color:var(--wb-dim2)}
+html[data-wb-mobile] .wb_mStatus{width:8px;height:8px;border-radius:50%;background:var(--dsh-ink-4,#b9bccb);margin-top:8px;flex:none}
+html[data-wb-mobile] .wb_mStatus[data-tone=blue]{background:var(--wb-accent)}
+html[data-wb-mobile] .wb_mStatus[data-tone=orange]{background:var(--dsh-orange,#ff6a1f)}
+html[data-wb-mobile] .wb_mStatus[data-tone=green]{background:var(--dsh-green,#14a05a)}
+html[data-wb-mobile] .wb_mAccount{display:flex;align-items:center;gap:12px;padding:16px 20px calc(16px + env(safe-area-inset-bottom));border-top:1px solid var(--wb-line);flex:none}
+html[data-wb-mobile] .wb_mAccount small{display:block;color:var(--wb-dim2);font-size:13px;overflow-wrap:anywhere}
+html[data-wb-mobile] .wb_mAccount .wb_mAvatar{border-radius:50%;background:var(--dsh-blue-50,#eef2fd);color:var(--wb-accent)}
+html[data-wb-mobile] .wb_mChat .wb_mTop{background:#fff;border-bottom:1px solid var(--wb-line)}
+html[data-wb-mobile] .wb_mChat .wb_mHeading b{font-size:17px;line-height:22px}
+html[data-wb-mobile] .wb_mProgress{margin:12px 16px;padding:14px 16px;border-radius:18px;background:var(--wb-bg);max-height:210px;overflow:auto;font-size:15px;line-height:24px}
+html[data-wb-mobile] .wb_mProgress summary{font-weight:700;cursor:pointer;min-height:30px}
+html[data-wb-mobile] .wb_mProgress .wb_trow{padding:3px 0;font-size:15px;gap:10px}
+html[data-wb-mobile] .wb_mProgress .wb_ticon{width:22px;height:22px;flex:none;border-radius:50%;font-size:18px;display:grid;place-items:center}
+html[data-wb-mobile] .wb_mProgress .wb_ticon[data-s=done]{background:var(--dsh-green,#14a05a);color:#fff}
+html[data-wb-mobile] .wb_mPending{display:flex;align-items:center;gap:12px;margin:12px 16px;padding:12px 16px;border-radius:16px;background:var(--dsh-orange-50,#fff1e6);color:var(--dsh-orange-700,#d9480f);font-size:15px}
+html[data-wb-mobile] .wb_mPending small{display:block;font-size:13px;line-height:18px}
+html[data-wb-mobile] .wb_mPending button{border:0;border-radius:12px;background:var(--dsh-orange,#ff6a1f);color:#fff;min-height:44px;padding:0 14px;white-space:nowrap}
+html[data-wb-mobile] .wb_mReview{position:fixed;inset:0;z-index:15000;background:var(--wb-bg);display:flex;flex-direction:column}
+html[data-wb-mobile] .wb_mReviewList{overflow:auto;min-height:0;flex:1;padding:16px 16px 108px}
+html[data-wb-mobile] .wb_mArticle{background:#fff;overflow:auto;min-height:0;flex:1;padding:20px 20px 110px;font-size:17px;line-height:30px;overflow-wrap:anywhere}
+html[data-wb-mobile] .wb_mArticle h1{font-size:24px;line-height:34px;margin:0 0 20px}
+html[data-wb-mobile] .wb_mReviewItem{display:block;width:100%;padding:16px;margin-bottom:12px;min-height:72px;border:0;border-radius:14px;background:#fff;text-align:left}
+html[data-wb-mobile] .wb_mReviewItem b{display:block;line-height:24px}
+html[data-wb-mobile] .wb_mReviewItem small{color:var(--wb-dim2);font-size:14px}
+html[data-wb-mobile] .wb_mPreset{white-space:pre-wrap;overflow-wrap:anywhere}
+/* Upstream compatibility boundary. All hashed-class suffix selectors live here;
+   public data-slot contracts are preferred. Never match a concrete build hash.
+   Keep grid children in their columns: display:none on a column shifts auto-placement. */
+html[data-wb-mobile] [class*='_frame']{grid-template-columns:0 minmax(0,1fr) 0!important;width:100%;max-width:100vw;min-width:0}
+html[data-wb-mobile] [class*='_sidebarCol'],html[data-wb-mobile] [class*='_rightbarCol']{width:0!important;min-width:0!important;overflow:hidden!important;visibility:hidden}
+html[data-wb-mobile] [class*='_centerCol']{min-width:0;max-width:100vw}
+html[data-wb-mobile] [data-slot='main.conversation']{--dsh-content-font-size:16px;--dsh-chat-content-width:100%;--dsh-composer-side-clearance:0px;background:#fff;min-width:0}
+html[data-wb-mobile] [data-slot='conversation.session.header']{flex:none;min-width:0}
+html[data-wb-mobile] [class*='_composerSeat']{position:fixed!important;left:0;right:0;bottom:calc(var(--wb-kb,0px) + var(--wb-notice-h,0px))!important;box-sizing:border-box;width:100%;z-index:1100!important;background:#fff!important;padding:10px 12px calc(10px + env(safe-area-inset-bottom));border-top:1px solid var(--wb-line)}
+html[data-wb-mobile] [class*='_composerStack']{width:100%;max-width:none}
+html[data-wb-mobile] [data-slot='conversation.composer.bar']{padding:0;--dsw-specific-input-major:var(--wb-bg)}
+html[data-wb-mobile] [data-slot='conversation.composer.bar'] [contenteditable]{font-size:16px!important;line-height:24px;min-height:24px;max-height:120px;padding:0}
+html[data-wb-mobile] [data-slot='conversation.composer.bar'] button{min-height:44px;min-width:44px}
+html[data-wb-mobile] [data-slot='conversation.input.model'],html[data-wb-mobile] [data-composer-stats],html[data-wb-mobile] .wb_pick{display:none!important}
+html[data-wb-mobile] [class*='_scrollBody']{padding-bottom:calc(174px + var(--wb-kb,0px))!important;min-width:0}
+html[data-wb-mobile] [data-slot='conversation.view']{min-width:0;overflow-wrap:anywhere}
+html[data-wb-mobile] [data-slot='conversation.chat.node']{font-size:16px;line-height:26px;min-width:0;max-width:100%}
+html[data-wb-mobile] [class*='_userRow']{justify-content:flex-end}
+html[data-wb-mobile] [class*='_userStack']{max-width:88%;border-radius:20px 20px 6px 20px;background:var(--wb-accent);color:#fff;padding:10px 14px}
+html[data-wb-mobile] [class*='_userStack'] *{color:inherit;background:transparent}
+html[data-wb-mobile] [data-slot='conversation.chat.node'] pre{overflow:auto;max-width:100%}
+html[data-wb-mobile] .wb_grip{display:none}
+html[data-wb-mobile]:has(.impersonation-banner){--wb-notice-h:36px}
+html[data-wb-mobile] .wb_mRename{width:100%;min-height:48px;border:1px solid var(--wb-line);border-radius:12px;padding:10px}
+html[data-wb-mobile] .wb_mQuick{display:flex;gap:8px;margin:0 0 10px;font:14px/20px var(--wb-font)}
+html[data-wb-mobile][data-dsh-keyboard=open] .wb_mQuick{display:none}
+html[data-wb-mobile] [data-slot='conversation.input.dock'] div:has(>button[class*='_header']){display:none}
+html[data-wb-mobile] [data-slot='conversation.composer.dock']{display:none!important}
+html[data-wb-mobile] [data-slot='conversation.composer.bar']>[class*='_root']{padding:0}
+html[data-wb-mobile] [data-slot='conversation.composer.bar'] [class*='_card']{display:grid;grid-template-columns:44px minmax(0,1fr) 44px;gap:8px;padding:0;background:#fff;box-shadow:none;max-width:none;align-items:end}
+html[data-wb-mobile] [data-slot='conversation.composer.bar'] [class*='_scroll']{box-sizing:border-box;grid-column:2;grid-row:1;padding:10px 14px;background:var(--wb-bg);border-radius:22px;max-height:144px;min-height:44px}
+html[data-wb-mobile] [data-slot='conversation.composer.bar'] [class*='_row']{display:contents}
+html[data-wb-mobile] [data-slot='conversation.composer.bar'] [class*='_tools']{grid-column:1;grid-row:1;padding:0}
+html[data-wb-mobile] [data-slot='conversation.composer.bar'] [class*='_trailing']{grid-column:3;grid-row:1;padding:0}
+html[data-wb-mobile] [data-slot='conversation.composer.bar'] [class*='_trailing']>span,html[data-wb-mobile] [data-slot='conversation.composer.bar'] [class*='_modes'],html[data-wb-mobile] [data-slot='conversation.composer.bar'] button[aria-label='指令']{display:none}
+html[data-wb-mobile] [data-slot='conversation.composer.bar'] [class*='_primary']{width:44px;height:44px;border-radius:50%;background:var(--wb-accent);color:#fff}
+html[data-wb-mobile] [data-slot='conversation.composer.bar'] [class*='_primary']:disabled{background:var(--dsh-ink-4,#b9bccb)}
+html[data-wb-mobile] [data-slot='conversation.composer.bar'] [class*='_placeholder']{inset:0;font-size:0;line-height:24px;white-space:nowrap;text-overflow:ellipsis;overflow:hidden}
+html[data-wb-mobile] [data-slot='conversation.composer.bar'] [class*='_placeholder']::after{content:'继续追问，或让它改写…';font-size:16px}
+html[data-wb-mobile] [class*='_userStack'] [class*='_bubble']{padding:0}
+
+html[data-wb-mobile] .wb_mPending[data-ready='1']{background:var(--dsh-green-50,#e6f6ee);color:var(--dsh-green,#14a05a)}
+html[data-wb-mobile] .wb_mPending[data-ready='1'] button{background:var(--dsh-green,#14a05a)}
+html[data-wb-mobile] [data-slot='conversation.composer.bar'] button[aria-label='添加附件']{display:grid!important;place-items:center;border-radius:50%;background:var(--wb-bg)}
+html[data-wb-mobile] [data-slot='conversation.composer.bar'] button[aria-label='添加附件'] svg{display:none}
+html[data-wb-mobile] [data-slot='conversation.composer.bar'] button[aria-label='添加附件']::after{content:'＋';font-size:24px}
+`;
+
 		var TAG_ID = "dsh-workbench/workbench.css";
 
 		function injectStyles() {
@@ -871,6 +1188,7 @@ window.__ModuleLoader__.load({
 			} catch (e) { }
 			/* 官方会重设 frame 列宽（开右栏/resize 时写回），tick 里持续校正第一列 */
 			function wbNavTakeFrame() {
+				if (WB_MOBILE.matches) return;
 				try {
 					var fr = document.querySelector('[class*="frame"]');
 					if (fr === null || fr.style.gridTemplateColumns === "") return;
@@ -932,10 +1250,12 @@ window.__ModuleLoader__.load({
 			}
 
 			function SidebarNav(props) {
+				var mobile = useWbMobile();
 				var st = React.useState(0);
 				React.useEffect(function () {
-					wbNavSubs.push(function () { st[1](function (x) { return x + 1; }); });
-					return function () { wbNavSubs = wbNavSubs.filter(function (x) { return x !== undefined; }); };
+					var notify = function () { st[1](function (x) { return x + 1; }); };
+					wbNavSubs.push(notify);
+					return function () { wbNavSubs = wbNavSubs.filter(function (x) { return x !== notify; }); };
 				}, []);
 				/* shell.overlay 的 props 里没有 ctx —— 注册时用闭包把插件 ctx 传进来 */
 				var ctx = (props && props.wbCtx) ? props.wbCtx : (props && props.ctx ? props.ctx : null);
@@ -967,6 +1287,7 @@ window.__ModuleLoader__.load({
 				 * 改官方 frame 的最后一列宽；宽度记 sessionStorage，下次恢复。
 				 * 官方重渲染会清掉注入节点 —— tick 里定期补挂。 */
 				function ensureGrip() {
+					if (WB_MOBILE.matches) return;
 					try {
 						var col = document.querySelector('[class*="rightbarCol"]');
 						if (col === null) return;
@@ -1049,6 +1370,7 @@ window.__ModuleLoader__.load({
 					 * 优先 uiWorkspace.openSession（内部处理挂载），传登记时的原样 id。 */
 					try {
 						var raw = String(id);
+						if (mobile) wbNavState.drawer = false;
 						wbNavState.current = raw; wbNavEmit();   // 树里高亮当前位置
 						var w = ctx && typeof ctx.get === "function" ? ctx.get("uiWorkspace") : null;
 						if (w && typeof w.openSession === "function") { w.openSession(raw); return; }
@@ -1057,10 +1379,17 @@ window.__ModuleLoader__.load({
 					} catch (e) { console.warn("[dsh-workbench] 打开会话失败：", String(e)); }
 				}
 				function goCompose() {
+					if (mobile) { wbNavState.drawer = false; wbNavEmit(); }
 					try {
 						var l = ctx && typeof ctx.get === "function" ? ctx.get("layout") : null;
 						if (l && typeof l.selectPanel === "function") l.selectPanel(WORKBENCH_KEY);
 					} catch (e) { console.warn("[dsh-workbench] 打开新建任务失败：", String(e)); }
+				}
+				if (mobile) {
+					if (!wbNavState.drawer) return null;
+					// Include real authorized clients with zero sessions, without inventing groups.
+					if (!q) wbNavState.customers.forEach(function(c){var name=customerName(c);if(!groups[name]){groups[name]=[];names.push(name);}});
+					return h(MobileDrawer,{groups:groups,names:names,me:me,compose:goCompose,openSession:openSession,close:function(){wbNavState.drawer=false;wbNavEmit();}});
 				}
 				return h("div", { className: "wb_nv", style: { width: String(wbNavState.navW) + "px" } },
 					h("div", { className: "wb_nvBrand" }, h("span", { className: "wb_nvBrandT" }, "生文 Agent")),
@@ -1178,6 +1507,8 @@ window.__ModuleLoader__.load({
 			 * 左列草稿编号列表 + 右区正文；底部【确认】【全部确认】。
 			 * 客户来源：openTab params 优先，否则从当前会话解析（切会话自动跟随）。 */
 			function ReviewTabBody(props) {
+				var reviewOpen=React.useState(false);
+				var mobile=useWbMobile();
 				var sessionId = props.sessionId;
 				var useChat = props.useChat;
 				var st = React.useState({ client: "", client_key: "", drafts: null, sel: "", body: "", msg: "", done: {} });
@@ -1367,6 +1698,24 @@ window.__ModuleLoader__.load({
 				var doneCount = drafts ? drafts.filter(function (d) { return doneMap[d.title] === true; }).length : 0;
 				var pending = drafts ? drafts.filter(function (d) { return doneMap[d.title] !== true; }) : [];
 
+				React.useEffect(function(){
+					if (!props.mobileInline) return;
+					var snap=chatSnap&&chatSnap.legacy;
+					var running=snap?!!(snap.partial || (snap.runningCalls&&snap.runningCalls.length)):undefined;
+					wbNavState.current=sessionId;
+					wbNavState.statuses=wbNavState.statuses||{};
+					wbNavState.statuses[sessionId]={running:running,pending:pending.length,confirmed:doneCount};
+					wbNavEmit();
+				},[props.mobileInline,sessionId,chatSnap,pending.length,doneCount]);
+				if (props.mobileInline && mobile) {
+					if (!reviewOpen[0]) return pending.length ? h('div',{className:'wb_mPending'},h('div',{className:'wb_mGrow'},h('b',null,pending.length+' 篇草稿待审'),h('small',null,'确认后才会入库，进入内容投放')),h('button',{type:'button',onClick:function(){reviewOpen[1](true);}},'去审核')) : n>0 ? h('div',{className:'wb_mPending','data-ready':'1'},h('span',{className:'wb_mGrow'},'已入库 '+doneCount+' 篇'),h('button',{type:'button',onClick:function(){reviewOpen[1](true);}},'查看文章')) : null;
+					return createPortal(h('section',{className:'wb_mReview','aria-label':'文章审核'},h(MobileTopBar,{title:sel?'文章详情':'文章审核',sub:client,back:function(){if(sel)setL(function(p){return Object.assign({},p,{sel:'',body:''});});else reviewOpen[1](false);}}),
+						msg?h('p',{role:'status'},msg):null,
+						sel?h('article',{className:'wb_mArticle'},h('h1',null,sel),h('div',{dangerouslySetInnerHTML:{__html:wbMdToHtml(bodyText)}}))
+						:h('div',{className:'wb_mReviewList'},(drafts||[]).map(function(d){return h('button',{type:'button',key:d.title,className:'wb_mReviewItem',onClick:function(){openDraft(d.title);}},h('b',null,d.title),h('small',null,(doneMap[d.title]?'已入库':'草稿待审')+(typeof d.chars==='number'?' · '+d.chars+' 字':'')));})),
+						h('div',{className:'wb_mAction'},h('button',{type:'button',className:'wb_mPrimary',disabled:sel?doneMap[sel]===true||bodyText==='加载中…':pending.length===0,onClick:function(){confirmTargets(sel?[sel]:pending.map(function(d){return d.title;}),sel?'入库':'批量入库');}},sel?'确认入库':'全部确认'))),document.body);
+				}
+
 				if (!client) return h("div", { className: "wb_rvEmpty" }, "没有正在进行的任务 —— 从装配台发起后，这里会自动打开");
 				return h("div", { className: "wb_rv" },
 					h("div", { className: "wb_rvHead" },
@@ -1455,6 +1804,8 @@ window.__ModuleLoader__.load({
 			}
 
 			function TaskBar(props) {
+				var mobile=useWbMobile();
+				useWbScene(mobile, "chat");
 				var sessionId = props.sessionId;
 				var useSessions = props.useSessions;
 				var useChat = props.useChat;
@@ -1571,7 +1922,7 @@ window.__ModuleLoader__.load({
 				/* 草稿从无到有 → 自动在右侧栏打开"文章审核" tab（每个任务编号只弹一次） */
 				var autoRef = React.useRef(null);
 				React.useEffect(function () {
-					if (drafts === null || drafts.length === 0) return;
+					if (mobile || drafts === null || drafts.length === 0) return;
 					if (autoRef.current === metaId) return;
 					var ctrl = WbCtx && WbCtx.sidebarRight;
 					if (ctrl && typeof ctrl.openTab === "function") {
@@ -1585,7 +1936,7 @@ window.__ModuleLoader__.load({
 						}
 						catch (e) { console.warn("[dsh-workbench] 打开审核侧栏失败（下条消息重试）：", String(e)); }
 					}
-				}, [drafts, metaId]);
+				}, [drafts, metaId, mobile]);
 				React.useEffect(function () {
 					if (meta === null || typeof meta !== "object" || !meta.client) return;
 					var alive = true;
@@ -1608,6 +1959,7 @@ window.__ModuleLoader__.load({
 					return function () { alive = false; };
 				}, [metaId, meta && meta.client, chatSnap]);
 				if (meta === null || typeof meta !== "object") {
+					if (mobile) return h(MobileChatHeader,{title:title,sessionId:sessionId,meta:null,rows:[],reviewProps:props});
 					return h("div", { className: "wb_task" },
 						h("span", { className: "wb_taskTitle" }, title === "" ? "会话" : title),
 );
@@ -1697,6 +2049,7 @@ window.__ModuleLoader__.load({
 
 
 
+				if (mobile) return h(MobileChatHeader,{title:title,sessionId:sessionId,meta:meta,rows:taskRows,reviewProps:props});
 				var colL = h("div", { className: "wb_col" },
 					h("div", { className: "wb_colTitle" }, "这次发起时的预设"),
 					presetRow("客户", clientText),
@@ -1762,6 +2115,8 @@ window.__ModuleLoader__.load({
 		}
 
 		function WorkbenchPage(props) {
+			var mobile = useWbMobile();
+			useWbScene(mobile, "compose");
 			var ctx = props.ctx;
 			var clients = useClients();
 
@@ -1835,6 +2190,23 @@ window.__ModuleLoader__.load({
 				return function () { window.removeEventListener("wb-client-select", onSel); };
 			}, [clients.status, clients.customers]);
 
+			React.useEffect(function () {
+				if (!mobile || clients.status !== 'ready') return;
+				function sync() {
+					if (!window.dshMobile) return;
+					var chosen = window.dshMobile.setClients(clients.customers.map(function(c){return {id:customerId(c),name:customerName(c)};}));
+					var found = clients.customers.find(function(c){return customerName(c)===chosen;});
+					if(found) onClient({target:{value:customerId(found)}}, true);
+				}
+				function changed(ev) {
+					if(ev.detail.source==='workbench') return;
+					var found=clients.customers.find(function(c){return customerName(c)===ev.detail.client;});
+					if(found) onClient({target:{value:customerId(found)}}, true);
+				}
+				sync(); window.addEventListener('dsh:ready',sync);window.addEventListener('dsh:client',changed);
+				return function(){window.removeEventListener('dsh:ready',sync);window.removeEventListener('dsh:client',changed);};
+			}, [mobile, clients.status, clients.customers]);
+
 			var current = null;
 			for (var i = 0; i < clients.customers.length; i++) {
 				if (customerId(clients.customers[i]) === pick.key) { current = clients.customers[i]; break; }
@@ -1863,8 +2235,9 @@ window.__ModuleLoader__.load({
 				node.style.overflowY = node.scrollHeight > max ? "auto" : "hidden";
 			}, [base, zoom]);
 
-			function onClient(event) {
+			function onClient(event, fromShell) {
 				var key = event.target.value;
+				if (mobile && !fromShell && window.dshMobile) window.dshMobile.setClient(key, "workbench");
 				var found = null;
 				for (var j = 0; j < clients.customers.length; j++) {
 					if (customerId(clients.customers[j]) === key) { found = clients.customers[j]; break; }
@@ -2019,6 +2392,15 @@ window.__ModuleLoader__.load({
 				+ (refCount === 0 ? "" : "，照着 " + refCount + " 篇仿写");
 
 			var refSummary = refCount === 0 ? "" : refCount + " 篇参考 · " + refStyle;
+
+			if (mobile) return h(MobileAssembly, {
+				clients:clients, clientName:clientName, lineName:lineName, periodName:periodName,
+				pick:pick, setPick:setPick, lines:lines, periods:periods, articles:articles,
+				onClient:onClient, onLine:onLine, mode:mode, setMode:setMode, topic:topic, setTopic:setTopic,
+				refTab:refTab, setRefTab:setRefTab, refs:refs, refText:refText, setRefText:setRefText,
+				refCount:refCount, refStyle:refStyle, setRefStyle:setRefStyle, skills:skills, picked:picked,
+				setPicked:setPicked, base:base, setBase:setBase, sending:sending, dispatch:dispatch
+			});
 
 			return h("div", { className: "wb_root" },
 				h("div", { className: "wb_asm" },
@@ -2404,6 +2786,7 @@ window.__ModuleLoader__.load({
 			 * 官方侧边栏插件整个炸掉（"locale namespace sidebar already
 			 * has locale zh"，9-23 实测）。文案覆盖不值得这个代价。 */
 			var style = injectStyles();
+			ctx.effect(wbInstallMobile, "dsh-workbench: mobile viewport");
 			if (style !== null && ctx && typeof ctx.effect === "function") {
 				ctx.effect(function () { return function () {
 					if (style.parentNode !== null) style.parentNode.removeChild(style);
@@ -2505,6 +2888,10 @@ window.__ModuleLoader__.load({
 					order: 85,
 				}, PickBar);
 			});
+			ctx.slots.inject("conversation.input.dock", function () {
+				return ctx.slots.register({name:"conversation.input.dock",id:"workbench-mobile-quick",order:80},MobileQuickPrompts);
+			});
+
 			/* 覆盖官方左栏但保留其 grid 列，避免主区横向跳动。 */
 			ctx.slots.inject("shell.overlay", function () {
 				return ctx.slots.register({
