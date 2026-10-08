@@ -735,7 +735,7 @@ html[data-wb-mobile] .wb_mCaption{display:block;color:var(--wb-dim2);font-size:1
 html[data-wb-mobile] .wb_mClient{display:flex;width:100%;align-items:center;text-align:left;gap:12px;padding:8px 0;border:0;border-bottom:1px solid var(--dsh-line-2,#f1efea);background:var(--dsh-card,#fff);min-height:60px}
 html[data-wb-mobile] .wb_mClient b{display:block;line-height:24px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 html[data-wb-mobile] .wb_mClient small{min-height:18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-html[data-wb-mobile] .wb_mClient>.wb_mRadio{display:grid;place-items:center;flex:none;width:26px;height:26px;border-radius:50%!important;border:2px solid var(--dsh-ink-4,#b9bccb)}
+html[data-wb-mobile] .wb_mClient>.wb_mRadio{display:grid;place-items:center;flex:none;width:26px;height:26px;border-radius:50%!important;corner-shape:round;border:2px solid var(--dsh-ink-4,#b9bccb)}
 html[data-wb-mobile] .wb_mRadio[data-on='1']{background:var(--wb-accent);border-color:var(--wb-accent);color:#fff}
 html[data-wb-mobile] .wb_mSheet>.wb_mPrimary{margin-top:24px}
 html[data-wb-mobile] .wb_mEditor{position:absolute;top:var(--wb-vv-top,0px);left:0;right:0;height:var(--wb-vv-h,100dvh);background:#fff;padding:8px 16px calc(16px + env(safe-area-inset-bottom));display:flex;flex-direction:column;gap:12px}
@@ -760,13 +760,13 @@ html[data-wb-mobile] .wb_mSession[aria-current=true]{background:#fff;box-shadow:
 html[data-wb-mobile] .wb_mSession[aria-current=true] b{color:var(--wb-accent);font-weight:700}
 html[data-wb-mobile] .wb_mSession b{display:block;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-size:16px;line-height:22px;font-weight:500}
 html[data-wb-mobile] .wb_mSession small{display:block;margin-top:2px;font-size:14px;line-height:20px;color:var(--wb-dim2)}
-html[data-wb-mobile] .wb_mStatus{width:8px;height:8px;border-radius:50%;background:var(--dsh-ink-4,#b9bccb);margin-top:8px;flex:none}
+html[data-wb-mobile] .wb_mStatus{width:8px;height:8px;border-radius:50%;corner-shape:round;background:var(--dsh-ink-4,#b9bccb);margin-top:8px;flex:none}
 html[data-wb-mobile] .wb_mStatus[data-tone=blue]{background:var(--wb-accent)}
 html[data-wb-mobile] .wb_mStatus[data-tone=orange]{background:var(--dsh-orange,#ff6a1f)}
 html[data-wb-mobile] .wb_mStatus[data-tone=green]{background:var(--dsh-green,#14a05a)}
 html[data-wb-mobile] .wb_mAccount{display:flex;align-items:center;gap:12px;padding:16px 20px calc(16px + env(safe-area-inset-bottom));border-top:1px solid var(--wb-line);flex:none}
 html[data-wb-mobile] .wb_mAccount small{display:block;color:var(--wb-dim2);font-size:13px;overflow-wrap:anywhere}
-html[data-wb-mobile] .wb_mAccount .wb_mAvatar{border-radius:50%;background:var(--dsh-blue-50,#eef2fd);color:var(--wb-accent)}
+html[data-wb-mobile] .wb_mAccount .wb_mAvatar{border-radius:50%;corner-shape:round;background:var(--dsh-blue-50,#eef2fd);color:var(--wb-accent)}
 html[data-wb-mobile] .wb_mChat .wb_mTop{background:#fff;border-bottom:1px solid var(--wb-line)}
 html[data-wb-mobile] .wb_mChat .wb_mHeading b{font-size:17px;line-height:22px}
 html[data-wb-mobile] .wb_mPinned{position:relative;display:flex;align-items:center;gap:8px;height:56px;padding:4px 16px;background:var(--dsh-card,#fff);border-bottom:1px solid var(--wb-line)}
@@ -780,7 +780,7 @@ html[data-wb-mobile] .wb_mProgress summary svg{flex:none;width:24px;height:24px}
 html[data-wb-mobile] .wb_mProgress[open] summary svg{transform:rotate(180deg)}
 html[data-wb-mobile] .wb_mChecklist{position:absolute;top:100%;left:16px;right:16px;z-index:1200;max-height:calc(var(--wb-vv-h,100dvh) * .4);overflow:auto;overscroll-behavior:contain;padding:16px;border-radius:var(--dsh-r-m,14px);background:var(--dsh-card,#fff);box-shadow:var(--dsh-shadow-2,0 8px 24px #0e14301a)}
 html[data-wb-mobile] .wb_mProgress .wb_trow{padding:3px 0;font-size:16px;gap:10px}
-html[data-wb-mobile] .wb_mProgress .wb_ticon{width:22px;height:22px;flex:none;border-radius:50%;font-size:18px;display:grid;place-items:center}
+html[data-wb-mobile] .wb_mProgress .wb_ticon{width:22px;height:22px;flex:none;border-radius:50%;corner-shape:round;font-size:18px;display:grid;place-items:center}
 html[data-wb-mobile] .wb_mProgress .wb_ticon[data-s=done]{background:var(--dsh-green,#14a05a);color:#fff}
 html[data-wb-mobile] .wb_mPinned .wb_mPending{display:flex;align-items:center;justify-content:center;gap:4px;min-width:0;max-width:60%;min-height:48px;margin:0 0 0 auto;padding:0 8px;border:0;border-radius:var(--dsh-r-s,10px);background:var(--dsh-orange-50,#fff1e6);color:var(--dsh-orange-700,#d9480f)}
 html[data-wb-mobile] .wb_mPending small{font-size:13px;line-height:18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}

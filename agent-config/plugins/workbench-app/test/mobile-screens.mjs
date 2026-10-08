@@ -78,8 +78,9 @@ const bundles = await Promise.all([source, baseline].map(plugin => build({stdin:
 // Reproduce the upstream public scroll/seat contract: header above a flex body,
 // transcript and sticky seat inside one scrollport. The old plain-text fixture
 // had neither a scrollport nor message nodes, so it could not catch W2.
+// The harness also applies superellipse corners globally, including to circles.
 const html = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><style>
-*{box-sizing:border-box}body{margin:0}#root{height:100vh}button{cursor:pointer}dsh-tabbar{display:none}
+*{box-sizing:border-box;corner-shape:superellipse(1.5)}body{margin:0}#root{height:100vh}button{cursor:pointer}dsh-tabbar{display:none}
 .fixture_card button{border:0;padding:0}.fixture_card [contenteditable]{outline:none}.fixture_centerCol{min-height:0}.fixture_conversation{height:100%;display:flex;flex-direction:column;overflow:hidden}
 .fixture_body{position:relative;display:flex;flex:1;flex-direction:column;min-height:0}
 .fixture_scrollBody{display:flex;flex:1;flex-direction:column;min-height:0;overflow-y:auto;margin-right:2px;scrollbar-gutter:stable}
@@ -97,8 +98,16 @@ const server = createServer((req,res) => {
 await new Promise(r=>server.listen(0,'127.0.0.1',r))
 const base = `http://127.0.0.1:${server.address().port}`
 const browser = await chromium.launch({headless:true})
-const errors = [], results = [], metrics = [], desktop = []
+const errors = [], results = [], skipped = [], metrics = [], desktop = []
 function pass(name) { results.push(name) }
+async function assertRoundCircles(page,selector,name) {
+ const shapes=await page.locator(selector).evaluateAll(elements=>CSS.supports('corner-shape','round')?elements.map(el=>getComputedStyle(el).getPropertyValue('corner-shape').trim()):null)
+ if(shapes===null){skipped.push(name+' (corner-shape unsupported)');return}
+ assert.ok(shapes.length>0,name+': circles must exist')
+ // CSS Borders 4 computes round as superellipse(1); accept either serialization.
+ for(const shape of shapes)assert.equal(shape==='superellipse(1)'?'round':shape,'round',name)
+ pass(name)
+}
 async function settle(page) { await page.evaluate(()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))); }
 async function screenshot(page,name) { await page.screenshot({path:out+'/'+name+'.png'}) }
 async function noOverflow(page) { assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth),page.viewportSize().width) }
@@ -143,6 +152,7 @@ try {
   await page.locator('.wb_mContext').click()
   const rows=await page.locator('.wb_mClient').evaluateAll(rows=>rows.map(row=>{const r=row.getBoundingClientRect(),b=row.querySelector('b').getBoundingClientRect(),c=row.querySelector('.wb_mRadio'),s=getComputedStyle(c);return {height:r.height,title:b.y-r.y,check:[c.offsetWidth,c.offsetHeight,s.borderRadius]}}))
   assert.ok(rows.every(row=>row.height>=56));assert.deepEqual(rows[0],rows[1]);assert.deepEqual(rows[0].check,[26,26,'50%'])
+  await assertRoundCircles(page,'.wb_mClient>.wb_mRadio',width+': client radios keep round corners under harness superellipse')
   await page.getByRole('button',{name:'Line B',exact:true}).click();assert.equal(await page.getByRole('button',{name:'✓ Period B',exact:true}).count(),1);assert.equal(await page.getByRole('button',{name:'Period A',exact:true}).count(),0)
   await screenshot(page,'a-sheet-'+width);await page.getByRole('button',{name:'确定',exact:true}).click();pass(width+': uniform client rows and period linkage')
   await page.getByRole('button',{name:'自己输入',exact:true}).click()
@@ -153,6 +163,8 @@ try {
   assert.ok(textarea.height<=Math.ceil(height*.4));assert.ok(textarea.scroll>textarea.height);assert.equal(textarea.resize,'none');assert.equal(textarea.font,'16px')
   await screenshot(page,'topic-'+width);await topic.fill('Short');assert.equal((await topic.boundingBox()).height,72);pass(width+': textarea grows, caps, scrolls and shrinks')
   await page.getByRole('button',{name:'打开会话抽屉'}).click();assert.equal((await page.locator('.wb_mDrawer').boundingBox()).width,328)
+  await assertRoundCircles(page,'.wb_mStatus',width+': status dots keep round corners under harness superellipse')
+  await assertRoundCircles(page,'.wb_mAccount .wb_mAvatar',width+': account avatar keeps round corners under harness superellipse')
   const search=page.getByRole('searchbox');assert.equal((await search.boundingBox()).height,44);assert.equal(await page.locator('.wb_mSearch>svg').count(),1)
   assert.equal(await search.evaluate(el=>getComputedStyle(el).fontSize),'16px');assert.equal(await page.locator('.wb_mGroup small').first().evaluate(el=>getComputedStyle(el).fontSize),'13px')
   assert.equal((await page.locator('.wb_mGroup>svg').first().boundingBox()).width,24)
@@ -162,6 +174,7 @@ try {
   const rest=await chatMetrics(page);metrics.push({width,state:'rest',...rest});assert.ok(rest.pinned<=56);assert.ok(rest.scrollTop-rest.top<=56,'all pinned chrome under top bar must fit in 56px');assert.ok(rest.visible);assert.equal(rest.scrollBottom,rest.composerTop)
   const summary=page.locator('.wb_mProgress summary');assert.ok((await summary.boundingBox()).height>=44);assert.equal(await summary.locator('svg').count(),1);assert.equal(await summary.evaluate(el=>getComputedStyle(el).fontSize),'16px')
   await screenshot(page,'c-'+width);await summary.click();assert.equal(await page.locator('.wb_mProgress').getAttribute('open'),'');assert.ok((await page.locator('.wb_mChecklist').boundingBox()).height<=height*.4)
+  await assertRoundCircles(page,'.wb_mProgress .wb_ticon',width+': progress icons keep round corners under harness superellipse')
   await screenshot(page,'c-progress-'+width);await summary.click();assert.equal(await page.locator('.wb_mProgress').getAttribute('open'),null);await noOverflow(page);pass(width+': compact pinned row and progress toggle')
   await page.getByRole('button',{name:'会话更多操作'}).click()
   const menu=await page.locator('.wb_mSheet').evaluate(el=>{const title=el.querySelector('h2').getBoundingClientRect();return [...el.querySelectorAll('.wb_mMenuRow')].map(row=>{const r=row.getBoundingClientRect(),s=getComputedStyle(row);return {left:r.x+parseFloat(s.paddingLeft)-title.x,height:r.height,border:s.borderTopWidth}})})
@@ -214,6 +227,6 @@ try {
   writeFileSync(out+'/desktop-'+width+'.json',JSON.stringify(pair));assert.ok(isDeepStrictEqual(pair[1],pair[0]),'desktop baseline differs at '+width+'; see desktop JSON');desktop.push({width,states:['compose','chat'],nodes:pair[0].compose.elements.length+pair[0].chat.elements.length,differences:0});pass(width+': desktop equals baseline DOM/styles/geometry')
  }
  assert.deepEqual(errors,[])
- const report={passed:results.length,errors,mobileDPR:3,baselineRef,screenshots:out,checks:results,metrics,desktop}
- writeFileSync(out+'/results.json',JSON.stringify(report,null,2));console.log(JSON.stringify({passed:results.length,errors,desktop,screenshots:out}))
+ const report={passed:results.length,skipped,errors,mobileDPR:3,baselineRef,screenshots:out,checks:results,metrics,desktop}
+ writeFileSync(out+'/results.json',JSON.stringify(report,null,2));console.log(JSON.stringify({passed:results.length,skipped,errors,desktop,screenshots:out}))
 } finally { await browser.close();server.close() }
