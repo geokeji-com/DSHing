@@ -122,7 +122,13 @@ Round 1：聊天进度与待审/已入库入口合为 56px 行，48px 的原生 
 
 手机审核使用同一 `ReviewTabBody` 的列表 → 正文视图；不会自动打开桌面右栏。进度镜像最后一次成功 `todo_write`，没有清单时按唯一文章标题计算实际产物/运行状态，模板数量不当作目标篇数。抽屉索引没有文章状态，只有已加载会话才能按消息中 `write_article` 的标题与正式库交集得出入库数；未知显示灰点「状态未同步」，不会伪装成已停止或已入库。文章已入库显示绿色，待审显示橙色。「再写 1 篇 / 换个语气」只填入原生草稿，仍需用户发送；运行时停止沿用原生停止按钮。「在电脑上打开」提示在同账号的会话列表继续，未构造不存在的 deep link。
 
-**上游选择器例外**：本次批准的手机适配需要覆盖 harness frame / composer。所有新增 suffix 选择器集中在 `lib/client.js` 的 `Upstream compatibility boundary` 注释下，并限定于 `html[data-wb-mobile]`；没有写死构建 hash。优先使用 `data-slot`、`data-composer-seat` 等公开属性。移动浮层用 React portal 到 body，避免上游 overlay stacking context 遮挡。桌面 JSX、CSS、侧栏宽度、右栏审核和写入路径保留。
+**上游选择器例外**：本次批准的手机适配需要覆盖 harness frame / composer。所有新增 suffix 选择器集中在 `lib/client.js` 的 `Upstream compatibility boundary` 注释下，并限定于 `html[data-wb-mobile]`；没有写死构建 hash。优先使用 `data-slot`、`data-composer-seat` 等公开属性。移动浮层用 React portal 到 body，避免上游 overlay stacking context 遮挡。桌面 JSX、侧栏宽度、右栏审核和写入路径保留；颜色随下述暗色契约切换。
+
+## Dark mode
+
+唯一开关是 Harness ThemePresenter 的 `body[data-ds-dark-theme]`，跟随 Appearance（包括 system 的实时变化），无需刷新，也没有插件自己的主题开关或媒体查询。桌面左栏使用原生 `--dsw-*` 侧栏色；挑篇条、进度和审核面板使用 `--wb-*`。手机使用共享壳的 `--dsh-*`（契约见 `/workspace/dark-mode/PALETTE.md`）：`--dsh-blue-ink` 用于文字、图标和状态边框，`--dsh-blue` 用于承载白字的填充。浅色保留原值/回退值及全部几何；暗色提高次要文字对比度，补齐表单、滚动条、禁用按钮和选中 chip 的前景色。
+
+`test/theme.test.js` 检查侧栏/挑篇/审核字面颜色都有暗色覆盖及手机色值回退。离线 fixture 通过内存路由提供页面（不启动 HTTP 服务、不联系网络），保留旧桌面基线，另以 `1be6b0a5eded774af43fe82d7e791d15f3d8bc03` 比较浅色手机与桌面审核的 DOM、computed styles 和矩形（可用 `WB_LIGHT_REF` 覆盖）。暗色注入共享 palette，检查实时往返切换，并生成 `dark-desktop-*.png`、`dark-mobile-*.png`、`contrast.json`：审计可见文字、placeholder、状态标记和近白背景；有意反色的选中写法 chip 单独记录，文字仍检查对比度。该审计计算 CSS 颜色及透明叠加，不覆盖图像或 emoji 的像素。启动/断言失败写入 `run-status.json`。
 
 测试：
 
