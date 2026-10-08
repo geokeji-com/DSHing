@@ -17,7 +17,7 @@
  * 代价：多一层间接 + 每个请求多做一次 statSync。值。
  */
 
-import { mkdirSync, statSync } from 'node:fs'
+import { mkdirSync, realpathSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -37,12 +37,8 @@ const ROUTES = [
   '/api/workbench/confirm-draft',
 ]
 
-/** 默认工作区：装配台发起的会话都落在这里。目录不存在就建。
- * startSession() 无参时取「最近使用的工作区」，create 把新建的排最前 ——
- * 所以只要这一个工作区在，点「新会话」就有正确的落点（真会话，不再落到
- * hero 空状态）。create 幂等：同一个 canonical 路径重复调用返回已有记录。 */
-const DEFAULT_WORKSPACE_PATH = '/home/dsh/生文'
-const DEFAULT_WORKSPACE_TITLE = '生文工作台'
+/** 只补齐本用户的工作区；新会话的显式落点由热加载的 impl/client 提供。 */
+const DEFAULT_WORKSPACE_TITLE = '我的工作区'
 
 const IMPL_PATH = join(dirname(fileURLToPath(import.meta.url)), 'impl.js')
 
@@ -78,13 +74,19 @@ export function apply(ctx, config) {
     /* 确保默认工作区（幂等）：目录不存在就建，registry 里没有就注册。
      * 失败只打日志 —— 工作区缺失不该拖垮工作台路由。 */
     try {
-      mkdirSync(DEFAULT_WORKSPACE_PATH, { recursive: true })
-      const registry = hostCtx.workspaceRegistry
-      const has = registry.list().some(w => w.path === DEFAULT_WORKSPACE_PATH)
-      if (!has) {
-        registry.create(DEFAULT_WORKSPACE_PATH, DEFAULT_WORKSPACE_TITLE)
-          .then(() => process.stderr.write(`[dsh-workbench] 默认工作区已就绪：${DEFAULT_WORKSPACE_PATH}\n`))
-          .catch(error => process.stderr.write(`[dsh-workbench] 默认工作区创建失败：${String(error && error.message ? error.message : error)}\n`))
+      if (!process.env.DSH_HOME) {
+        process.stderr.write('[dsh-workbench] DSH_HOME 未设置，跳过个人工作区初始化\n')
+      } else {
+        const path = join(process.env.DSH_HOME, 'workspaces', 'default')
+        mkdirSync(path, { recursive: true })
+        const canonical = realpathSync(path)
+        const registry = hostCtx.workspaceRegistry
+        const has = registry.list().some(w => w.path === canonical)
+        if (!has) {
+          registry.create(canonical, DEFAULT_WORKSPACE_TITLE)
+            .then(() => process.stderr.write(`[dsh-workbench] 默认工作区已就绪：${canonical}\n`))
+            .catch(error => process.stderr.write(`[dsh-workbench] 默认工作区创建失败：${String(error && error.message ? error.message : error)}\n`))
+        }
       }
     } catch (error) {
       process.stderr.write(`[dsh-workbench] 默认工作区检查失败：${String(error && error.message ? error.message : error)}\n`)

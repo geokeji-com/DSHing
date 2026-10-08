@@ -37,7 +37,7 @@ window.fixtureWrites=[];
 window.fetch=async(url,opts)=>{
  if(opts?.method && opts.method!=='GET'){fixtureWrites.push(url);throw Error('Fixture blocked a write')}
  const path=new URL(url,location.href).pathname;
- const body=path.endsWith('/clients')?{ok:true,customers:query.has('empty')?[]:customers}
+ const body=path.endsWith('/clients')?{ok:true,customers:query.has('empty')?[]:customers,workspace:{personal:{id:'fixture-personal',path:'/fixture/personal'},legacySharedIds:['fixture-legacy']}}
  :path.endsWith('/skills')?{ok:true,skills:[{name:'Fixture personal template',layer:'personal'},{name:'Fixture public template',layer:'public'}]}
  :path.endsWith('/articles')?{ok:true,articles:[]}
  :path.endsWith('/session-client')?{ok:true,index:{'fixture-session':{client_key:'CUS-a',client:name,topic:'Fixture task',bound_at:'2026-10-01'}},binding:{client_key:'CUS-a',client:name}}
@@ -48,7 +48,7 @@ window.fetch=async(url,opts)=>{
  return {ok:true,status:200,json:async()=>body,text:async()=>'# Fixture article\\n\\nFixture article body'};
 };
 let show;
-const services={layout:{selectPanel(){show('compose')}},uiWorkspace:{openSession(){show('chat')}},sidebarRight:{openTab(){if(matchMedia('(max-width:767px)').matches)throw Error('Mobile opened desktop review')}},sidebarRightTabs:{register(){}}};
+const services={layout:{selectPanel(){show('compose')}},uiWorkspace:{startSession(){show('chat')},async openWorkspace(id,beforeOpen){beforeOpen?.('fixture-session');show('chat')},openSession(){show('chat')}},sidebarRight:{openTab(){if(matchMedia('(max-width:767px)').matches)throw Error('Mobile opened desktop review')}},sidebarRightTabs:{register(){}}};
 const ctx={...services,get(n){return services[n]},slots:{inject(){},register(){}},effect(fn){fn()}};
 wb.apply(ctx,{defaultPanel:''});
 function Conversation(){

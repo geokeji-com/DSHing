@@ -42,6 +42,22 @@
 所以壳只负责"把路由注册一次"，每个请求按 `impl.js` 的 mtime 决定要不要重新 import ——
 宿主逻辑于是也跟着热了。壳刻意写到最少，一年也改不了几次。
 
+## 新会话的个人工作区
+
+新会话默认使用当前 Harness 的 `${DSH_HOME}/workspaces/default`。`index.js` 启动时只补建该目录、按 canonical path 查重注册；已有标题保留，新记录使用「我的工作区」。未设置 `DSH_HOME` 时记日志并跳过。旧 `/home/dsh/生文` 的目录、注册记录和历史会话保留，已有会话仍按原 cwd 打开和继续。
+
+运行中的进程无需等 `index.js` 重启：热加载的 `impl.js` 在现有 `GET /api/workbench/clients` 响应中补充 `workspace: { personal: { id, path }, legacySharedIds: [...] }`，并幂等确保个人工作区。客户 MCP 不可用时仍可返回工作区信息；工作区初始化失败时返回 `workspace: null`，客户结果与 ACL 过滤照常执行。没有新增路由。
+
+浏览器复用客户请求缓存工作区信息，缺失时按需请求并重试一次；仍不可用则提示「个人工作区暂不可用，请稍后重试」。装配台通过 `openWorkspace(personalId)` 打开目标空白会话，提示词仅交给该目标 session id。原生 `startSession()` 的无参调用与 `legacySharedIds` 中的 ID 转向个人工作区，其他显式 ID 保持原样；首次信息尚未加载时先查询，查询失败不创建会话。包装仅安装一次，插件卸载时恢复原方法。若宿主服务冻结或代理阻止包装，会记录浏览器警告；此时装配台仍显式选择个人工作区，原生入口的保护无法安装。
+
+| 环境变量 | 用途 |
+|---|---|
+| `DSH_WORKBENCH_PERSONAL_WORKSPACE` | 覆盖运行时个人工作区路径；未设置则使用 `DSH_HOME` 下的默认目录 |
+| `DSH_WORKBENCH_LEGACY_SHARED_ROOT` | 覆盖 legacy ID 检测路径，默认 `/home/dsh/生文`；包含 canonical path 相同的符号链接别名 |
+| `DSH_WORKBENCH_WORKSPACE_ROOT` | 保留任务状态探测路径覆盖；默认跟随个人工作区路径 |
+
+未配置个人路径且无 `DSH_HOME` 时，新会话显示上述错误，任务状态不探测其他工作目录。工作区测试使用隔离的文件系统、`workspaceRegistry` 和 `uiWorkspace` fakes，覆盖启动、热加载、ACL、重试、卸载和旧会话接力竞态；不会操作真实用户目录。
+
 ## 装
 
 ```sh
@@ -69,7 +85,7 @@ dsh plugin --profile web add /path/to/plugins/dsh-workbench
 | 项 | 行为 |
 |---|---|
 | 稳定键 | task-meta 与 session 索引存 `client_key`（CUS-*）；显示名并存于 `client` |
-| 新会话 | 装配台发送 → `POST /api/workbench/task-meta` → `startSession` → PromptRelay 拿到 session id 后写 `session-client`，并登记 Noah 兼容 topic map |
+| 新会话 | 装配台确认个人工作区 → `POST /api/workbench/task-meta` → `openWorkspace(personalId)` → PromptRelay 在目标 session id 写 `session-client`，并登记 Noah 兼容 topic map |
 | 左栏 | `shell.overlay` 的 `SidebarNav` 显示「生文 Agent / ＋ 新建任务 / 搜索 / 客户分组会话树」；客户名优先来自 `list_clients` |
 | 未归类 | 空或未知 `client_key` 的绑定进入「其他」；没有索引的历史原生会话仍留在官方会话系统 |
 | 入口 | 点「＋ 新建任务」调用 `layout.selectPanel(workbench)`，点会话调用 `uiWorkspace.openSession` / `sessions.open` |

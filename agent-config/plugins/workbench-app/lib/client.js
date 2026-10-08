@@ -904,14 +904,93 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 		 * 前端不判权限、也拿不到别人客户的名单。
 		 * ================================================================== */
 		var CLIENTS_PATH = "/api/workbench/clients";
+		var wbWorkspaceInfo = null;
+		var wbWorkspaceFetch = null;
+		var WB_WORKSPACE_ERROR = "个人工作区暂不可用，请稍后重试";
+		var WB_SESSION_GUARD = Symbol.for("dsh-workbench.personal-session-guard");
+
+		function wbCacheWorkspace(body) {
+			var info = body && body.workspace;
+			var personal = info && info.personal;
+			wbWorkspaceInfo = personal && typeof personal.id === "string" && personal.id !== ""
+				&& typeof personal.path === "string" && personal.path !== "" && Array.isArray(info.legacySharedIds)
+				&& info.legacySharedIds.indexOf(personal.id) === -1 ? info : null;
+			return body;
+		}
+
+		function wbFetchClients() {
+			return fetch(CLIENTS_PATH, { headers: { accept: "application/json" } })
+				.then(readWorkbenchList).then(wbCacheWorkspace);
+		}
+
+		async function wbRequireWorkspace() {
+			if (wbWorkspaceInfo) return wbWorkspaceInfo;
+			if (!wbWorkspaceFetch) {
+				wbWorkspaceFetch = (async function () {
+					// A missing field can mean the previous impl was still loaded. Retry once.
+					for (var attempt = 0; attempt < 2; attempt++) {
+						try { await wbFetchClients(); } catch (error) { /* retry / fail closed */ }
+						if (wbWorkspaceInfo) return wbWorkspaceInfo;
+					}
+					throw new Error(WB_WORKSPACE_ERROR);
+				})();
+			}
+			try { return await wbWorkspaceFetch; }
+			finally { wbWorkspaceFetch = null; }
+		}
+
+		function wbInstallSessionGuard(ctx) {
+			var workspace, original, descriptor, wrapped;
+			var guard = {}, attempted = false;
+			var active = true;
+			try {
+				workspace = ctx.get("uiWorkspace");
+				original = workspace && workspace.startSession;
+				if (typeof original !== "function") throw new Error("uiWorkspace.startSession 不可用");
+				if (original[WB_SESSION_GUARD]) return function () {};
+				descriptor = Object.getOwnPropertyDescriptor(workspace, "startSession");
+				wrapped = function () {
+					var receiver = this, args = Array.prototype.slice.call(arguments);
+					function start(info) {
+						if (!active) return;
+						if (args[0] == null || info.legacySharedIds.indexOf(args[0]) !== -1) args[0] = info.personal.id;
+						return original.apply(receiver, args);
+					}
+					if (wbWorkspaceInfo) return start(wbWorkspaceInfo);
+					return wbRequireWorkspace().then(start).catch(function () {
+						if (active) window.alert(WB_WORKSPACE_ERROR);
+					});
+				};
+				wrapped[WB_SESSION_GUARD] = guard;
+				attempted = true;
+				workspace.startSession = wrapped;
+				if (workspace.startSession[WB_SESSION_GUARD] !== guard) throw new Error("startSession 不可写或被代理");
+			} catch (error) {
+				if (attempted) {
+					try {
+						if (descriptor) Object.defineProperty(workspace, "startSession", descriptor);
+						else delete workspace.startSession;
+					} catch (restoreError) { /* frozen/proxied service: best effort */ }
+				}
+				console.warn("[dsh-workbench] 无法安装新会话工作区保护：", error);
+				return function () { active = false; };
+			}
+			return function () {
+				active = false;
+				try {
+					if (workspace.startSession[WB_SESSION_GUARD] !== guard) return;
+					if (descriptor) Object.defineProperty(workspace, "startSession", descriptor);
+					else delete workspace.startSession;
+				} catch (error) { console.warn("[dsh-workbench] 无法恢复新会话入口：", error); }
+			};
+		}
 
 		function useClients() {
 			var state = React.useState({ status: "loading", customers: [], error: "", detail: "", uid: "" });
 			var setValue = state[1];
 			React.useEffect(function () {
 				var alive = true;
-				fetch(CLIENTS_PATH, { headers: { accept: "application/json" } })
-					.then(readWorkbenchList)
+				wbFetchClients()
 					.then(function (body) {
 						if (!alive) return;
 						if (body && body.ok === true) {
@@ -1128,9 +1207,8 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 		 *
 		 * P0 修复（串台）：以前这里的 effect 只看 actions，凡挂着一个 dock
 		 * 就消费 —— 于是提示词落进了「当时打开的那条会话」。现在加两条守卫：
-		 *   1. 只在**空白会话**里消费：startSession() 会复用/新建空白会话，
-		 *      目标会话必然没有消息节点；非空白的一律跳过，留给目标。
-		 *      （旧会话若本身就是空白，它就是 startSession 复用的目标，消费正确。）
+		 *   1. 只在 openWorkspace(personalId) 返回的目标空白会话消费，
+		 *      包括工作区切换期间仍挂着的旧空白会话，也必须跳过。
 		 *   2. dispatch() 派发 `wb-prompt-set` 事件：当前打开的会话如果恰好
 		 *      是空白目标（actions/isEmpty 都没变，effect 不会重跑），靠事件
 		 *      触发一次检查，提示词不会卡住。 */
@@ -1159,6 +1237,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			var consumeRef = React.useRef(null);
 			consumeRef.current = function () {
 				if (pendingPrompt === null) return;
+				if (props.sessionId !== pendingPrompt.sessionId) return;
 				if (actions === undefined || actions === null) {
 					/* 真有提示词要发却拿不到 inputActions —— 说出来，别静默吞掉。 */
 					console.warn("[dsh-workbench] 接力挂件拿不到 inputActions，提示词没发出去");
@@ -1168,7 +1247,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					/* 非空白会话：不是目标，跳过 —— 提示词留给空白目标会话。 */
 					return;
 				}
-				var text = pendingPrompt;
+				var text = pendingPrompt.text;
 				pendingPrompt = null;
 				/* 把任务参数编号绑定到这个会话 —— C1 任务条按 sessionId 取。
 				 * （多设备/刷新后不跨会话残留。） */
@@ -1200,7 +1279,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 
 			React.useEffect(function () {
 				consumeRef.current();
-			}, [actions, isEmpty]);
+			}, [actions, isEmpty, props.sessionId]);
 
 			/* dispatch() 设好 pendingPrompt 后派发的事件：让"当前已挂着的
 			 * 空白会话"（deps 都没变的那种）也能立刻消费，不等下一次渲染。 */
@@ -1213,6 +1292,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			/* session id 晚到：pending-bind 还在就补绑一次（不挡消息）。 */
 			React.useEffect(function () {
 				if (typeof props.sessionId !== "string" || props.sessionId === "") return;
+				if (pendingPrompt !== null && props.sessionId !== pendingPrompt.sessionId) return;
 				var bindRaw = "";
 				try { bindRaw = sessionStorage.getItem("wb-pending-bind") || ""; } catch (e) { return; }
 				if (bindRaw === "") return;
@@ -1350,7 +1430,8 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				 * client-map（topic/旧会话兼容）。客户显示名来自 list_clients。
 				 * 单个兼容路由尚未热上的过渡期不应遮住正式索引。 */
 				function readNav(url) {
-					return fetch(url, { headers: { accept: "application/json" } }).then(readWorkbenchList).catch(function () { return {}; });
+					return (url === CLIENTS_PATH ? wbFetchClients()
+						: fetch(url, { headers: { accept: "application/json" } }).then(readWorkbenchList)).catch(function () { return {}; });
 				}
 				Promise.all([
 					readNav(WB_API.sessionClient),
@@ -2448,6 +2529,16 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 
 			async function dispatch() {
 				if (clientName === "") return;
+				var personal, workspace;
+				setSending("正在准备个人工作区…");
+				try {
+					personal = (await wbRequireWorkspace()).personal;
+					workspace = ctx && typeof ctx.get === "function" ? ctx.get("uiWorkspace") : null;
+					if (!workspace || typeof workspace.openWorkspace !== "function") throw new Error(WB_WORKSPACE_ERROR);
+				} catch (error) {
+					setSending(WB_WORKSPACE_ERROR);
+					return;
+				}
 				/* C1 数据源：先把装配参数登记到宿主（POST task-meta）拿编号，
 				 * 编号追加在预填消息尾部 + 记进 sessionStorage —— 会话页顶部
 				 * 的任务条凭编号读回参数。登记失败不挡发送（任务条显示兜底）。 */
@@ -2471,27 +2562,23 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				} catch (error) { /* 登记失败照常发送，任务条走兜底 */ }
 				var text = composePrompt() + (metaId === "" ? "" : "\n\n[任务编号：" + metaId + "]");
 				try {
-					if (metaId !== "") {
-						sessionStorage.setItem("wb-task-meta-id", metaId);
-						sessionStorage.setItem("wb-pending-meta", metaId);
-					}
-					/* 新会话强制绑客户：等 PromptRelay 拿到 session id 再 POST 索引 */
-					sessionStorage.setItem("wb-pending-bind", JSON.stringify({
-						client_key: pick.key,
-						client: clientName,
-						topic: topic,
-						meta_id: metaId,
-					}));
-				} catch (error) { /* 隐身模式就算了 */ }
-				var workspace = ctx !== undefined && ctx !== null && typeof ctx.get === "function" ? ctx.get("uiWorkspace") : undefined;
-				if (workspace === undefined || workspace === null || typeof workspace.startSession !== "function") {
-					setSending("起不了会话：宿主没有 uiWorkspace");
-					return;
-				}
-				pendingPrompt = text;
-				setSending("");
-				try {
-					workspace.startSession();
+					await workspace.openWorkspace(personal.id, function (sessionId) {
+						pendingPrompt = { text: text, sessionId: sessionId };
+						try {
+							if (metaId !== "") {
+								sessionStorage.setItem("wb-task-meta-id", metaId);
+								sessionStorage.setItem("wb-pending-meta", metaId);
+							}
+							/* 新会话强制绑客户：等 PromptRelay 拿到 session id 再 POST 索引 */
+							sessionStorage.setItem("wb-pending-bind", JSON.stringify({
+								client_key: pick.key,
+								client: clientName,
+								topic: topic,
+								meta_id: metaId,
+							}));
+						} catch (error) { /* 隐身模式就算了 */ }
+					});
+					setSending("");
 				} catch (error) {
 					pendingPrompt = null;
 					setSending("起会话失败：" + String(error && error.message ? error.message : error));
@@ -2921,6 +3008,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 		/* ---- wiring ------------------------------------------------------- */
 		function apply(ctx, config) {
 			WbCtx = ctx;
+			ctx.effect(function () { return wbInstallSessionGuard(ctx); }, "dsh-workbench: personal new sessions");
 			/* 注意：**不要**在这里注册 locale。`sidebar` 命名空间是官方
 			 * dsh-client-ui-sidebar 的单一占用者，我们再去 register 会把
 			 * 官方侧边栏插件整个炸掉（"locale namespace sidebar already
@@ -2936,7 +3024,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			/* ---- 面板接线（2026-09-23 按用户产品决策定稿）--------------------
 			 * 这个 DSH 是「生文 Agent」产品本体，不是通用聊天工具：
 			 * 打开就落在装配台（发起任务），装配台发送 → 进入会话写正文。
-			 * 「新会话」按钮（无参 startSession）落在默认工作区的空白会话；
+			 * 「新会话」按钮（无参 startSession）落在个人工作区的空白会话；
 			 * 按钮级劫持成装配台需要更深的 hero/侧栏改造，列为下一步。 */
 			ctx.slots.inject("main", function () {
 				return ctx.slots.register({ name: "main", key: WORKBENCH_KEY }, function () {
@@ -3059,7 +3147,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			}
 		}
 
-		exports.inject = ["slots", "layout", "sidebarRight", "sidebarRightTabs"];
+		exports.inject = ["slots", "layout", "sidebarRight", "sidebarRightTabs", "uiWorkspace"];
 		exports.apply = apply;
 		return module.exports;
 	}
