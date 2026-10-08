@@ -746,9 +746,9 @@ html[data-wb-mobile] .wb_mContext b{font-weight:650;display:-webkit-box;-webkit-
 html[data-wb-mobile] :is(.wb_mContext,.wb_mClient) small{display:block;font-size:13px;line-height:18px;color:var(--wb-dim2)}
 html[data-wb-mobile] .wb_mContext>svg{color:var(--wb-dim2);flex:none}
 html[data-wb-mobile] .wb_mAvatar{width:40px;height:40px;border-radius:12px;background:var(--wb-accent);color:var(--dsh-on-accent,#fff);display:grid;place-items:center;font-size:17px;font-weight:750;flex:none}
-html[data-wb-mobile] .wb_mSegment{display:flex;padding:4px;gap:2px;border-radius:12px;background:var(--dsh-sunken,#efece6);margin-bottom:12px}
-html[data-wb-mobile] .wb_mSegment button{flex:1;position:relative;min-width:0;height:36px;border:0;border-radius:9px;background:transparent;font-size:15px;font-weight:600;color:var(--wb-dim)}
-html[data-wb-mobile] .wb_mSegment button::after{content:'';position:absolute;inset:-4px 0}
+html[data-wb-mobile] .wb_mSegment{display:flex;padding:2px;gap:2px;border-radius:12px;background:var(--dsh-sunken,#efece6);margin-bottom:12px}
+html[data-wb-mobile] .wb_mSegment button{flex:1;position:relative;min-width:0;height:44px;border:0;border-radius:9px;background:transparent;font-size:15px;font-weight:600;color:var(--wb-dim)}
+html[data-wb-mobile] .wb_mSegment button::after{content:'';position:absolute;inset:-2px 0}
 html[data-wb-mobile] .wb_mSegment button[aria-pressed=true]{background:var(--dsh-card,#fff);color:var(--wb-text);box-shadow:var(--wb-soft-shadow,0 1px 2px #0e14300f)}
 html[data-wb-mobile] .wb_mTopic{display:block;width:100%;resize:none;min-height:72px;max-height:40vh;overflow-y:auto;font-size:16px!important;border:1px solid var(--wb-line);border-radius:var(--dsh-r-m,14px);padding:12px 16px;background:var(--dsh-card,#fff);outline-color:var(--wb-accent-ink)}
 html[data-wb-mobile] .wb_mEmpty{padding:16px;border-radius:14px;background:var(--dsh-card,#fff);color:var(--wb-dim);margin-top:12px}
@@ -762,7 +762,7 @@ html[data-wb-mobile] .wb_mRefIcon{display:grid;place-items:center;flex:none;widt
 html[data-wb-mobile] .wb_mAdd{display:flex;align-items:center;gap:12px;border:0;background:transparent;min-height:56px;padding:12px 16px;width:100%;text-align:left;color:var(--wb-accent-ink)!important;font-weight:600!important}
 html[data-wb-mobile] .wb_mChips{display:flex;flex-wrap:wrap;gap:8px;padding:2px 0}
 html[data-wb-mobile] .wb_mStyles{margin-top:12px}
-html[data-wb-mobile] .wb_mChip{position:relative;min-height:40px;max-width:100%;padding:7px 14px;border:1px solid var(--wb-line);border-radius:999px;background:var(--dsh-card,#fff);font-size:15px!important;overflow-wrap:anywhere}
+html[data-wb-mobile] .wb_mChip{position:relative;min-height:44px;max-width:100%;padding:7px 14px;border:1px solid var(--wb-line);border-radius:999px;background:var(--dsh-card,#fff);font-size:15px!important;overflow-wrap:anywhere}
 html[data-wb-mobile] .wb_mChip::after{content:'';position:absolute;inset:-2px 0}
 html[data-wb-mobile] .wb_mChip[aria-pressed=true]{border-color:var(--wb-accent-ink);background:var(--dsh-blue-50,#eef2fd);color:var(--wb-accent-ink)}
 html[data-wb-mobile] .wb_mStyles .wb_mChip[aria-pressed=true]{border-color:var(--wb-text);background:var(--wb-text);color:var(--dsh-on-accent,#fff)}
@@ -895,10 +895,11 @@ html[data-wb-mobile] [data-slot='conversation.composer.bar'] button[aria-label='
 html[data-wb-mobile] [data-slot='conversation.composer.bar'] button[aria-label='添加附件']::after{content:'＋';font-size:24px}
 html[data-wb-mobile] [data-slot='conversation.chat.node'] div[class*='_markdown']{font-size:16px;line-height:26px}
 html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
-/* Dark only: selected ink pills, state glyphs and native form controls need their own foreground.
+/* Dark only: chips keep dark surfaces in both selection states; state glyphs and native form controls need their own foreground.
    Local shadow aliases retain the original light offsets and colors. */
 html[data-wb-mobile] body[data-ds-dark-theme]{color-scheme:dark;--wb-soft-shadow:var(--dsh-shadow-1,0 1px 2px rgba(0,0,0,.45));--wb-drawer-shadow:var(--dsh-scrim,rgba(0,0,0,.6))}
-html[data-wb-mobile] body[data-ds-dark-theme] .wb_mStyles .wb_mChip[aria-pressed=true]{color:var(--dsh-bg,#151517)}
+html[data-wb-mobile] body[data-ds-dark-theme] .wb_mChip{background:var(--dsh-card,var(--wb-elev));border-color:var(--wb-line);color:var(--wb-text)}
+html[data-wb-mobile] body[data-ds-dark-theme] .wb_mChip[aria-pressed=true],html[data-wb-mobile] body[data-ds-dark-theme] .wb_mStyles .wb_mChip[aria-pressed=true]{background:var(--wb-accent-bg);border-color:var(--wb-accent-ink);color:var(--wb-accent-ink)}
 html[data-wb-mobile] body[data-ds-dark-theme] .wb_mProgress .wb_ticon[data-s=done]{color:var(--dsh-bg,#151517)}
 html[data-wb-mobile] body[data-ds-dark-theme] :is(.wb_mEditor textarea,.wb_mRename){background:var(--dsh-card,#232324);color:var(--wb-text)}
 html[data-wb-mobile] body[data-ds-dark-theme] .wb_mSearch input{color:var(--wb-text)}
