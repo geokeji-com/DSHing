@@ -26,7 +26,7 @@
 
 **WB-DEV-UI parity（2026-09-29）**：正式左栏由 Noah 同构 `SidebarNav` 通过 `shell.overlay` 提供，分组数据优先使用 P1 `session-client` + `list_clients`，再合并兼容 topic map；旧 `workbench-clients` 面板源码保留但不再显示，避免重复左树。
 
-**红线**：不写针对别人 hash 类名的选择器。`sidebar-glass` 里那些 `.hHd-Xa_root` 在当前构建里已经全部失效（现在是 `PcsDIq_root` 之类），这类选择器会在每次上游重建后静默失效。这里的类名全是自己的 `wb_` 前缀。
+**默认边界**：不写针对别人具体 hash 类名的选择器（已批准的 PR-2 手机适配例外见文末）。`sidebar-glass` 里那些 `.hHd-Xa_root` 在当前构建里已经全部失效（现在是 `PcsDIq_root` 之类），这类选择器会在每次上游重建后静默失效。这里的类名全是自己的 `wb_` 前缀。
 
 ## 什么要重启，什么不用
 
@@ -95,3 +95,28 @@ dsh plugin --profile web add /path/to/plugins/dsh-workbench
 ## 确认后的发文台可见性（P3）
 
 工作台「确认入库」调用 Support `write_article(draft:false)`，文章进入该 `client_key` 的 `ready`；dsh-cloud P3 的发文台列表读取 `Support ready ∪ library`，所以确认后同客户可选用。这个链路只改变可见性，不自动外发或投放。
+
+## 移动工作台（PR-2）
+
+断点为 `matchMedia('(max-width: 767px)')`；变化会重新渲染。手机使用 328px 会话抽屉、写给谁 sheet、分段主题/写法、可换行 chip、全屏补充要求和吸底「开始生文」。客户、产品线、期数、模板、会话、文章及账号均来自原接口；发送仍调用原 `dispatch()`，审核仍调用 `confirmTargets()` / `confirmOne()`。文本参考文件只在浏览器读取 `.txt/.md`（上限 1 MB），合并到原来的参考正文，通用二进制附件仍由会话的原生附件入口处理。
+
+dsh-cloud PR-1 注入共享 `tokens.css` 和唯一的 `<dsh-tabbar>`。插件通过 `dshMobile.setClients/setClient` 与 `dsh:client` 接入按 uid 隔离的 `dsh.ctx.client:<uid>`（值为客户显示名）。仅接受授权列表中的键/名称。聊天/审核设置 `data-dsh-chrome="flow"`，返回或跨回桌面清除。`visualViewport.resize/scroll` 更新键盘偏移和编辑器可见高度；pinch zoom 不视为键盘。虚拟登录提示条单独留出空间。
+
+手机审核使用同一 `ReviewTabBody` 的列表 → 正文视图；不会自动打开桌面右栏。进度镜像最后一次成功 `todo_write`，没有清单时保留原来的实际产物/运行状态。抽屉索引没有文章状态，只有已加载会话才能按消息中 `write_article` 的标题与正式库交集得出入库数；未知显示灰点「状态未同步」，不会伪装成已停止或已入库。文章已入库显示绿色，待审显示橙色。「再写 1 篇 / 换个语气」只填入原生草稿，仍需用户发送；运行时停止沿用原生停止按钮。「在电脑上打开」提示在同账号的会话列表继续，未构造不存在的 deep link。
+
+**上游选择器例外**：本次批准的手机适配需要覆盖 harness frame / composer。所有新增 suffix 选择器集中在 `lib/client.js` 的 `Upstream compatibility boundary` 注释下，并限定于 `html[data-wb-mobile]`；没有写死构建 hash。优先使用 `data-slot`、`data-composer-seat` 等公开属性。移动浮层用 React portal 到 body，避免上游 overlay stacking context 遮挡。桌面 JSX、CSS、侧栏宽度、右栏审核和写入路径保留。
+
+测试：
+
+```sh
+cd agent-config/plugins/workbench-app
+npm test
+# 可选浏览器依赖（仅本地测试，不进入插件运行依赖）：
+npm install --no-save playwright esbuild react react-dom
+npx playwright install chromium
+npm run test:mobile -- /tmp/workbench-mobile-screens
+```
+
+`test/mobile-screens.mjs` 使用离线 harness 契约 fixture，禁止写请求，断言 frame 没有横向溢出、移动不渲染 `.wb_nv`、主按钮位于底栏上方且可命中、抽屉宽度/遮罩关闭、产品线联动、审核列表/正文、flow 隐藏底栏、键盘抬升、768/1024/1440 桌面与断点往返、无客户禁用，并写出截图。fixture 只能验证所模拟的上游结构；正式发布还须用真实 harness 截图/geometry 复核 hashed suffix 是否仍匹配。
+
+部署沿用 dsh-cloud `docs/dsh-ops-surface-lockdown-v0.md` §ZF0：备份、vendor ff-only 到已合并 main、`bin/dsh-sync-zoe-fleet --apply-homes --dry-run`、检查候选差异，再 `--apply-homes`。同步生成 prod 快照并更新 home，不重启（`recycle=False`）。正式 harness 的 client-hmr 以 500ms stat 轮询 bundle，module host 重新读取字节并发布新 revision；旧进程可在刷新后收到新版本。勿修改 `lib/index.js`、loader 配置或回收在线用户进程来交付纯客户端变更。

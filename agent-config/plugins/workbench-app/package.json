@@ -6,7 +6,8 @@
   "description": "云上生文 Agent 工作台：按原型 v2 把 DSH web 界面做成产品界面（装配台 / 会话渲染 / 右栏审核）。host 半负责浏览器做不到的事（走 knowledge MCP 拿客户），client 半是全部界面。",
   "main": "lib/index.js",
   "scripts": {
-    "test": "node --test"
+    "test": "node --test test/*.test.js",
+    "test:mobile": "node test/mobile-screens.mjs"
   },
   "exports": {
     ".": "./lib/index.js",
