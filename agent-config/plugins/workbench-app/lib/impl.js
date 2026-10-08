@@ -30,25 +30,104 @@
 
 
 import { mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, existsSync, renameSync, unlinkSync } from 'node:fs'
-import { join, dirname } from 'node:path'
+import { join, dirname, basename, resolve } from 'node:path'
 
 const CLIENTS_PATH = '/api/workbench/clients'
 const SKILLS_PATH = '/api/workbench/skills'
 const ARTICLES_PATH = '/api/workbench/articles'
 const MCP_INFO_PATH = '/api/workbench/mcp'
 const TASK_META_PATH = '/api/workbench/task-meta'
-const TASK_META_DIR = '/home/dsh/.dsh/workbench-meta'
+// Test overrides are resolved at use time; production storage stays in place.
+const taskMetaDir = () => process.env.DSH_WORKBENCH_META_DIR || '/home/dsh/.dsh/workbench-meta'
 const TASK_STATUS_PATH = '/api/workbench/task-status'
 const DRAFTS_PATH = '/api/workbench/drafts'
 const DRAFT_PATH = '/api/workbench/draft'
 const CONFIRM_DRAFT_PATH = '/api/workbench/confirm-draft'
 const SESSION_CLIENT_PATH = '/api/workbench/session-client'
-const SESSION_CLIENT_INDEX = join(TASK_META_DIR, 'session-client-index.json')
+const sessionClientIndex = () => join(taskMetaDir(), 'session-client-index.json')
 const ASSIGN_GROUP_PATH = '/api/workbench/assign-client-group'
 const CLIENT_MAP_PATH = '/api/workbench/client-map'
-const CLIENT_MAP_FILE = join(TASK_META_DIR, 'client-map.json')
-const WORKSPACE_ROOT = '/home/dsh/生文'
-const LIBRARY_ROOT = '/srv/dsh-data/文章库'
+const clientMapFile = () => join(taskMetaDir(), 'client-map.json')
+const workspaceRoot = () => process.env.DSH_WORKBENCH_WORKSPACE_ROOT || '/home/dsh/生文'
+const libraryRoot = () => process.env.DSH_WORKBENCH_LIBRARY_ROOT || '/srv/dsh-data/文章库'
+
+const clientPathName = value => String(value ?? '').replace(/[/\\]/g, '')
+
+function jsonArray(raw) {
+  if (typeof raw !== 'string') return undefined
+  try {
+    const value = JSON.parse(raw)
+    return Array.isArray(value) ? value : undefined
+  } catch { return undefined }
+}
+
+function grantSet(raw) {
+  const values = jsonArray(raw)
+  return values === undefined ? undefined : new Set(values.filter(value => typeof value === 'string' && value !== ''))
+}
+
+/** Identity and grants come only from the trusted gateway / harness environment. */
+function requestScope(req) {
+  const headers = req.headers || {}
+  const cloud = process.env.DSH_ROOT !== undefined || process.env.DSH_ALLOWED_PROJECT_IDS !== undefined
+    || headers['x-dsh-allowed-client-keys'] !== undefined
+  const env = grantSet(process.env.DSH_ALLOWED_PROJECT_IDS)
+  const live = grantSet(headers['x-dsh-allowed-client-keys'])
+  const allowed = env !== undefined && live !== undefined
+    ? new Set([...env].filter(key => live.has(key))) : (env ?? live ?? new Set())
+  let uid = firstString(headers['x-dsh-uid'])
+  if (!uid && process.env.DSH_ROOT && process.env.DSH_HOME) {
+    const home = resolve(process.env.DSH_HOME)
+    if (dirname(home) === resolve(process.env.DSH_ROOT, 'homes')) uid = basename(home)
+  }
+  const namesHeader = headers['x-dsh-allowed-clients']
+  const names = new Set()
+  for (const entry of jsonArray(namesHeader) || []) {
+    if (entry && allowed.has(entry.key) && typeof entry.name === 'string' && entry.name !== '') names.add(clientPathName(entry.name))
+  }
+  return { cloud, uid, allowed, names, needsNames: namesHeader === undefined }
+}
+
+function authorizedClient(scope, value) {
+  if (!scope.cloud) return true
+  if (typeof value !== 'string' || value === '') return false
+  const name = clientPathName(value)
+  // These directory components must never address the shared root or its parent.
+  if (!name || name === '.' || name === '..') return false
+  return scope.allowed.has(value) || scope.allowed.has(name) || scope.names.has(name)
+}
+
+function visibleRecord(scope, record) {
+  if (!scope || !scope.cloud) return true
+  if (!record || typeof record !== 'object' || Array.isArray(record)) return false
+  if (record.owner_uid && record.owner_uid !== scope.uid) return false
+  if (record.client_key) return scope.allowed.has(record.client_key)
+  if (record.client) return authorizedClient(scope, record.client)
+  return Boolean(record.owner_uid) && record.owner_uid === scope.uid
+}
+
+function visibleEntries(scope, index) {
+  return scope.cloud ? Object.fromEntries(Object.entries(index).filter(([, entry]) => visibleRecord(scope, entry))) : index
+}
+
+function authorizedBinding(scope, body) {
+  const key = firstString(body && body.client_key)
+  return !scope.cloud || (key !== '' ? scope.allowed.has(key) : !firstString(body && body.client) || authorizedClient(scope, firstString(body.client)))
+}
+
+function stampOwner(scope, record) {
+  if (scope.cloud) {
+    delete record.owner_uid
+    if (scope.uid) record.owner_uid = scope.uid
+  }
+  return record
+}
+
+function ownEntry(index, id) {
+  return Object.hasOwn(index, id) ? index[id] : undefined
+}
+
+function forbidden(res) { sendJson(res, { ok: false, error: 'forbidden' }, 403) }
 
 /** 默认服务器名；在 cordis.patch.yml 的 config 里可改。 */
 const DEFAULT_KNOWLEDGE_SERVER = 'knowledge'
@@ -375,7 +454,7 @@ function taskMetaRecordFromBody(parsed) {
 
 /** 读 session↔client 索引；坏文件当空对象。 */
 function readSessionClientIndex(filePath) {
-  const path = filePath || SESSION_CLIENT_INDEX
+  const path = filePath || sessionClientIndex()
   try {
     const raw = readFileSync(path, 'utf8')
     const parsed = JSON.parse(raw)
@@ -386,7 +465,7 @@ function readSessionClientIndex(filePath) {
 
 /** 原子写索引。 */
 function writeSessionClientIndex(index, filePath) {
-  const path = filePath || SESSION_CLIENT_INDEX
+  const path = filePath || sessionClientIndex()
   mkdirSync(dirname(path), { recursive: true })
   const tmp = path + '.tmp'
   writeFileSync(tmp, JSON.stringify(index, null, 2))
@@ -400,7 +479,8 @@ function writeSessionClientIndex(index, filePath) {
 function mergeSessionClientBinding(index, sessionId, entry) {
   const id = firstString(sessionId)
   if (id === '') throw new Error('missing-session-id')
-  const prev = (index[id] !== null && typeof index[id] === 'object') ? index[id] : {}
+  const stored = ownEntry(index, id)
+  const prev = (stored !== null && typeof stored === 'object') ? stored : {}
   const next = {
     client_key: firstString(entry && entry.client_key, prev.client_key),
     client: firstString(entry && entry.client, prev.client),
@@ -408,7 +488,8 @@ function mergeSessionClientBinding(index, sessionId, entry) {
     topic: firstString(entry && entry.topic, prev.topic),
     bound_at: firstString(entry && entry.bound_at) || new Date().toISOString(),
   }
-  index[id] = next
+  if (prev.owner_uid) next.owner_uid = prev.owner_uid
+  Object.defineProperty(index, id, { value: next, enumerable: true, configurable: true, writable: true })
   return next
 }
 
@@ -422,7 +503,7 @@ function readTaskMetaRecord(metaId) {
   const id = firstString(metaId)
   if (!/^wbtm-[a-z0-9-]+$/.test(id)) return null
   try {
-    const raw = readFileSync(join(TASK_META_DIR, id + '.json'), 'utf8')
+    const raw = readFileSync(join(taskMetaDir(), id + '.json'), 'utf8')
     const parsed = JSON.parse(raw)
     if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed
   } catch { /* missing / bad */ }
@@ -434,13 +515,14 @@ function readTaskMetaRecord(metaId) {
  * body 可带 session_id / meta_id / client_key / client。
  * @returns {{ client_key: string, client: string, source: string }|null}
  */
-function resolveBoundClientForConfirm(body) {
+function resolveBoundClientForConfirm(body, scope) {
   const parsed = body !== null && typeof body === 'object' && !Array.isArray(body) ? body : {}
   const sessionId = firstString(parsed.session_id, parsed.session)
   const metaId = firstString(parsed.meta_id, parsed.metaId)
   if (sessionId !== '') {
     const index = readSessionClientIndex()
-    const entry = index[sessionId]
+    const entry = ownEntry(index, sessionId)
+    if (entry !== undefined && !visibleRecord(scope, entry)) return { forbidden: true }
     if (entry !== null && typeof entry === 'object') {
       const key = firstString(entry.client_key)
       if (key !== '') {
@@ -453,6 +535,7 @@ function resolveBoundClientForConfirm(body) {
       const viaMeta = firstString(entry.meta_id)
       if (viaMeta !== '') {
         const meta = readTaskMetaRecord(viaMeta)
+        if (meta !== null && !visibleRecord(scope, meta)) return { forbidden: true }
         const key2 = firstString(meta && meta.client_key)
         if (key2 !== '') {
           return {
@@ -466,6 +549,7 @@ function resolveBoundClientForConfirm(body) {
   }
   if (metaId !== '') {
     const meta = readTaskMetaRecord(metaId)
+    if (meta !== null && !visibleRecord(scope, meta)) return { forbidden: true }
     const key = firstString(meta && meta.client_key)
     if (key !== '') {
       return {
@@ -558,6 +642,19 @@ export function create(ctx, config) {
   const hostCtx = ctx
   const handlers = {}
 
+  // Called only when names are needed. Never learn grants from writable metadata.
+  async function loadClientNames(scope) {
+    if (!scope.cloud || !scope.needsNames || scope.allowed.size === 0) return
+    scope.needsNames = false
+    const resolved = resolveTool(hostCtx, knowledgeServer, knowledgeServers, 'list_clients', [/^list_clients$/i])
+    if (!resolved.tool) return
+    const called = await callTool(hostCtx, resolved.server, resolved.tool, {})
+    if (!called.ok) return
+    for (const customer of normalize(called.value) || []) {
+      if (scope.allowed.has(customer.id)) scope.names.add(clientPathName(customer.name))
+    }
+  }
+
     /* ---- 诊断：这台 Host 挂了哪些 MCP、各有哪些工具 ---------------- */
     handlers[MCP_INFO_PATH] = (req, res) => {
       if (req.method !== 'GET') { methodNotAllowed(res); return }
@@ -579,7 +676,7 @@ export function create(ctx, config) {
     }
 
     /* ---- 知识库：客户名单（不缓存）-------------------------------- */
-    handlers[CLIENTS_PATH] = async (req, res) => {
+    handlers[CLIENTS_PATH] = async (req, res, scope) => {
       if (req.method !== 'GET') { methodNotAllowed(res); return }
       const resolved = resolveTool(hostCtx, knowledgeServer, knowledgeServers, clientsTool, [/hierarch/i, /(list|space|customer|client)/i])
       if (resolved.tool === '') {
@@ -602,14 +699,16 @@ export function create(ctx, config) {
         sendJson(res, { ok: false, error: 'bad-reply', detail: `认不出 ${tool} 的返回形状（收到 ${describe(called.value)}）`, server, tool })
         return
       }
-      sendJson(res, { ok: true, customers, server, tool })
+      sendJson(res, { ok: true, customers: scope.cloud ? customers.filter(customer => scope.allowed.has(customer.id)) : customers, server, tool })
     }
 
     /* ---- 文章库：某个客户已有的文章 -------------------------------- */
-    handlers[ARTICLES_PATH] = async (req, res) => {
+    handlers[ARTICLES_PATH] = async (req, res, scope) => {
       if (req.method !== 'GET') { methodNotAllowed(res); return }
       const url = new URL(req.url ?? '/', 'http://dsh.invalid')
       const client = (url.searchParams.get('client') ?? '').trim()
+      await loadClientNames(scope)
+      if (!authorizedClient(scope, client)) { forbidden(res); return }
       if (client === '') {
         sendJson(res, { ok: false, error: 'bad-request', detail: '缺少 client 参数' })
         return
@@ -640,7 +739,7 @@ export function create(ctx, config) {
     /* ---- Noah 左树兼容映射：session → 客户/topic ----------------------
      * P1 的正式索引仍是 session-client；这份 map 只保留 Noah 旧壳需要的
      * topic/登记时间，并与 session-client 合并读取，不参与 confirm 鉴权。 */
-    handlers[ASSIGN_GROUP_PATH] = async (req, res) => {
+    handlers[ASSIGN_GROUP_PATH] = async (req, res, scope) => {
       if (req.method !== 'POST') { methodNotAllowed(res); return }
       let body = ''
       req.on('data', chunk => { body += chunk })
@@ -650,33 +749,38 @@ export function create(ctx, config) {
       const sessionId = firstString(parsed.session_id, parsed.session)
       const client = firstString(parsed.client)
       if (sessionId === '') { sendJson(res, { ok: false, error: 'no-args' }, 400); return }
+      await loadClientNames(scope)
+      if (!authorizedBinding(scope, parsed)) { forbidden(res); return }
       try {
         let map = {}
         try {
-          const raw = readFileSync(CLIENT_MAP_FILE, 'utf8')
+          const raw = readFileSync(clientMapFile(), 'utf8')
           const value = JSON.parse(raw)
           if (value !== null && typeof value === 'object' && !Array.isArray(value)) map = value
         } catch { /* first registration */ }
-        map[sessionId] = {
+        if (Object.hasOwn(map, sessionId) && !visibleRecord(scope, map[sessionId])) { forbidden(res); return }
+        const entry = stampOwner(scope, {
           client,
           client_key: firstString(parsed.client_key),
           topic: firstString(parsed.topic),
           meta_id: firstString(parsed.meta_id),
           at: new Date().toISOString(),
-        }
-        mkdirSync(dirname(CLIENT_MAP_FILE), { recursive: true })
-        writeFileSync(CLIENT_MAP_FILE, JSON.stringify(map, null, 2))
+        })
+        Object.defineProperty(map, sessionId, { value: entry, enumerable: true, configurable: true, writable: true })
+        mkdirSync(dirname(clientMapFile()), { recursive: true })
+        writeFileSync(clientMapFile(), JSON.stringify(map, null, 2))
         sendJson(res, { ok: true, session_id: sessionId, entry: map[sessionId] })
       } catch (error) {
         sendJson(res, { ok: false, error: 'map-failed', detail: String(error && error.message ? error.message : error) }, 500)
       }
     }
-    handlers[CLIENT_MAP_PATH] = (req, res) => {
+    handlers[CLIENT_MAP_PATH] = async (req, res, scope) => {
       if (req.method !== 'GET') { methodNotAllowed(res); return }
+      await loadClientNames(scope)
       try {
-        const raw = readFileSync(CLIENT_MAP_FILE, 'utf8')
+        const raw = readFileSync(clientMapFile(), 'utf8')
         const map = JSON.parse(raw)
-        sendJson(res, { ok: true, map: map !== null && typeof map === 'object' && !Array.isArray(map) ? map : {} })
+        sendJson(res, { ok: true, map: visibleEntries(scope, map !== null && typeof map === 'object' && !Array.isArray(map) ? map : {}) })
       } catch { sendJson(res, { ok: true, map: {} }) }
     }
 
@@ -718,19 +822,21 @@ export function create(ctx, config) {
      * 装配台发起时 POST 一份装配参数，拿到 id；预填消息尾部带 [任务编号：id]，
      * 会话页顶部的任务条凭 id 读回参数展示。存 /home/dsh/.dsh/workbench-meta/
      * （不在工作区内容里，agent 碰不到 —— 它没有文件工具）。 */
-    handlers[TASK_META_PATH] = async (req, res) => {
+    handlers[TASK_META_PATH] = async (req, res, scope) => {
       if (req.method === 'POST') {
         let body = ''
         req.on('data', chunk => { body += chunk })
         await new Promise(resolve => req.on('end', resolve))
         let parsed
         try { parsed = JSON.parse(body || '{}') } catch { parsed = {} }
+        const record = taskMetaRecordFromBody(parsed)
+        if (scope.cloud && record.client_key && !scope.allowed.has(record.client_key)) { forbidden(res); return }
+        stampOwner(scope, record)
         const id = 'wbtm-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6)
         try {
-          mkdirSync(TASK_META_DIR, { recursive: true })
-          const record = taskMetaRecordFromBody(parsed)
+          mkdirSync(taskMetaDir(), { recursive: true })
           writeFileSync(
-            join(TASK_META_DIR, id + '.json'),
+            join(taskMetaDir(), id + '.json'),
             JSON.stringify(record, null, 2),
           )
           sendJson(res, { ok: true, id, client_key: record.client_key || '', client: record.client || '' })
@@ -742,13 +848,21 @@ export function create(ctx, config) {
       if (req.method === 'GET') {
         const url = new URL(req.url, 'http://localhost')
         const id = String(url.searchParams.get('id') ?? '')
-        if (!/^wbtm-[a-z0-9-]+$/.test(id)) { sendJson(res, { ok: false, error: 'bad-id' }); return }
+        if (!/^wbtm-[a-z0-9-]+$/.test(id)) {
+          sendJson(res, { ok: false, error: scope.cloud ? 'not-found' : 'bad-id' }, scope.cloud ? 404 : 200)
+          return
+        }
+        await loadClientNames(scope)
         try {
-          const raw = readFileSync(join(TASK_META_DIR, id + '.json'), 'utf8')
+          const raw = readFileSync(join(taskMetaDir(), id + '.json'), 'utf8')
+          if (scope.cloud && !visibleRecord(scope, JSON.parse(raw))) {
+            sendJson(res, { ok: false, error: 'not-found' }, 404)
+            return
+          }
           res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
           res.end(raw)
         } catch {
-          sendJson(res, { ok: false, error: 'not-found' })
+          sendJson(res, { ok: false, error: 'not-found' }, scope.cloud ? 404 : 200)
         }
         return
       }
@@ -760,14 +874,17 @@ export function create(ctx, config) {
      * 存 /home/dsh/.dsh/workbench-meta/session-client-index.json。
      * GET ?session= 单条；?client_key= 该客户下会话；无 query 全量。
      * POST 绑定（装配台起会话后拿到 session id 时写）。失败不挡发消息。 */
-    handlers[SESSION_CLIENT_PATH] = async (req, res) => {
+    handlers[SESSION_CLIENT_PATH] = async (req, res, scope) => {
       if (req.method === 'GET') {
         const url = new URL(req.url ?? '/', 'http://dsh.invalid')
         const session = (url.searchParams.get('session') ?? '').trim()
         const clientKey = (url.searchParams.get('client_key') ?? '').trim()
-        const index = readSessionClientIndex()
-        if (session !== '') {
-          const binding = index[session] !== undefined ? index[session] : null
+        if (scope.cloud && url.searchParams.has('client_key') && !scope.allowed.has(clientKey)) { forbidden(res); return }
+        await loadClientNames(scope)
+        const index = visibleEntries(scope, readSessionClientIndex())
+        if (session !== '' || (scope.cloud && url.searchParams.has('session'))) {
+          const binding = ownEntry(index, session) ?? null
+          if (scope.cloud && binding === null) { sendJson(res, { ok: false, error: 'not-found' }, 404); return }
           sendJson(res, { ok: true, session, binding })
           return
         }
@@ -796,9 +913,12 @@ export function create(ctx, config) {
           sendJson(res, { ok: false, error: 'bad-request', detail: '缺少 session_id' })
           return
         }
+        await loadClientNames(scope)
+        if (!authorizedBinding(scope, parsed)) { forbidden(res); return }
         try {
           const index = readSessionClientIndex()
-          const entry = mergeSessionClientBinding(index, sessionId, parsed)
+          if (Object.hasOwn(index, sessionId) && !visibleRecord(scope, index[sessionId])) { forbidden(res); return }
+          const entry = stampOwner(scope, mergeSessionClientBinding(index, sessionId, parsed))
           writeSessionClientIndex(index)
           sendJson(res, { ok: true, session_id: sessionId, binding: entry })
         } catch (error) {
@@ -813,10 +933,12 @@ export function create(ctx, config) {
     /* ---- 任务进程的客观卡点（2026-09-23）--------------------------
      * 按客户名探测两个位置：工作区目录（产物）与文章库（入库）。
      * 只报事实：目录是否存在 / 文件数 / 最近 24h 新增数。 */
-    handlers[TASK_STATUS_PATH] = (req, res) => {
+    handlers[TASK_STATUS_PATH] = async (req, res, scope) => {
       if (req.method !== 'GET') { methodNotAllowed(res); return }
       const url = new URL(req.url, 'http://localhost')
       const client = String(url.searchParams.get('client') ?? '').replace(/[/\\]/g, '')
+      await loadClientNames(scope)
+      if (!authorizedClient(scope, client)) { forbidden(res); return }
       if (!client) { sendJson(res, { ok: false, error: 'no-client' }); return }
       /* 2026-09-24：卡点按「本任务」算 —— since = 任务发起时刻（meta.savedAt）。
        * 不传 since 才退回 24h 窗口。上一单的入库不再冒充本任务的进度。 */
@@ -838,22 +960,24 @@ export function create(ctx, config) {
           return { exists: false, files: 0, recent: 0, list: [] }
         }
       }
-      sendJson(res, { ok: true, workspace: probe(WORKSPACE_ROOT), library: probe(LIBRARY_ROOT) })
+      sendJson(res, { ok: true, workspace: probe(workspaceRoot()), library: probe(libraryRoot()) })
     }
 
     /* ---- 草稿区（2026-09-24）：write(draft:true) 落「文章库/<客户>/草稿/」，
      * 人在工作台预览 → 确认 → 宿主把文件挪到正式位置（rename，查重幂等）。
      * 卷共享，入库动作不经过 MCP 容器。 */
-    const draftDir = client => join(LIBRARY_ROOT, String(client).replace(/[/\\]/g, ''), '草稿')
+    const draftDir = client => join(libraryRoot(), String(client).replace(/[/\\]/g, ''), '草稿')
     const safeFile = name => {
       const s = String(name ?? '')
       if (!s || s.includes('/') || s.includes('\\') || s.includes('..')) throw new Error('bad file name')
       return s.endsWith('.md') ? s : s + '.md'
     }
-    handlers[DRAFTS_PATH] = async (req, res) => {
+    handlers[DRAFTS_PATH] = async (req, res, scope) => {
       if (req.method !== 'GET') { methodNotAllowed(res); return }
       const url = new URL(req.url, 'http://localhost')
       const client = String(url.searchParams.get('client') ?? '').replace(/[/\\]/g, '')
+      await loadClientNames(scope)
+      if (!authorizedClient(scope, client)) { forbidden(res); return }
       if (!client) { sendJson(res, { ok: false, error: 'no-client' }); return }
       const localDrafts = []
       const localReady = []
@@ -866,7 +990,7 @@ export function create(ctx, config) {
         }
       } catch { /* 本地草稿目录不存在时继续查 Support */ }
       try {
-        const libDir = join(LIBRARY_ROOT, client)
+        const libDir = join(libraryRoot(), client)
         for (const name of readdirSync(libDir)) {
           if (!name.toLowerCase().endsWith('.md')) continue
           const st = statSync(join(libDir, name))
@@ -887,10 +1011,12 @@ export function create(ctx, config) {
       const merged = mergeDraftLists(localDrafts, localReady, mcpArticles)
       sendJson(res, { ok: true, drafts: merged.drafts, library: merged.library })
     }
-    handlers[DRAFT_PATH] = async (req, res) => {
+    handlers[DRAFT_PATH] = async (req, res, scope) => {
       if (req.method !== 'GET') { methodNotAllowed(res); return }
       const url = new URL(req.url, 'http://localhost')
       const client = String(url.searchParams.get('client') ?? '').replace(/[/\\]/g, '')
+      await loadClientNames(scope)
+      if (!authorizedClient(scope, client)) { forbidden(res); return }
       if (!client) { sendJson(res, { ok: false, error: 'not-found' }, 404); return }
       const title = firstString(url.searchParams.get('title'))
       try {
@@ -911,7 +1037,7 @@ export function create(ctx, config) {
         res.end(text)
       } catch { sendJson(res, { ok: false, error: 'not-found' }, 404) }
     }
-    handlers[CONFIRM_DRAFT_PATH] = async (req, res) => {
+    handlers[CONFIRM_DRAFT_PATH] = async (req, res, scope) => {
       if (req.method !== 'POST') { methodNotAllowed(res); return }
       let body = ''
       req.on('data', c => { body += c; if (body.length > 1e6) req.destroy() })
@@ -925,14 +1051,17 @@ export function create(ctx, config) {
           return
         }
         /* WB-SUP P2：绑死会话 client_key；跨客户确认失败关闭。 */
-        const bound = resolveBoundClientForConfirm(parsed)
+        await loadClientNames(scope)
+        const bound = resolveBoundClientForConfirm(parsed, scope)
+        if (bound && (bound.forbidden || (scope.cloud && !scope.allowed.has(bound.client_key)))) { forbidden(res); return }
+        const displayClient = firstString(bound && bound.client, parsed.client, bound && bound.client_key)
+        if (bound && !authorizedClient(scope, displayClient)) { forbidden(res); return }
         const match = assertConfirmClientMatch(bound, parsed)
         if (!match.ok) {
           sendJson(res, { ok: false, error: match.error, detail: match.detail || '' }, 400)
           return
         }
         const boundKey = bound.client_key
-        const displayClient = firstString(bound.client, parsed.client, boundKey)
         const fileName = safeFile(title)
         /* 草稿目录仍按显示名（现网 write draft:true 落盘约定）；再试 client_key 目录。 */
         let src = join(draftDir(displayClient), fileName)
@@ -962,7 +1091,7 @@ export function create(ctx, config) {
             return
           }
         }
-        const dst = join(LIBRARY_ROOT, String(displayClient).replace(/[/\\]/g, ''), fileName)
+        const dst = join(libraryRoot(), String(displayClient).replace(/[/\\]/g, ''), fileName)
         /* 先远端 write_article(draft:false) 用绑死的 client_key，再挪本地文件。 */
         const writeResolved = resolveTool(hostCtx, libraryServer, libraryServers, 'write_article', [/write_article/i, /write/i])
         let article = null
@@ -1027,5 +1156,8 @@ export function create(ctx, config) {
       }
     }
 
+  for (const [path, handler] of Object.entries(handlers)) {
+    handlers[path] = (req, res) => handler(req, res, requestScope(req))
+  }
   return { handlers }
 }

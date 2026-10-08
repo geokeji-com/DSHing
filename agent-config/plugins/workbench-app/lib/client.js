@@ -911,7 +911,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			React.useEffect(function () {
 				var alive = true;
 				fetch(CLIENTS_PATH, { headers: { accept: "application/json" } })
-					.then(readJson)
+					.then(readWorkbenchList)
 					.then(function (body) {
 						if (!alive) return;
 						if (body && body.ok === true) {
@@ -944,6 +944,29 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			return response.json().catch(function () {
 				return { ok: false, error: "route-missing", detail: "HTTP " + response.status + " · 不是 JSON" };
 			});
+		}
+
+		function readWorkbenchList(response) {
+			if (response.status === 403 || response.status === 404) return { ok: true, index: {}, map: {}, customers: [] };
+			return readJson(response);
+		}
+
+		/* Supplement server ACLs with the authoritative customer list, never stored display names. */
+		function wbAuthorizedRecords(records, customers) {
+			var keys = new Set(), names = new Set();
+			(customers || []).forEach(function (c) {
+				keys.add(customerId(c));
+				names.add(customerName(c).replace(/[/\\]/g, ""));
+			});
+			var visible = Object.create(null);
+			Object.keys(records || {}).forEach(function (id) {
+				var rec = records[id];
+				if (!rec || typeof rec !== "object") return;
+				var key = String(rec.client_key || "");
+				if (key !== "" ? !keys.has(key) : rec.client && !names.has(String(rec.client).replace(/[/\\]/g, ""))) return;
+				visible[id] = rec;
+			});
+			return visible;
 		}
 
 		/* 技能目录：dsh-skill-remote 注册的 provider，宿主用 ctx.skills.list() 读。 */
@@ -1304,7 +1327,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			 * "会话→客户"来自我们自己的映射表；新客户在装配台勾选即出现，
 			 * 不需要预先建任何组。绝不改动官方组件内部（历史教训：一改就崩）。 */
 			var WB_NAV_W = 248;
-			var wbNavState = { sessions: null, map: {}, bindings: {}, customers: [], q: "", open: {}, current: "", navW: 248 };
+			var wbNavState = { sessions: null, map: {}, bindings: {}, customers: [], clientsReady: false, q: "", open: {}, current: "", navW: 248 };
 			try {
 				var savedW = parseInt(sessionStorage.getItem(WB_KEY.navW) || "0", 10);
 				if (savedW >= 200 && savedW <= 480) wbNavState.navW = savedW;
@@ -1327,7 +1350,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				 * client-map（topic/旧会话兼容）。客户显示名来自 list_clients。
 				 * 单个兼容路由尚未热上的过渡期不应遮住正式索引。 */
 				function readNav(url) {
-					return fetch(url, { headers: { accept: "application/json" } }).then(readJson).catch(function () { return {}; });
+					return fetch(url, { headers: { accept: "application/json" } }).then(readWorkbenchList).catch(function () { return {}; });
 				}
 				Promise.all([
 					readNav(WB_API.sessionClient),
@@ -1339,7 +1362,11 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					var clientBody = rows[2] || {};
 					if (bindingBody.ok === true) wbNavState.bindings = bindingBody.index || {};
 					if (mapBody.ok === true) wbNavState.map = mapBody.map || {};
-					if (clientBody.ok === true) wbNavState.customers = clientBody.customers || [];
+					if (clientBody.ok === true) { wbNavState.customers = clientBody.customers || []; wbNavState.clientsReady = true; }
+					if (wbNavState.clientsReady) {
+						wbNavState.bindings = wbAuthorizedRecords(wbNavState.bindings, wbNavState.customers);
+						wbNavState.map = wbAuthorizedRecords(wbNavState.map, wbNavState.customers);
+					}
 					wbNavEmit();
 				}).catch(function () { });
 			}
@@ -1466,15 +1493,16 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					for (var ci = 0; ci < wbNavState.customers.length; ci++) {
 						var customer = wbNavState.customers[ci];
 						if (key !== "" && customerId(customer) === key) return customerName(customer);
-						if (key === "" && rec && rec.client && customerName(customer) === String(rec.client)) return customerName(customer);
+						if (key === "" && rec && rec.client && customerName(customer).replace(/[/\\]/g, "") === String(rec.client).replace(/[/\\]/g, "")) return customerName(customer);
 					}
-					return rec && rec.client ? String(rec.client) : "其他";
+					return rec && (rec.client || rec.client_key) ? null : "其他";
 				}
 				/* 组装：客户显示名 → [{id,title,at}]，按绑定时间倒序。 */
 				var groups = {};
 				Object.keys(records).forEach(function (id) {
 					var rec = records[id] || {};
 					var m = displayClient(rec);
+					if (m === null) return;
 					var title = rec.topic || (rec.meta_id ? "任务 " + rec.meta_id : "未命名会话");
 					var at = rec.bound_at || rec.at || "";
 					if (q !== "" && title.indexOf(q) < 0 && m.indexOf(q) < 0) return;
@@ -2776,7 +2804,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			function reloadIndex() {
 				setIndexState(function (prev) { return { status: "loading", index: prev.index || {} }; });
 				fetch("/api/workbench/session-client", { headers: { accept: "application/json" } })
-					.then(function (r) { return r.json(); })
+					.then(readWorkbenchList)
 					.then(function (body) {
 						if (body && body.ok === true && body.index && typeof body.index === "object") {
 							setIndexState({ status: "ready", index: body.index });
@@ -2805,9 +2833,10 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			}
 			groups.push({ key: "", name: "未归类", kind: "unbound" });
 
+			var visibleIndex = wbAuthorizedRecords(indexState.index, clients.status === "ready" ? clients.customers : []);
 			var byKey = {};
-			Object.keys(indexState.index || {}).forEach(function (sid) {
-				var entry = indexState.index[sid];
+			Object.keys(visibleIndex).forEach(function (sid) {
+				var entry = visibleIndex[sid];
 				if (!entry || typeof entry !== "object") return;
 				var ck = String(entry.client_key || "");
 				if (!byKey[ck]) byKey[ck] = [];
@@ -2841,24 +2870,12 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 						clients.status === "loading" ? "客户加载中…"
 							: clients.status === "error" ? "客户列表读不到"
 							: (clients.customers.length + " 个客户")
-								+ (indexState.status === "ready" ? " · 索引 " + Object.keys(indexState.index).length : ""))),
+								+ (indexState.status === "ready" ? " · 索引 " + Object.keys(visibleIndex).length : ""))),
 				h("div", { className: "wb_cgList" },
 					clients.status === "error"
 						? h("div", { className: "wb_cgEmpty" }, clientsErrorText(clients.error, clients.detail))
 						: groups.map(function (g) {
 							var sess = byKey[g.key] || [];
-							/* 未归类：空 client_key；也把「索引里 client_key 不在客户列表」的孤儿并进来 */
-							if (g.kind === "unbound") {
-								var known = {};
-								groups.forEach(function (x) { if (x.kind === "client") known[x.key] = true; });
-								sess = [];
-								Object.keys(byKey).forEach(function (ck) {
-									if (ck === "" || !known[ck]) {
-										byKey[ck].forEach(function (row) { sess.push(row); });
-									}
-								});
-								sess.sort(function (a, b) { return String(b.bound_at).localeCompare(String(a.bound_at)); });
-							}
 							var open = isOpen(g.key === "" ? "__unbound__" : g.key);
 							var mapKey = g.key === "" ? "__unbound__" : g.key;
 							return h("div", { className: "wb_cgGroup", key: mapKey, "data-open": open ? "1" : "0" },
