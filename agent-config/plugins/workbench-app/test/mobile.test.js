@@ -8,7 +8,7 @@ function load() {
   let api
   const media = { matches: false }
   const window = { matchMedia: () => media, __ModuleLoader__: { load({ factory }) { api = factory(() => ({})) } } }
-  vm.runInNewContext(source.replace('return module.exports;', 'return {periodsFor, firstPeriodId, splitRefs, buildTaskMetaPayload, wbKeyboardInset, wbSessionStatus, wbMobileProgress, wbNavTakeFrame};'), {window})
+  vm.runInNewContext(source.replace('return module.exports;', 'return {periodsFor, firstPeriodId, splitRefs, buildTaskMetaPayload, wbKeyboardInset, wbMobileViewport, wbStripLeadingTitle, wbContextLabel, wbSessionStatus, wbMobileProgress, wbNavTakeFrame};'), {window})
   return { api, media }
 }
 const { api } = load()
@@ -58,4 +58,36 @@ test('mobile progress counts unique written articles without treating template c
   const rows=api.wbMobileProgress([write,write],{partial:null,runningCalls:[]},[{title:'Article'}],{Article:true})
   assert.equal(rows[0][1],'本会话已写 1 篇文章')
   assert.equal(rows[1][1],'已入库 1 篇')
+})
+
+
+test('leading duplicate H1 is removed after whitespace and punctuation-width normalization', () => {
+  assert.equal(api.wbStripLeadingTitle('# 少儿编程？ 看 AI IDE\n\n正文', ' 少儿编程?  看 AI IDE '), '正文')
+  assert.equal(api.wbStripLeadingTitle('\uFEFF\n# 标题（测试）：一 \t ###\r\n \t\r\n正文\r\n', '标题(测试):一'), '正文\r\n')
+  assert.equal(api.wbStripLeadingTitle('# Title', 'Title'), '')
+  assert.equal(api.wbStripLeadingTitle('# Title\nBody\n# Title', 'Title'), 'Body\n# Title')
+})
+test('different headings, later headings, and non-H1 markdown remain untouched', () => {
+  for (const body of ['# Different\n\nBody', '## Title\nBody', 'Intro\n# Title', '```md\n# Title\n```', '#Title\nBody', '    # Title\nBody']) {
+    assert.equal(api.wbStripLeadingTitle(body, 'Title'), body)
+  }
+  assert.equal(api.wbStripLeadingTitle('# Title!\nBody', 'Title'), '# Title!\nBody')
+  assert.equal(api.wbStripLeadingTitle('# Title\nBody', ''), '# Title\nBody')
+})
+test('context labels skip empty and duplicate client, line, and period parts in order', () => {
+  assert.equal(api.wbContextLabel(['华熙生物', '', ' 华熙生物 ']), '华熙生物')
+  assert.equal(api.wbContextLabel(['客户（北京）', '客户(北京)', ' 第二期 ']), '客户（北京） · 第二期')
+  assert.equal(api.wbContextLabel(['Client  A', 'Line', ' Client\tA ']), 'Client A · Line')
+  assert.equal(api.wbContextLabel(['Client', 'Line', 'Line']), 'Client · Line')
+  assert.equal(api.wbContextLabel(['Client', 'Line', 'Period']), 'Client · Line · Period')
+  assert.equal(api.wbContextLabel([null, undefined, '   ']), '')
+})
+test('pinned chat chrome follows mobile keyboard state and ignores zoom or desktop', () => {
+  const state=(mobile,height,vv,shell)=>JSON.parse(JSON.stringify(api.wbMobileViewport(mobile,height,vv,shell)))
+  assert.deepEqual(state(true,667,{height:667,offsetTop:0,scale:1}), {inset:0,keyboard:false,pinned:true})
+  assert.deepEqual(state(true,667,{height:400,offsetTop:0,scale:1}), {inset:267,keyboard:true,pinned:false})
+  assert.deepEqual(state(true,852,{height:511,offsetTop:40,scale:1}), {inset:301,keyboard:true,pinned:false})
+  assert.deepEqual(state(true,511,{height:511,offsetTop:0,scale:1},'open'), {inset:0,keyboard:true,pinned:false})
+  assert.deepEqual(state(true,852,{height:400,offsetTop:0,scale:2}), {inset:0,keyboard:false,pinned:true})
+  assert.deepEqual(state(false,852,{height:400,offsetTop:0,scale:1},'open'), {inset:0,keyboard:false,pinned:false})
 })

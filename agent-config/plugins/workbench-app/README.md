@@ -100,7 +100,9 @@ dsh plugin --profile web add /path/to/plugins/dsh-workbench
 
 断点为 `matchMedia('(max-width: 767px)')`；变化会重新渲染。手机使用 328px 会话抽屉、写给谁 sheet、分段主题/写法、可换行 chip、全屏补充要求和吸底「开始生文」。客户、产品线、期数、模板、会话、文章及账号均来自原接口；发送仍调用原 `dispatch()`，审核仍调用 `confirmTargets()` / `confirmOne()`。文本参考文件只在浏览器读取 `.txt/.md`（上限 1 MB），合并到原来的参考正文，通用二进制附件仍由会话的原生附件入口处理。
 
-dsh-cloud PR-1 注入共享 `tokens.css` 和唯一的 `<dsh-tabbar>`。插件通过 `dshMobile.setClients/setClient` 与 `dsh:client` 接入按 uid 隔离的 `dsh.ctx.client:<uid>`（值为客户显示名）。仅接受授权列表中的键/名称。聊天/审核设置 `data-dsh-chrome="flow"`，返回或跨回桌面清除。`visualViewport.resize/scroll` 更新键盘偏移和编辑器可见高度；pinch zoom 不视为键盘。工作台独立检测 contenteditable 的键盘偏移，键盘弹起时收起快捷按钮。虚拟登录提示条单独留出空间。
+dsh-cloud PR-1 注入共享 `tokens.css` 和唯一的 `<dsh-tabbar>`。插件通过 `dshMobile.setClients/setClient` 与 `dsh:client` 接入按 uid 隔离的 `dsh.ctx.client:<uid>`（值为客户显示名）。仅接受授权列表中的键/名称。聊天/审核设置 `data-dsh-chrome="flow"`，返回或跨回桌面清除。`visualViewport.resize/scroll` 更新键盘偏移和编辑器可见高度；pinch zoom 不视为键盘。工作台独立检测 contenteditable 的键盘偏移，也接受共享壳的 `data-dsh-keyboard="open"`。虚拟登录提示条沿用原有位置。
+
+Round 1：聊天进度与待审/已入库入口合为 56px 行，48px 的原生 `summary` 展开最高为可视视口 40% 的滚动浮层。键盘打开时整行和快捷按钮隐藏；通过公开的 `data-conversation-scroll` / `data-composer-seat` 测量消息区实际可用高度，删除原先 `174px + 键盘高度` 的底部空白。打开键盘时定位最新消息，其后保持贴底或保留用户向上阅读的位置。写给上下文去重并最多显示两行；主题框自动增高至 40vh；手机文章预览仅去掉与页面标题相同的开头 H1，原正文和入库路径不变。
 
 手机审核使用同一 `ReviewTabBody` 的列表 → 正文视图；不会自动打开桌面右栏。进度镜像最后一次成功 `todo_write`，没有清单时按唯一文章标题计算实际产物/运行状态，模板数量不当作目标篇数。抽屉索引没有文章状态，只有已加载会话才能按消息中 `write_article` 的标题与正式库交集得出入库数；未知显示灰点「状态未同步」，不会伪装成已停止或已入库。文章已入库显示绿色，待审显示橙色。「再写 1 篇 / 换个语气」只填入原生草稿，仍需用户发送；运行时停止沿用原生停止按钮。「在电脑上打开」提示在同账号的会话列表继续，未构造不存在的 deep link。
 
@@ -115,8 +117,15 @@ npm test
 npm install --no-save playwright esbuild react react-dom
 npx playwright install chromium
 npm run test:mobile -- /tmp/workbench-mobile-screens
+# 本工作区已有测试依赖时（从仓库根目录运行）：
+NODE_PATH=/workspace/mobile-audit/tool/node_modules:/workspace/dsh-cloud/publish-web/node_modules \
+  node agent-config/plugins/workbench-app/test/mobile-screens.mjs /tmp/wb-polish-r1
 ```
 
-`test/mobile-screens.mjs` 使用离线 harness 契约 fixture，禁止写请求，断言 frame 没有横向溢出、移动不渲染 `.wb_nv`、主按钮位于底栏上方且可命中、抽屉宽度/遮罩关闭、产品线联动、审核列表/正文、flow 隐藏底栏、键盘抬升、768/1024/1440 桌面与断点往返、无客户禁用，并写出截图。fixture 只能验证所模拟的上游结构；正式发布还须用真实 harness 截图/geometry 复核 hashed suffix 是否仍匹配。
+`npm test` 包括宿主既有用例与移动端纯函数用例（标题匹配/不匹配、空字段和重复上下文、键盘状态等）。`test/mobile-screens.mjs` 使用离线 harness 契约 fixture，禁止写请求，含真实滚动容器和消息节点。375×667、393×852、430×932 均使用 DPR 3 / touch，断言固定状态行 ≤56px、键盘隐藏状态行、最新消息在顶栏和 composer 之间可命中、视口偏移及键盘收起后滚动正确、无横向溢出；同时覆盖写给行高/圆形勾选、主题框增高、抽屉、操作 sheet、审核标题、长名和空客户。
+
+桌面 768/1024/1440 的装配台与聊天 DOM、全部标准 computed styles、逐元素矩形与 Round 1 起点 `cc166cbc8c179cf598ccac03ac87eb4f3966fdb7` 比较；相同滚动位置下比较 DOM，忽略空 style 属性及 CSS 声明顺序，另测手机键盘→桌面往返。基线 commit 必须在本地 git 历史中；未来有批准的桌面变更时可用 `WB_BASELINE_REF=<commit>` 指定新的比较基线。截图、`results.json`（检查名/几何/计数）、`desktop-*.json` 保存到输出目录。脚本也验证旧基线能复现 W2，避免回归测试仅检查 composer 坐标。
+
+fixture 只能验证所模拟的上游结构，键盘为 visualViewport 模拟，safe-area 在 headless 中为 0；正式发布仍需真实 harness 与实体 iOS Safari 复验。W1 的 document 双滚动由 dsh-cloud tokens.css 另行修复，本插件不增加底栏占位；W11 上游消息操作按钮不在本轮范围。
 
 部署沿用 dsh-cloud `docs/dsh-ops-surface-lockdown-v0.md` §ZF0：备份、vendor ff-only 到已合并 main、`bin/dsh-sync-zoe-fleet --apply-homes --dry-run`、检查候选差异，再 `--apply-homes`。同步生成 prod 快照并更新 home，不重启（`recycle=False`）。正式 harness 的 client-hmr 以 500ms stat 轮询 bundle，module host 重新读取字节并发布新 revision；旧进程可在刷新后收到新版本。勿修改 `lib/index.js`、loader 配置或回收在线用户进程来交付纯客户端变更。

@@ -20,6 +20,29 @@ window.__ModuleLoader__.load({
 		function wbKeyboardInset(height, viewport) {
 			return !viewport || viewport.scale !== 1 ? 0 : Math.max(0, height - viewport.height - viewport.offsetTop);
 		}
+		function wbMobileViewport(mobile, height, viewport, shellKeyboard) {
+			var inset = mobile ? wbKeyboardInset(height, viewport) : 0;
+			var keyboard = mobile && (shellKeyboard === 'open' || inset > 150);
+			return { inset: inset, keyboard: keyboard, pinned: mobile && !keyboard };
+		}
+		function wbNormalizeLabel(text) {
+			return String(text || '').normalize('NFKC').replace(/\s+/g, ' ').trim();
+		}
+		function wbContextLabel(parts) {
+			var seen = new Set();
+			return parts.map(function(part){return String(part || '').replace(/\s+/g, ' ').trim();}).filter(function(part){
+				var key = wbNormalizeLabel(part);
+				if (!key || seen.has(key)) return false;
+				seen.add(key); return true;
+			}).join(' · ');
+		}
+		function wbStripLeadingTitle(markdown, title) {
+			var text = String(markdown || '');
+			var heading = text.match(/^(?:\uFEFF)?(?:[ \t]*\r?\n)* {0,3}#[ \t]+([^\r\n]*)(?:\r?\n|$)/);
+			if (!heading || !wbNormalizeLabel(title)) return text;
+			var label = heading[1].replace(/[ \t]+#+[ \t]*$/, '');
+			return wbNormalizeLabel(label) === wbNormalizeLabel(title) ? text.slice(heading[0].length).replace(/^[ \t]*\r?\n/, '') : text;
+		}
 		function wbSessionStatus(record) {
 			if (record && record.running === true) return { tone: 'blue', label: '写作中' };
 			if (record && record.pending > 0) return { tone: 'orange', label: record.pending + ' 篇草稿待审' };
@@ -31,12 +54,13 @@ window.__ModuleLoader__.load({
 			var previousFrame = null, previousColumns = '';
 			function viewport() {
 				if (!WB_MOBILE.matches) return;
-				var inset = wbKeyboardInset(window.innerHeight, window.visualViewport);
-				root.style.setProperty('--wb-kb', inset + 'px');
+				var state = wbMobileViewport(true, window.innerHeight, window.visualViewport, root.dataset.dshKeyboard);
+				root.style.setProperty('--wb-kb', state.inset + 'px');
 				// The shared shell detects input/textarea; the harness uses contenteditable.
-				root.toggleAttribute('data-wb-keyboard', inset > 150);
-				root.style.setProperty('--wb-vv-top', (window.visualViewport ? window.visualViewport.offsetTop : 0) + 'px');
-				root.style.setProperty('--wb-vv-h', (window.visualViewport ? window.visualViewport.height : window.innerHeight) + 'px');
+				root.toggleAttribute('data-wb-keyboard', state.keyboard);
+				var vv = window.visualViewport, unzoomed = vv && vv.scale === 1;
+				root.style.setProperty('--wb-vv-top', (unzoomed ? vv.offsetTop : 0) + 'px');
+				root.style.setProperty('--wb-vv-h', (unzoomed ? vv.height : window.innerHeight) + 'px');
 			}
 			function changed() {
 				root.toggleAttribute('data-wb-mobile', WB_MOBILE.matches);
@@ -52,6 +76,8 @@ window.__ModuleLoader__.load({
 					root.removeAttribute('data-wb-keyboard');
 					if (root.dataset.wbFlow === '1') { delete root.dataset.wbFlow; delete root.dataset.dshChrome; }
 					root.style.removeProperty('--wb-kb');
+					root.style.removeProperty('--wb-vv-top');
+					root.style.removeProperty('--wb-vv-h');
 					wbNavTakeFrame();
 				}
 			}
@@ -59,7 +85,10 @@ window.__ModuleLoader__.load({
 			var vv = window.visualViewport;
 			if (vv) { vv.addEventListener('resize', viewport); vv.addEventListener('scroll', viewport); }
 			window.addEventListener('resize', viewport);
+			var keyboardObserver = new MutationObserver(viewport);
+			keyboardObserver.observe(root, {attributes:true, attributeFilter:['data-dsh-keyboard']});
 			return function () {
+				keyboardObserver.disconnect();
 				WB_MOBILE.removeEventListener('change', changed);
 				window.removeEventListener('resize', viewport);
 				if (vv) { vv.removeEventListener('resize', viewport); vv.removeEventListener('scroll', viewport); }
@@ -68,6 +97,42 @@ window.__ModuleLoader__.load({
 				root.removeAttribute('data-wb-keyboard');
 				if (root.dataset.wbFlow === '1') { delete root.dataset.wbFlow; delete root.dataset.dshChrome; }
 			};
+		}
+		function useWbChatLayout(ref) {
+			React.useLayoutEffect(function(){
+				if (!WB_MOBILE.matches || !ref.current) return;
+				var main = ref.current.closest('[data-slot="main.conversation"]');
+				var scroll = main && main.querySelector('[data-conversation-scroll]');
+				var composer = main && main.querySelector('[data-composer-seat]');
+				if (!scroll || !composer) return;
+				var frame = 0, initialized = false, wasKeyboard = false, hadStyle = main.hasAttribute('style');
+				function layout(){
+					frame = 0;
+					if (!WB_MOBILE.matches) return;
+					var state = wbMobileViewport(true, window.innerHeight, window.visualViewport, document.documentElement.dataset.dshKeyboard);
+					var atBottom = scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop <= 4;
+					// The fixed composer is outside normal flow. Size the scrollport to its
+					// actual top, instead of adding keyboard-sized blank transcript padding.
+					var height = Math.max(0, composer.getBoundingClientRect().top - scroll.getBoundingClientRect().top);
+					main.style.setProperty('--wb-chat-scroll-h', height + 'px');
+					if (!initialized || atBottom || (state.keyboard && !wasKeyboard)) scroll.scrollTop = scroll.scrollHeight;
+					initialized = true; wasKeyboard = state.keyboard;
+				}
+				function schedule(){if (!frame) frame = requestAnimationFrame(layout);}
+				var resize = new ResizeObserver(schedule);
+				resize.observe(composer); resize.observe(ref.current); resize.observe(main);
+				var keyboard = new MutationObserver(schedule);
+				keyboard.observe(document.documentElement, {attributes:true, attributeFilter:['data-wb-keyboard','data-dsh-keyboard']});
+				var vv = window.visualViewport;
+				if (vv) {vv.addEventListener('resize',schedule);vv.addEventListener('scroll',schedule);}
+				layout();
+				return function(){
+					cancelAnimationFrame(frame); resize.disconnect(); keyboard.disconnect();
+					if (vv) {vv.removeEventListener('resize',schedule);vv.removeEventListener('scroll',schedule);}
+					main.style.removeProperty('--wb-chat-scroll-h');
+					if (!hadStyle && !main.style.length) main.removeAttribute('style');
+				};
+			},[]);
 		}
 		function useWbScene(mobile, scene) {
 			React.useEffect(function () {
@@ -83,7 +148,7 @@ window.__ModuleLoader__.load({
 			}, [mobile, scene]);
 		}
 		function wbIcon(name) {
-			var paths = { menu: 'M4 6h16M4 12h16M4 18h10', back: 'M15 5l-7 7 7 7', close: 'M6 6l12 12M18 6L6 18', next: 'M9 6l6 6-6 6', plus: 'M12 5v14M5 12h14', star: 'M12 3l2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5z' };
+			var paths = { down: 'M6 9l6 6 6-6', search: 'M21 21l-5-5M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0', menu: 'M4 6h16M4 12h16M4 18h10', back: 'M15 5l-7 7 7 7', close: 'M6 6l12 12M18 6L6 18', next: 'M9 6l6 6-6 6', plus: 'M12 5v14M5 12h14', star: 'M12 3l2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5z' };
 			return h('svg', {width:24,height:24,viewBox:'0 0 24 24',fill:'none',stroke:'currentColor',strokeWidth:2,strokeLinecap:'round',strokeLinejoin:'round','aria-hidden':true}, h('path',{d:paths[name] || paths.next}));
 		}
 		function MobileTopBar(p) {
@@ -116,7 +181,13 @@ window.__ModuleLoader__.load({
 			function chip(label,on,click,key){return h('button',{type:'button',key:key||label,className:'wb_mChip','aria-pressed':on,onClick:click},on?'✓ '+label:label);}
 			function segment(items,value,set){return h('div',{className:'wb_mSegment'},items.map(function(item){return h('button',{type:'button',key:item[0],'aria-pressed':value===item[0],onClick:function(){set(item[0]);}},item[1]);}));}
 			var empty=p.clients.status==='ready'&&p.clients.customers.length===0;
-			var contextText=[p.clientName,p.lineName,p.periodName].filter(Boolean).join(' · ');
+			var contextText=wbContextLabel([p.clientName,p.lineName,p.periodName]);
+			var topicRef=React.useRef(null);
+			React.useLayoutEffect(function(){
+				function grow(){var el=topicRef.current;if(!WB_MOBILE.matches||!el)return;el.style.height='72px';el.style.height=Math.max(72,el.scrollHeight+2)+'px';}
+				grow(); window.addEventListener('resize',grow);
+				return function(){window.removeEventListener('resize',grow);};
+			},[p.topic,p.mode]);
 			var layers=[['personal','个人层'],['middle','个人中间层'],['public','公共层'],['other','其他技能']];
 			function skillLayer(s){var raw=String(s.layer||'');return raw==='personal'||raw==='个人'?'personal':raw==='middle'||raw==='_middle'||raw.indexOf('中')>=0?'middle':raw==='public'||raw==='公共'?'public':'other';}
 			return h('div',{className:'wb_mAssembly'},h(MobileTopBar,{title:'新建任务'}),
@@ -125,7 +196,7 @@ window.__ModuleLoader__.load({
 					empty?h('div',{className:'wb_mEmpty'},h('b',null,'还没有分配给你的客户'),h('p',null,'联系管理员')):null,
 					p.clients.status==='error'?h('div',{className:'wb_mEmpty',role:'status'},'客户暂时无法加载，请稍后刷新重试'):null,
 					h('h3',null,'主题'),segment([['weak','薄弱问句'],['free','自己输入']],p.mode,p.setMode),
-					p.mode==='weak'?h('div',{className:'wb_mEmpty'},h('p',null,'薄弱问句库还未接入，先输入你想写的主题'),h('button',{type:'button',className:'wb_mLink',onClick:function(){p.setMode('free');}},'改为自己输入')):h('textarea',{className:'wb_mTopic','aria-label':'主题',placeholder:'想写什么选题，直接打。',value:p.topic,onChange:function(e){p.setTopic(e.target.value);},rows:2}),
+					p.mode==='weak'?h('div',{className:'wb_mEmpty'},h('p',null,'薄弱问句库还未接入，先输入你想写的主题'),h('button',{type:'button',className:'wb_mLink',onClick:function(){p.setMode('free');}},'改为自己输入')):h('textarea',{className:'wb_mTopic',ref:topicRef,'aria-label':'主题',placeholder:'想写什么选题，直接打。',value:p.topic,onChange:function(e){p.setTopic(e.target.value);},rows:2}),
 					h('h3',null,'怎么写'),segment([['copy','仿写'+(p.refCount?' '+p.refCount:'')],['skill','用模板'+(p.picked.length?' '+p.picked.length:'')]],p.refTab,p.setRefTab),
 					p.refTab==='copy'?h(React.Fragment,null,
 						h('div',{className:'wb_mReferences'},p.refs.urls.map(function(url,i){return h('div',{className:'wb_mReference',key:i},h('span',{className:'wb_mRefIcon'},'↗'),h('span',{className:'wb_mGrow'},url),h('button',{type:'button',className:'wb_mIcon','aria-label':'删除参考链接',onClick:function(){p.setRefText(p.refs.urls.filter(function(_,j){return j!==i;}).concat(p.refs.body?[p.refs.body]:[]).join('\n'));}},wbIcon('close')));}),
@@ -136,7 +207,7 @@ window.__ModuleLoader__.load({
 					h('button',{type:'button',className:'wb_mExtra',onClick:function(){editor[1]('base');}},h('b',null,'补充要求'),h('span',{className:'wb_mGrow'},p.base||'选填'),wbIcon('next'))),
 				h('div',{className:'wb_mAction wb_mAboveTabs'},p.sending?h('p',{role:'status'},p.sending):null,h('button',{type:'button',className:'wb_mPrimary wb_mStart',disabled:!p.clientName||!!p.sending,onClick:p.dispatch},wbIcon('star'),'开始生文')),
 				sheet[0]?h(MobileModal,{title:'写给谁',close:function(){sheet[1](false);}},
-					h('small',{className:'wb_mCaption'},'客户'),empty?h('div',{className:'wb_mEmpty'},'还没有分配给你的客户 · 联系管理员'):h('div',{role:'radiogroup','aria-label':'客户'},p.clients.customers.map(function(c){var on=customerId(c)===p.pick.key;var bits=[];if(typeof c.files==='number')bits.push('知识库 '+c.files+' 条');if(on&&p.articles.status==='ready')bits.push('文章库 '+p.articles.articles.length+' 篇');return h('button',{type:'button',role:'radio','aria-checked':on,key:customerId(c),className:'wb_mClient',onClick:function(){setClient(c);}},h('span',{className:'wb_mAvatar'},customerName(c).slice(0,1)),h('span',{className:'wb_mGrow'},h('b',null,customerName(c)),bits.length?h('small',null,bits.join(' · ')):null),h('span',{className:'wb_mRadio','data-on':on?'1':'0'},on?'✓':''));})),
+					h('small',{className:'wb_mCaption'},'客户'),empty?h('div',{className:'wb_mEmpty'},'还没有分配给你的客户 · 联系管理员'):h('div',{role:'radiogroup','aria-label':'客户'},p.clients.customers.map(function(c){var on=customerId(c)===p.pick.key;var bits=[];if(typeof c.files==='number')bits.push('知识库 '+c.files+' 条');if(on&&p.articles.status==='ready')bits.push('文章库 '+p.articles.articles.length+' 篇');return h('button',{type:'button',role:'radio','aria-checked':on,key:customerId(c),className:'wb_mClient',onClick:function(){setClient(c);}},h('span',{className:'wb_mAvatar'},customerName(c).slice(0,1)),h('span',{className:'wb_mGrow'},h('b',null,customerName(c)),h('small',null,bits.join(' · ')||'\u00a0')),h('span',{className:'wb_mRadio','data-on':on?'1':'0'},on?'✓':''));})),
 					!empty?h(React.Fragment,null,h('small',{className:'wb_mCaption'},'产品线'),h('div',{className:'wb_mChips'},p.lines.length?p.lines.map(function(l){return chip(l.name||l.id,p.pick.line===String(l.id),function(){p.onLine({target:{value:String(l.id)}});},l.id);}):h('p',null,'暂无产品线')),h('small',{className:'wb_mCaption'},'期数'),h('div',{className:'wb_mChips'},p.periods.length?p.periods.map(function(v){return chip(v.name||v.id,p.pick.period===String(v.id),function(){p.setPick({key:p.pick.key,line:p.pick.line,period:String(v.id)});},v.id);}):h('p',null,'暂无期数'))):null,
 					h('button',{type:'button',className:'wb_mPrimary',disabled:!p.clientName,onClick:function(){sheet[1](false);}},'确定')):null,
 				editor[0]?h(MobileModal,{full:true,title:editor[0]==='base'?'补充要求':'添加参考',close:close},
@@ -153,8 +224,8 @@ window.__ModuleLoader__.load({
 			return createPortal(h('div',{className:'wb_mScrim',onClick:function(e){if(e.target===e.currentTarget)p.close();}},
 				h('aside',{className:'wb_mDrawer',ref:ref,tabIndex:-1,role:'dialog','aria-modal':true,'aria-label':'会话列表',onTouchStart:function(e){start.current=e.touches[0].clientX;},onTouchEnd:function(e){if(start.current-e.changedTouches[0].clientX>70)p.close();}},
 					h('div',{className:'wb_mDrawerHead'},h('b',null,'生文 Agent'),h('button',{type:'button',className:'wb_mIcon','aria-label':'关闭会话抽屉',onClick:p.close},wbIcon('close'))),
-					h('div',{className:'wb_mDrawerTools'},h('button',{type:'button',className:'wb_mPrimary',onClick:p.compose},wbIcon('plus'),'新建任务'),h('input',{type:'search','aria-label':'搜索会话',placeholder:'搜索会话',value:wbNavState.q,onChange:function(e){wbNavState.q=e.target.value;wbNavEmit();}})),
-					h('div',{className:'wb_mTree'},p.names.map(function(name){var open=wbNavState.open[name]!==false;return h('section',{key:name},h('button',{type:'button',className:'wb_mGroup','aria-expanded':open,onClick:function(){wbNavState.open[name]=!open;wbNavEmit();}},h('span',{className:'wb_mAvatar'},name.slice(0,1)),h('b',null,name),h('small',null,p.groups[name].length),h('span',null,open?'⌄':'›')),open?p.groups[name].map(function(it){var status=wbSessionStatus(wbNavState.statuses&&wbNavState.statuses[it.id]);return h('button',{key:it.id,type:'button',className:'wb_mSession','aria-current':it.id===wbNavState.current,onClick:function(){p.openSession(it.id);}},h('span',{className:'wb_mStatus','data-tone':status.tone}),h('span',{className:'wb_mGrow'},h('b',null,it.title),h('small',null,[it.at?it.at.slice(5,10).replace('-','月')+'日':'',status.label].filter(Boolean).join(' · '))));}):null);}),p.names.length===0?h('p',{className:'wb_mEmpty'},wbNavState.q?'没有匹配的会话':'还没有会话，点上方新建任务'):null),
+					h('div',{className:'wb_mDrawerTools'},h('button',{type:'button',className:'wb_mPrimary',onClick:p.compose},wbIcon('plus'),'新建任务'),h('label',{className:'wb_mSearch'},wbIcon('search'),h('input',{type:'search','aria-label':'搜索会话',placeholder:'搜索会话',value:wbNavState.q,onChange:function(e){wbNavState.q=e.target.value;wbNavEmit();}}))),
+					h('div',{className:'wb_mTree'},p.names.map(function(name){var open=wbNavState.open[name]!==false;return h('section',{key:name},h('button',{type:'button',className:'wb_mGroup','aria-expanded':open,onClick:function(){wbNavState.open[name]=!open;wbNavEmit();}},h('span',{className:'wb_mAvatar'},name.slice(0,1)),h('b',null,name),h('small',null,p.groups[name].length),wbIcon(open?'down':'next')),open?p.groups[name].map(function(it){var status=wbSessionStatus(wbNavState.statuses&&wbNavState.statuses[it.id]);return h('button',{key:it.id,type:'button',className:'wb_mSession','aria-current':it.id===wbNavState.current,onClick:function(){p.openSession(it.id);}},h('span',{className:'wb_mStatus','data-tone':status.tone}),h('span',{className:'wb_mGrow'},h('b',null,it.title),h('small',null,[it.at?it.at.slice(5,10).replace('-','月')+'日':'',status.label].filter(Boolean).join(' · '))));}):null);}),p.names.length===0?h('p',{className:'wb_mEmpty'},wbNavState.q?'没有匹配的会话':'还没有会话，点上方新建任务'):null),
 					h('div',{className:'wb_mAccount'},h('span',{className:'wb_mAvatar'},p.me.label.slice(0,1)),h('div',null,h('b',null,p.me.label),p.me.sub?h('small',null,p.me.sub):null)))),document.body);
 		}
 		function MobileQuickPrompts(p) {
@@ -184,17 +255,20 @@ window.__ModuleLoader__.load({
 			return rows;
 		}
 		function MobileChatHeader(p) {
+			var chatRef=React.useRef(null);
+			useWbChatLayout(chatRef);
 			var menu=React.useState(false), preset=React.useState(false), rename=React.useState(false), newTitle=React.useState(""), renameError=React.useState("");
 			useWbPickTick();
 			var rows=wbMobileProgress(p.nodes||[],p.legacy,WB_PICK.drafts,WB_PICK.done);
 			var meta=p.meta||{}, binding=wbNavState.bindings[p.sessionId]||{};
 			var title=p.title||meta.topic||binding.topic||'会话';
 			var refCount=meta.refs?((meta.refs.urls||[]).length+(meta.refs.body?1:0)):0;
-			var sub=[meta.client||binding.client,meta.period,refCount?'仿写 '+refCount+' 篇':''].filter(Boolean).join(' · ');
-			return h('div',{className:'wb_mChat'},h(MobileTopBar,{title:title,sub:sub,back:function(){var layout=WbCtx&&WbCtx.get?WbCtx.get('layout'):null;if(layout)layout.selectPanel(WORKBENCH_KEY);},more:function(){menu[1](true);}}),
-				rows.length?h('details',{className:'wb_mProgress',open:true},h('summary',null,'任务进度'),rows.map(function(row,i){return h('div',{className:'wb_trow',key:i},h('span',{className:'wb_ticon','data-s':row[0]},row[0]==='done'?'✓':row[0]==='run'?'◷':'○'),h('span',null,row[1]));})):null,
-				h(ReviewTabBody,Object.assign({},p.reviewProps,{mobileInline:true})),
-				menu[0]?h(MobileModal,{title:'会话操作',close:function(){menu[1](false);}},h('button',{type:'button',className:'wb_mExtra',onClick:function(){menu[1](false);newTitle[1](title);rename[1](true);}},'重命名'),h('button',{type:'button',className:'wb_mExtra',onClick:function(){menu[1](false);preset[1](true);}},'这次发起时的预设'),h('button',{type:'button',className:'wb_mExtra',onClick:function(){menu[1](false);wbNavState.drawer=true;wbNavEmit();}},'会话列表'),h('button',{type:'button',className:'wb_mExtra',onClick:function(){menu[1](false);preset[1]('desktop');}},'在电脑上打开')):null,
+			var sub=wbContextLabel([meta.client||binding.client,meta.line,meta.period,refCount?'仿写 '+refCount+' 篇':'']);
+			var completed=rows.filter(function(row){return row[0]==='done';}).length;
+			return h('div',{className:'wb_mChat',ref:chatRef},h(MobileTopBar,{title:title,sub:sub,back:function(){var layout=WbCtx&&WbCtx.get?WbCtx.get('layout'):null;if(layout)layout.selectPanel(WORKBENCH_KEY);},more:function(){menu[1](true);}}),
+				h('div',{className:'wb_mPinned'},rows.length?h('details',{className:'wb_mProgress'},h('summary',null,h('span',null,'任务进度'),h('small',null,completed+'/'+rows.length),wbIcon('down')),h('div',{className:'wb_mChecklist'},rows.map(function(row,i){return h('div',{className:'wb_trow',key:i},h('span',{className:'wb_ticon','data-s':row[0]},row[0]==='done'?'✓':row[0]==='run'?'◷':'○'),h('span',null,row[1]));}))):null,
+					h(ReviewTabBody,Object.assign({},p.reviewProps,{mobileInline:true}))),
+				menu[0]?h(MobileModal,{title:'会话操作',close:function(){menu[1](false);}},h('button',{type:'button',className:'wb_mMenuRow',onClick:function(){menu[1](false);newTitle[1](title);rename[1](true);}},'重命名'),h('button',{type:'button',className:'wb_mMenuRow',onClick:function(){menu[1](false);preset[1](true);}},'这次发起时的预设'),h('button',{type:'button',className:'wb_mMenuRow',onClick:function(){menu[1](false);wbNavState.drawer=true;wbNavEmit();}},'会话列表'),h('button',{type:'button',className:'wb_mMenuRow',onClick:function(){menu[1](false);preset[1]('desktop');}},'在电脑上打开')):null,
 				rename[0]?h(MobileModal,{title:'重命名',close:function(){rename[1](false);}},h('input',{className:'wb_mRename',value:newTitle[0],'aria-label':'会话名称',onChange:function(e){newTitle[1](e.target.value);}}),renameError[0]?h('p',{role:'status'},renameError[0]):null,h('button',{type:'button',className:'wb_mPrimary',disabled:!newTitle[0].trim(),onClick:async function(){try{var svc=WbCtx.get('sessions');var binding=svc.binding(p.sessionId);var result=await binding.session.rename(newTitle[0].trim());if(!result.ok)throw Error(result.error.message);rename[1](false);}catch(e){renameError[1]('重命名失败，请稍后重试');}}},'保存')):null,
 				preset[0]?h(MobileModal,{title:preset[0]==='desktop'?'在电脑上打开':'这次发起时的预设',close:function(){preset[1](false);}},h('div',{className:'wb_mPreset'},preset[0]==='desktop'?'在电脑上登录同一账号，从会话列表打开「'+title+'」。':[meta.client,meta.line,meta.period,meta.topic,meta.refs&&meta.refs.style,(meta.skills||[]).join('、'),meta.base].filter(Boolean).join('\n')||'此会话没有装配台预设')):null);
 		}
@@ -615,9 +689,9 @@ html[data-wb-mobile] .wb_mHeading small{font-size:13px;line-height:16px;white-sp
 html[data-wb-mobile] .wb_mIcon{border:0;background:transparent;flex:0 0 44px;width:44px;height:44px;display:grid;place-items:center;padding:0;border-radius:12px;font-size:24px!important}
 html[data-wb-mobile] .wb_mForm{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;padding:16px 16px 96px}
 html[data-wb-mobile] .wb_mForm h3{font-size:17px;line-height:24px;margin:24px 4px 10px;font-weight:700}
-html[data-wb-mobile] .wb_mContext{display:flex;align-items:center;gap:12px;width:100%;text-align:left;border:0;background:#fff;border-radius:14px;padding:12px;box-shadow:0 1px 2px #0e14300f}
+html[data-wb-mobile] .wb_mContext{display:flex;align-items:center;gap:12px;width:100%;text-align:left;border:0;background:var(--dsh-card,#fff);border-radius:var(--dsh-r-m,14px);padding:16px;box-shadow:var(--dsh-shadow-1,0 1px 2px #0e14300f)}
 html[data-wb-mobile] .wb_mGrow{flex:1;min-width:0}
-html[data-wb-mobile] .wb_mContext b{font-weight:650;display:block;overflow-wrap:anywhere}
+html[data-wb-mobile] .wb_mContext b{font-weight:650;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;overflow-wrap:anywhere;line-height:24px}
 html[data-wb-mobile] :is(.wb_mContext,.wb_mClient) small{display:block;font-size:13px;line-height:18px;color:var(--wb-dim2)}
 html[data-wb-mobile] .wb_mContext>svg{color:var(--wb-dim2);flex:none}
 html[data-wb-mobile] .wb_mAvatar{width:40px;height:40px;border-radius:12px;background:var(--wb-accent);color:#fff;display:grid;place-items:center;font-size:17px;font-weight:750;flex:none}
@@ -625,7 +699,7 @@ html[data-wb-mobile] .wb_mSegment{display:flex;padding:4px;gap:2px;border-radius
 html[data-wb-mobile] .wb_mSegment button{flex:1;position:relative;min-width:0;height:36px;border:0;border-radius:9px;background:transparent;font-size:15px;font-weight:600;color:var(--wb-dim)}
 html[data-wb-mobile] .wb_mSegment button::after{content:'';position:absolute;inset:-4px 0}
 html[data-wb-mobile] .wb_mSegment button[aria-pressed=true]{background:#fff;color:var(--wb-text);box-shadow:0 1px 2px #0e14300f}
-html[data-wb-mobile] .wb_mTopic{display:block;width:100%;resize:vertical;min-height:72px;border:1px solid var(--wb-line);border-radius:14px;padding:12px 14px;background:#fff;outline-color:var(--wb-accent)}
+html[data-wb-mobile] .wb_mTopic{display:block;width:100%;resize:none;min-height:72px;max-height:40vh;overflow-y:auto;font-size:16px!important;border:1px solid var(--wb-line);border-radius:var(--dsh-r-m,14px);padding:12px 16px;background:var(--dsh-card,#fff);outline-color:var(--wb-accent)}
 html[data-wb-mobile] .wb_mEmpty{padding:16px;border-radius:14px;background:#fff;color:var(--wb-dim);margin-top:12px}
 html[data-wb-mobile] .wb_mEmpty p{margin:0;font-size:15px;line-height:24px}
 html[data-wb-mobile] .wb_mLink{border:0;background:transparent;color:var(--wb-accent)!important;min-height:44px;padding:8px 0;font-weight:600!important}
@@ -655,9 +729,13 @@ html[data-wb-mobile] .wb_mSheet{background:#fff;border-radius:28px 28px 0 0;padd
 html[data-wb-mobile] .wb_mGrab{width:36px;height:5px;border-radius:3px;background:var(--dsh-ink-4,#b9bccb);margin:0 auto 12px}
 html[data-wb-mobile] .wb_mSheetHead{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
 html[data-wb-mobile] .wb_mSheetHead h2{font-size:20px;font-weight:800;margin:0}
+html[data-wb-mobile] .wb_mMenuRow{display:flex;align-items:center;width:100%;min-height:52px;text-align:left;padding:12px 0;margin:0;border:0;border-radius:0;background:transparent}
+html[data-wb-mobile] .wb_mMenuRow+.wb_mMenuRow{border-top:1px solid var(--dsh-line-2,#f1efea)}
 html[data-wb-mobile] .wb_mCaption{display:block;color:var(--wb-dim2);font-size:13px;margin:20px 0 10px}
-html[data-wb-mobile] .wb_mClient{display:flex;width:100%;align-items:center;text-align:left;gap:12px;padding:12px 0;border:0;border-bottom:1px solid var(--wb-line);background:#fff;min-height:76px}
-html[data-wb-mobile] .wb_mRadio{display:grid;place-items:center;flex:none;width:26px;height:26px;border-radius:50%;border:2px solid var(--dsh-ink-4,#b9bccb)}
+html[data-wb-mobile] .wb_mClient{display:flex;width:100%;align-items:center;text-align:left;gap:12px;padding:8px 0;border:0;border-bottom:1px solid var(--dsh-line-2,#f1efea);background:var(--dsh-card,#fff);min-height:60px}
+html[data-wb-mobile] .wb_mClient b{display:block;line-height:24px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+html[data-wb-mobile] .wb_mClient small{min-height:18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+html[data-wb-mobile] .wb_mClient>.wb_mRadio{display:grid;place-items:center;flex:none;width:26px;height:26px;border-radius:50%!important;border:2px solid var(--dsh-ink-4,#b9bccb)}
 html[data-wb-mobile] .wb_mRadio[data-on='1']{background:var(--wb-accent);border-color:var(--wb-accent);color:#fff}
 html[data-wb-mobile] .wb_mSheet>.wb_mPrimary{margin-top:24px}
 html[data-wb-mobile] .wb_mEditor{position:absolute;top:var(--wb-vv-top,0px);left:0;right:0;height:var(--wb-vv-h,100dvh);background:#fff;padding:8px 16px calc(16px + env(safe-area-inset-bottom));display:flex;flex-direction:column;gap:12px}
@@ -668,10 +746,14 @@ html[data-wb-mobile] .wb_mDrawer{position:fixed;left:0;top:0;bottom:0;width:min(
 html[data-wb-mobile] .wb_mDrawerHead{display:flex;align-items:center;padding:4px 8px 4px 20px;height:52px;flex:none}
 html[data-wb-mobile] .wb_mDrawerHead b{flex:1;font-size:20px}
 html[data-wb-mobile] .wb_mDrawerTools{padding:4px 16px 0}
-html[data-wb-mobile] .wb_mDrawerTools input{width:100%;height:44px;background:#fff;border:1px solid var(--wb-line);border-radius:12px;padding:0 12px;margin-top:12px}
+html[data-wb-mobile] .wb_mSearch{position:relative;display:flex;align-items:center;margin-top:16px;color:var(--dsh-ink-3,#8b90a6)}
+html[data-wb-mobile] .wb_mSearch>svg{position:absolute;left:12px;pointer-events:none}
+html[data-wb-mobile] .wb_mSearch input{box-sizing:border-box;width:100%;height:44px!important;min-height:44px;font-size:16px!important;background:var(--dsh-card,#fff);border:1px solid var(--wb-line);border-radius:var(--dsh-r-s,10px);padding:0 12px 0 44px;margin:0}
 html[data-wb-mobile] .wb_mTree{padding:16px 8px;overflow:auto;flex:1;min-height:0;overscroll-behavior:contain}
-html[data-wb-mobile] .wb_mGroup{display:flex;align-items:center;gap:10px;width:100%;min-height:48px;padding:8px 12px;border:0;background:none;text-align:left}
-html[data-wb-mobile] .wb_mGroup b{flex:1;font-size:15px}
+html[data-wb-mobile] .wb_mGroup{display:flex;align-items:center;gap:8px;width:100%;min-height:48px;padding:8px;border:0;background:none;text-align:left}
+html[data-wb-mobile] .wb_mGroup b{flex:1;min-width:0;font-size:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+html[data-wb-mobile] .wb_mGroup small{flex:none;font-size:13px;color:var(--dsh-ink-3,#8b90a6)}
+html[data-wb-mobile] .wb_mGroup>svg{flex:none;width:24px;height:24px;color:var(--dsh-ink-3,#8b90a6)}
 html[data-wb-mobile] .wb_mGroup .wb_mAvatar{width:28px;height:28px;font-size:13px;border-radius:8px}
 html[data-wb-mobile] .wb_mSession{display:flex;align-items:flex-start;gap:12px;width:100%;min-height:64px;padding:10px 12px;text-align:left;border:0;border-radius:14px;background:none}
 html[data-wb-mobile] .wb_mSession[aria-current=true]{background:#fff;box-shadow:0 1px 2px #0e14300f}
@@ -687,14 +769,24 @@ html[data-wb-mobile] .wb_mAccount small{display:block;color:var(--wb-dim2);font-
 html[data-wb-mobile] .wb_mAccount .wb_mAvatar{border-radius:50%;background:var(--dsh-blue-50,#eef2fd);color:var(--wb-accent)}
 html[data-wb-mobile] .wb_mChat .wb_mTop{background:#fff;border-bottom:1px solid var(--wb-line)}
 html[data-wb-mobile] .wb_mChat .wb_mHeading b{font-size:17px;line-height:22px}
-html[data-wb-mobile] .wb_mProgress{margin:12px 16px;padding:14px 16px;border-radius:18px;background:var(--wb-bg);max-height:210px;overflow:auto;font-size:15px;line-height:24px}
-html[data-wb-mobile] .wb_mProgress summary{font-weight:700;cursor:pointer;min-height:30px}
+html[data-wb-mobile] .wb_mPinned{position:relative;display:flex;align-items:center;gap:8px;height:56px;padding:4px 16px;background:var(--dsh-card,#fff);border-bottom:1px solid var(--wb-line)}
+html[data-wb-mobile] .wb_mPinned:empty{display:none}
+html[data-wb-mobile] .wb_mProgress{flex:1;min-width:0;margin:0;padding:0;font-size:14px;line-height:24px}
+html[data-wb-mobile] .wb_mProgress summary{display:flex;align-items:center;gap:4px;list-style:none;font-weight:700;cursor:pointer;min-height:48px;white-space:nowrap}
+html[data-wb-mobile] .wb_mProgress summary::-webkit-details-marker{display:none}
+html[data-wb-mobile] .wb_mProgress summary::marker{content:''}
+html[data-wb-mobile] .wb_mProgress summary small{font-size:13px;color:var(--dsh-ink-3,#8b90a6)}
+html[data-wb-mobile] .wb_mProgress summary svg{flex:none;width:24px;height:24px}
+html[data-wb-mobile] .wb_mProgress[open] summary svg{transform:rotate(180deg)}
+html[data-wb-mobile] .wb_mChecklist{position:absolute;top:100%;left:16px;right:16px;z-index:1200;max-height:calc(var(--wb-vv-h,100dvh) * .4);overflow:auto;overscroll-behavior:contain;padding:16px;border-radius:var(--dsh-r-m,14px);background:var(--dsh-card,#fff);box-shadow:var(--dsh-shadow-2,0 8px 24px #0e14301a)}
 html[data-wb-mobile] .wb_mProgress .wb_trow{padding:3px 0;font-size:15px;gap:10px}
 html[data-wb-mobile] .wb_mProgress .wb_ticon{width:22px;height:22px;flex:none;border-radius:50%;font-size:18px;display:grid;place-items:center}
 html[data-wb-mobile] .wb_mProgress .wb_ticon[data-s=done]{background:var(--dsh-green,#14a05a);color:#fff}
-html[data-wb-mobile] .wb_mPending{display:flex;align-items:center;gap:12px;margin:12px 16px;padding:12px 16px;border-radius:16px;background:var(--dsh-orange-50,#fff1e6);color:var(--dsh-orange-700,#d9480f);font-size:15px}
-html[data-wb-mobile] .wb_mPending small{display:block;font-size:13px;line-height:18px}
-html[data-wb-mobile] .wb_mPending button{border:0;border-radius:12px;background:var(--dsh-orange,#ff6a1f);color:#fff;min-height:44px;padding:0 14px;white-space:nowrap}
+html[data-wb-mobile] .wb_mPinned .wb_mPending{display:flex;align-items:center;justify-content:center;gap:4px;min-width:0;max-width:60%;min-height:48px;margin:0 0 0 auto;padding:0 8px;border:0;border-radius:var(--dsh-r-s,10px);background:var(--dsh-orange-50,#fff1e6);color:var(--dsh-orange-700,#d9480f)}
+html[data-wb-mobile] .wb_mPending small{font-size:13px;line-height:18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+html[data-wb-mobile] .wb_mPending b{font-size:16px;white-space:nowrap}
+html[data-wb-mobile] .wb_mPending svg{flex:none;width:24px;height:24px}
+html[data-wb-mobile]:is([data-wb-keyboard],[data-dsh-keyboard='open']) .wb_mPinned{display:none}
 html[data-wb-mobile] .wb_mReview{position:fixed;inset:0;z-index:15000;background:var(--wb-bg);display:flex;flex-direction:column}
 html[data-wb-mobile] .wb_mReviewList{overflow:auto;min-height:0;flex:1;padding:16px 16px 108px}
 html[data-wb-mobile] .wb_mArticle{background:#fff;overflow:auto;min-height:0;flex:1;padding:20px 20px 110px;font-size:17px;line-height:30px;overflow-wrap:anywhere}
@@ -710,14 +802,15 @@ html[data-wb-mobile] [class*='_frame']{grid-template-columns:0 minmax(0,1fr) 0!i
 html[data-wb-mobile] [class*='_sidebarCol'],html[data-wb-mobile] [class*='_rightbarCol']{width:0!important;min-width:0!important;overflow:hidden!important;visibility:hidden}
 html[data-wb-mobile] [class*='_centerCol']{min-width:0;max-width:100vw}
 html[data-wb-mobile] [data-slot='main.conversation']{--dsh-content-font-size:16px;--dsh-chat-content-width:100%;--dsh-composer-side-clearance:0px;background:#fff;min-width:0}
-html[data-wb-mobile] [data-slot='conversation.session.header']{flex:none;min-width:0}
+html[data-wb-mobile][data-wb-scene='chat'] [data-slot='main.conversation']{position:fixed;top:var(--wb-vv-top,0px);left:0;right:0;height:var(--wb-vv-h,100dvh)}
+html[data-wb-mobile] [data-slot='conversation.session.header']{flex:none;min-width:0;border-bottom:0}
 html[data-wb-mobile] [class*='_composerSeat']{position:fixed!important;left:0;right:0;bottom:calc(var(--wb-kb,0px) + var(--wb-notice-h,0px))!important;box-sizing:border-box;width:100%;z-index:1100!important;background:#fff!important;padding:10px 12px calc(10px + env(safe-area-inset-bottom));border-top:1px solid var(--wb-line)}
 html[data-wb-mobile] [class*='_composerStack']{width:100%;max-width:none}
 html[data-wb-mobile] [data-slot='conversation.composer.bar']{padding:0;--dsw-specific-input-major:var(--wb-bg)}
 html[data-wb-mobile] [data-slot='conversation.composer.bar'] [contenteditable]{font-size:16px!important;line-height:24px;min-height:24px;max-height:120px;padding:0}
 html[data-wb-mobile] [data-slot='conversation.composer.bar'] button{min-height:44px;min-width:44px}
 html[data-wb-mobile] [data-slot='conversation.input.model'],html[data-wb-mobile] [data-composer-stats],html[data-wb-mobile] .wb_pick{display:none!important}
-html[data-wb-mobile] [class*='_scrollBody']{padding-bottom:calc(174px + var(--wb-kb,0px))!important;min-width:0}
+html[data-wb-mobile] [data-conversation-scroll]{flex:none!important;height:var(--wb-chat-scroll-h,100%);padding-bottom:0!important;min-width:0}
 html[data-wb-mobile] [data-slot='conversation.view']{min-width:0;overflow-wrap:anywhere}
 html[data-wb-mobile] [data-slot='conversation.chat.node']{font-size:16px;line-height:26px;min-width:0;max-width:100%}
 html[data-wb-mobile] [class*='_userRow']{justify-content:flex-end}
@@ -745,8 +838,7 @@ html[data-wb-mobile] [data-slot='conversation.composer.bar'] [class*='_placehold
 html[data-wb-mobile] [data-slot='conversation.composer.bar'] [class*='_placeholder']::after{content:'继续追问，或让它改写…';font-size:16px}
 html[data-wb-mobile] [class*='_userStack'] [class*='_bubble']{padding:0}
 
-html[data-wb-mobile] .wb_mPending[data-ready='1']{background:var(--dsh-green-50,#e6f6ee);color:var(--dsh-green,#14a05a)}
-html[data-wb-mobile] .wb_mPending[data-ready='1'] button{background:var(--dsh-green,#14a05a)}
+html[data-wb-mobile] .wb_mPinned .wb_mPending[data-ready='1']{background:var(--dsh-green-50,#e6f6ee);color:var(--dsh-green,#14a05a)}
 html[data-wb-mobile] [data-slot='conversation.composer.bar'] button[aria-label='添加附件']{display:grid!important;place-items:center;border-radius:50%;background:var(--wb-bg)}
 html[data-wb-mobile] [data-slot='conversation.composer.bar'] button[aria-label='添加附件'] svg{display:none}
 html[data-wb-mobile] [data-slot='conversation.composer.bar'] button[aria-label='添加附件']::after{content:'＋';font-size:24px}
@@ -1739,10 +1831,10 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					wbNavEmit();
 				},[props.mobileInline,sessionId,chatSnap,pending.length,doneCount]);
 				if (props.mobileInline && mobile) {
-					if (!reviewOpen[0]) return pending.length ? h('div',{className:'wb_mPending'},h('div',{className:'wb_mGrow'},h('b',null,pending.length+' 篇草稿待审'),h('small',null,'确认后才会入库，进入内容投放')),h('button',{type:'button',onClick:function(){reviewOpen[1](true);}},'去审核')) : n>0 ? h('div',{className:'wb_mPending','data-ready':'1'},h('span',{className:'wb_mGrow'},'已入库 '+doneCount+' 篇'),h('button',{type:'button',onClick:function(){reviewOpen[1](true);}},'查看文章')) : null;
+					if (!reviewOpen[0]) return n>0 ? h('button',{type:'button',className:'wb_mPending','data-ready':pending.length?'0':'1',onClick:function(){reviewOpen[1](true);}},h('small',null,pending.length?pending.length+' 篇待审':'已入库 '+doneCount+' 篇'),h('b',null,pending.length?'去审核':'查看文章'),wbIcon('next')) : null;
 					return createPortal(h('section',{className:'wb_mReview','aria-label':'文章审核'},h(MobileTopBar,{title:sel?'文章详情':'文章审核',sub:client,back:function(){if(sel)setL(function(p){return Object.assign({},p,{sel:'',body:''});});else reviewOpen[1](false);}}),
 						msg?h('p',{role:'status'},msg):null,
-						sel?h('article',{className:'wb_mArticle'},h('h1',null,sel),h('div',{dangerouslySetInnerHTML:{__html:wbMdToHtml(bodyText)}}))
+						sel?h('article',{className:'wb_mArticle'},h('h1',null,sel),h('div',{dangerouslySetInnerHTML:{__html:wbMdToHtml(wbStripLeadingTitle(bodyText,sel))}}))
 						:h('div',{className:'wb_mReviewList'},(drafts||[]).map(function(d){return h('button',{type:'button',key:d.title,className:'wb_mReviewItem',onClick:function(){openDraft(d.title);}},h('b',null,d.title),h('small',null,(doneMap[d.title]?'已入库':'草稿待审')+(typeof d.chars==='number'?' · '+d.chars+' 字':'')));})),
 						h('div',{className:'wb_mAction'},h('button',{type:'button',className:'wb_mPrimary',disabled:sel?doneMap[sel]===true||bodyText==='加载中…':pending.length===0,onClick:function(){confirmTargets(sel?[sel]:pending.map(function(d){return d.title;}),sel?'入库':'批量入库');}},sel?'确认入库':'全部确认'))),document.body);
 				}
