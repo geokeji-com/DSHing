@@ -31,7 +31,10 @@ window.__ModuleLoader__.load({
 			var previousFrame = null, previousColumns = '';
 			function viewport() {
 				if (!WB_MOBILE.matches) return;
-				root.style.setProperty('--wb-kb', wbKeyboardInset(window.innerHeight, window.visualViewport) + 'px');
+				var inset = wbKeyboardInset(window.innerHeight, window.visualViewport);
+				root.style.setProperty('--wb-kb', inset + 'px');
+				// The shared shell detects input/textarea; the harness uses contenteditable.
+				root.toggleAttribute('data-wb-keyboard', inset > 150);
 				root.style.setProperty('--wb-vv-top', (window.visualViewport ? window.visualViewport.offsetTop : 0) + 'px');
 				root.style.setProperty('--wb-vv-h', (window.visualViewport ? window.visualViewport.height : window.innerHeight) + 'px');
 			}
@@ -46,6 +49,7 @@ window.__ModuleLoader__.load({
 					if (previousFrame) previousFrame.style.gridTemplateColumns = previousColumns;
 					previousFrame = null;
 					delete root.dataset.wbScene;
+					root.removeAttribute('data-wb-keyboard');
 					if (root.dataset.wbFlow === '1') { delete root.dataset.wbFlow; delete root.dataset.dshChrome; }
 					root.style.removeProperty('--wb-kb');
 					wbNavTakeFrame();
@@ -61,6 +65,7 @@ window.__ModuleLoader__.load({
 				if (vv) { vv.removeEventListener('resize', viewport); vv.removeEventListener('scroll', viewport); }
 				if (previousFrame) previousFrame.style.gridTemplateColumns = previousColumns;
 				root.removeAttribute('data-wb-mobile'); delete root.dataset.wbScene;
+				root.removeAttribute('data-wb-keyboard');
 				if (root.dataset.wbFlow === '1') { delete root.dataset.wbFlow; delete root.dataset.dshChrome; }
 			};
 		}
@@ -157,14 +162,37 @@ window.__ModuleLoader__.load({
 			if(!mobile || !p.inputActions) return null;
 			return h('div',{className:'wb_mQuick'},['再写 1 篇','换个语气'].map(function(text){return h('button',{type:'button',className:'wb_mChip',key:text,onClick:function(){p.inputActions.setDraft(text);var el=document.querySelector('[data-slot="conversation.composer.bar"] [contenteditable]');if(el)el.focus();}},text);}));
 		}
+		function wbMobileProgress(nodes, legacy, drafts, done) {
+			// Last successful todo_write is authoritative, including an empty list.
+			for (var i=nodes.length-1;i>=0;i--) {
+				var node=nodes[i];
+				if(node.kind==='tool-result'&&node.call&&node.call.name==='todo_write'&&node.isError!==true){
+					try { var todos=JSON.parse(node.call.argsRaw||'{}').todos;
+						if(Array.isArray(todos)) return todos.filter(function(t){return t.content;}).map(function(t){return [t.status==='completed'?'done':t.status==='in_progress'?'run':'wait',String(t.content)];});
+					} catch(e) { }
+					break;
+				}
+			}
+			var titles={};
+			nodes.forEach(function(node){if(node.kind==='tool-result'&&node.call&&/^(?:mcp__articles__|mcp__sora-articles__)write_article$/.test(node.call.name)&&node.isError!==true){try{var args=JSON.parse(node.call.argsRaw||'{}');var title=String(args.title||args.file||'').replace(/\.md$/i,'');if(title)titles[title]=true;}catch(e){}}});
+			var count=Object.keys(titles).length, confirmed=Object.keys(done||{}).filter(function(t){return titles[t]&&done[t];}).length;
+			var running=!!(legacy&&(legacy.partial||(legacy.runningCalls&&legacy.runningCalls.length)));
+			var rows=[[running?'run':count?'done':'wait',running?'写作中':count?'本会话已写 '+count+' 篇文章':'已停止，尚无文章产物']];
+			var pending=(drafts||[]).filter(function(d){return titles[d.title]&&!(done&&done[d.title]);}).length;
+			if(pending)rows.push(['wait',pending+' 篇草稿待审核']);
+			if(confirmed)rows.push(['done','已入库 '+confirmed+' 篇']);
+			return rows;
+		}
 		function MobileChatHeader(p) {
 			var menu=React.useState(false), preset=React.useState(false), rename=React.useState(false), newTitle=React.useState(""), renameError=React.useState("");
+			useWbPickTick();
+			var rows=wbMobileProgress(p.nodes||[],p.legacy,WB_PICK.drafts,WB_PICK.done);
 			var meta=p.meta||{}, binding=wbNavState.bindings[p.sessionId]||{};
 			var title=p.title||meta.topic||binding.topic||'会话';
 			var refCount=meta.refs?((meta.refs.urls||[]).length+(meta.refs.body?1:0)):0;
 			var sub=[meta.client||binding.client,meta.period,refCount?'仿写 '+refCount+' 篇':''].filter(Boolean).join(' · ');
 			return h('div',{className:'wb_mChat'},h(MobileTopBar,{title:title,sub:sub,back:function(){var layout=WbCtx&&WbCtx.get?WbCtx.get('layout'):null;if(layout)layout.selectPanel(WORKBENCH_KEY);},more:function(){menu[1](true);}}),
-				p.rows.length?h('details',{className:'wb_mProgress',open:true},h('summary',null,'任务进度'),p.rows.map(function(row,i){return h('div',{className:'wb_trow',key:i},h('span',{className:'wb_ticon','data-s':row[0]},row[0]==='done'?'✓':row[0]==='run'?'◷':'○'),h('span',null,row[1]));})):null,
+				rows.length?h('details',{className:'wb_mProgress',open:true},h('summary',null,'任务进度'),rows.map(function(row,i){return h('div',{className:'wb_trow',key:i},h('span',{className:'wb_ticon','data-s':row[0]},row[0]==='done'?'✓':row[0]==='run'?'◷':'○'),h('span',null,row[1]));})):null,
 				h(ReviewTabBody,Object.assign({},p.reviewProps,{mobileInline:true})),
 				menu[0]?h(MobileModal,{title:'会话操作',close:function(){menu[1](false);}},h('button',{type:'button',className:'wb_mExtra',onClick:function(){menu[1](false);newTitle[1](title);rename[1](true);}},'重命名'),h('button',{type:'button',className:'wb_mExtra',onClick:function(){menu[1](false);preset[1](true);}},'这次发起时的预设'),h('button',{type:'button',className:'wb_mExtra',onClick:function(){menu[1](false);wbNavState.drawer=true;wbNavEmit();}},'会话列表'),h('button',{type:'button',className:'wb_mExtra',onClick:function(){menu[1](false);preset[1]('desktop');}},'在电脑上打开')):null,
 				rename[0]?h(MobileModal,{title:'重命名',close:function(){rename[1](false);}},h('input',{className:'wb_mRename',value:newTitle[0],'aria-label':'会话名称',onChange:function(e){newTitle[1](e.target.value);}}),renameError[0]?h('p',{role:'status'},renameError[0]):null,h('button',{type:'button',className:'wb_mPrimary',disabled:!newTitle[0].trim(),onClick:async function(){try{var svc=WbCtx.get('sessions');var binding=svc.binding(p.sessionId);var result=await binding.session.rename(newTitle[0].trim());if(!result.ok)throw Error(result.error.message);rename[1](false);}catch(e){renameError[1]('重命名失败，请稍后重试');}}},'保存')):null,
@@ -700,7 +728,8 @@ html[data-wb-mobile] .wb_grip{display:none}
 html[data-wb-mobile]:has(.impersonation-banner){--wb-notice-h:36px}
 html[data-wb-mobile] .wb_mRename{width:100%;min-height:48px;border:1px solid var(--wb-line);border-radius:12px;padding:10px}
 html[data-wb-mobile] .wb_mQuick{display:flex;gap:8px;margin:0 0 10px;font:14px/20px var(--wb-font)}
-html[data-wb-mobile][data-dsh-keyboard=open] .wb_mQuick{display:none}
+html[data-wb-mobile][data-wb-keyboard] .wb_mQuick{display:none}
+html[data-wb-mobile][data-wb-keyboard] [class*='_composerSeat']{bottom:var(--wb-kb,0px)!important}
 html[data-wb-mobile] [data-slot='conversation.input.dock'] div:has(>button[class*='_header']){display:none}
 html[data-wb-mobile] [data-slot='conversation.composer.dock']{display:none!important}
 html[data-wb-mobile] [data-slot='conversation.composer.bar']>[class*='_root']{padding:0}
@@ -721,6 +750,8 @@ html[data-wb-mobile] .wb_mPending[data-ready='1'] button{background:var(--dsh-gr
 html[data-wb-mobile] [data-slot='conversation.composer.bar'] button[aria-label='添加附件']{display:grid!important;place-items:center;border-radius:50%;background:var(--wb-bg)}
 html[data-wb-mobile] [data-slot='conversation.composer.bar'] button[aria-label='添加附件'] svg{display:none}
 html[data-wb-mobile] [data-slot='conversation.composer.bar'] button[aria-label='添加附件']::after{content:'＋';font-size:24px}
+html[data-wb-mobile] [data-slot='conversation.chat.node'] div[class*='_markdown']{font-size:16px;line-height:26px}
+html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 `;
 
 		var TAG_ID = "dsh-workbench/workbench.css";
@@ -1959,7 +1990,7 @@ html[data-wb-mobile] [data-slot='conversation.composer.bar'] button[aria-label='
 					return function () { alive = false; };
 				}, [metaId, meta && meta.client, chatSnap]);
 				if (meta === null || typeof meta !== "object") {
-					if (mobile) return h(MobileChatHeader,{title:title,sessionId:sessionId,meta:null,rows:[],reviewProps:props});
+					if (mobile) return h(MobileChatHeader,{title:title,sessionId:sessionId,meta:null,nodes:list,legacy:chatSnap&&chatSnap.legacy,reviewProps:props});
 					return h("div", { className: "wb_task" },
 						h("span", { className: "wb_taskTitle" }, title === "" ? "会话" : title),
 );
@@ -2049,7 +2080,7 @@ html[data-wb-mobile] [data-slot='conversation.composer.bar'] button[aria-label='
 
 
 
-				if (mobile) return h(MobileChatHeader,{title:title,sessionId:sessionId,meta:meta,rows:taskRows,reviewProps:props});
+				if (mobile) return h(MobileChatHeader,{title:title,sessionId:sessionId,meta:meta,nodes:list,legacy:chatSnap&&chatSnap.legacy,reviewProps:props});
 				var colL = h("div", { className: "wb_col" },
 					h("div", { className: "wb_colTitle" }, "这次发起时的预设"),
 					presetRow("客户", clientText),

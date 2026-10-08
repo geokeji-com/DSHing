@@ -100,9 +100,9 @@ dsh plugin --profile web add /path/to/plugins/dsh-workbench
 
 断点为 `matchMedia('(max-width: 767px)')`；变化会重新渲染。手机使用 328px 会话抽屉、写给谁 sheet、分段主题/写法、可换行 chip、全屏补充要求和吸底「开始生文」。客户、产品线、期数、模板、会话、文章及账号均来自原接口；发送仍调用原 `dispatch()`，审核仍调用 `confirmTargets()` / `confirmOne()`。文本参考文件只在浏览器读取 `.txt/.md`（上限 1 MB），合并到原来的参考正文，通用二进制附件仍由会话的原生附件入口处理。
 
-dsh-cloud PR-1 注入共享 `tokens.css` 和唯一的 `<dsh-tabbar>`。插件通过 `dshMobile.setClients/setClient` 与 `dsh:client` 接入按 uid 隔离的 `dsh.ctx.client:<uid>`（值为客户显示名）。仅接受授权列表中的键/名称。聊天/审核设置 `data-dsh-chrome="flow"`，返回或跨回桌面清除。`visualViewport.resize/scroll` 更新键盘偏移和编辑器可见高度；pinch zoom 不视为键盘。虚拟登录提示条单独留出空间。
+dsh-cloud PR-1 注入共享 `tokens.css` 和唯一的 `<dsh-tabbar>`。插件通过 `dshMobile.setClients/setClient` 与 `dsh:client` 接入按 uid 隔离的 `dsh.ctx.client:<uid>`（值为客户显示名）。仅接受授权列表中的键/名称。聊天/审核设置 `data-dsh-chrome="flow"`，返回或跨回桌面清除。`visualViewport.resize/scroll` 更新键盘偏移和编辑器可见高度；pinch zoom 不视为键盘。工作台独立检测 contenteditable 的键盘偏移，键盘弹起时收起快捷按钮。虚拟登录提示条单独留出空间。
 
-手机审核使用同一 `ReviewTabBody` 的列表 → 正文视图；不会自动打开桌面右栏。进度镜像最后一次成功 `todo_write`，没有清单时保留原来的实际产物/运行状态。抽屉索引没有文章状态，只有已加载会话才能按消息中 `write_article` 的标题与正式库交集得出入库数；未知显示灰点「状态未同步」，不会伪装成已停止或已入库。文章已入库显示绿色，待审显示橙色。「再写 1 篇 / 换个语气」只填入原生草稿，仍需用户发送；运行时停止沿用原生停止按钮。「在电脑上打开」提示在同账号的会话列表继续，未构造不存在的 deep link。
+手机审核使用同一 `ReviewTabBody` 的列表 → 正文视图；不会自动打开桌面右栏。进度镜像最后一次成功 `todo_write`，没有清单时按唯一文章标题计算实际产物/运行状态，模板数量不当作目标篇数。抽屉索引没有文章状态，只有已加载会话才能按消息中 `write_article` 的标题与正式库交集得出入库数；未知显示灰点「状态未同步」，不会伪装成已停止或已入库。文章已入库显示绿色，待审显示橙色。「再写 1 篇 / 换个语气」只填入原生草稿，仍需用户发送；运行时停止沿用原生停止按钮。「在电脑上打开」提示在同账号的会话列表继续，未构造不存在的 deep link。
 
 **上游选择器例外**：本次批准的手机适配需要覆盖 harness frame / composer。所有新增 suffix 选择器集中在 `lib/client.js` 的 `Upstream compatibility boundary` 注释下，并限定于 `html[data-wb-mobile]`；没有写死构建 hash。优先使用 `data-slot`、`data-composer-seat` 等公开属性。移动浮层用 React portal 到 body，避免上游 overlay stacking context 遮挡。桌面 JSX、CSS、侧栏宽度、右栏审核和写入路径保留。
 
