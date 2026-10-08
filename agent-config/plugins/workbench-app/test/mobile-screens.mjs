@@ -18,7 +18,7 @@ const { chromium } = require('playwright')
 const { build } = require('esbuild')
 const here = dirname(fileURLToPath(import.meta.url))
 const out = resolve(process.argv[2] || '/tmp/workbench-mobile-screens')
-const lightRef = process.env.WB_LIGHT_REF || '1be6b0a5eded774af43fe82d7e791d15f3d8bc03'
+const lightRef = process.env.WB_LIGHT_REF || 'a0308ce97d57f9243c25cee3a17d16f0274eab5f'
 const baselineRef = process.env.WB_BASELINE_REF || 'cc166cbc8c179cf598ccac03ac87eb4f3966fdb7'
 mkdirSync(out, { recursive: true })
 const source = readFileSync(resolve(here, '../lib/client.js'), 'utf8')
