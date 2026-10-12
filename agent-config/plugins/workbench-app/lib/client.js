@@ -1150,6 +1150,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			assignGroup: "/api/workbench/assign-client-group",
 			taskMeta: "/api/workbench/task-meta",
 			taskStatus: "/api/workbench/task-status",
+			sessionClient: "/api/workbench/session-client",
 			drafts: "/api/workbench/drafts",
 			draft: "/api/workbench/draft",
 			confirmDraft: "/api/workbench/confirm-draft",
