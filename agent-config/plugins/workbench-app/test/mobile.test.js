@@ -92,7 +92,7 @@ test('pinned chat chrome follows mobile keyboard state and ignores zoom or deskt
   assert.deepEqual(state(false,852,{height:400,offsetTop:0,scale:1},'open'), {inset:0,keyboard:false,pinned:false})
 })
 
-test('mobile workbench CSS owns the shell width, weak-question cards and html dark tokens', () => {
+test('mobile workbench CSS owns the shell width, light tokens and underline-free weak-question cards', () => {
   assert.match(source, /html\[data-wb-mobile\] \[class\*='_frame'\],html\[data-wb-mobile\] \[class\*='frame'\].*grid-template-columns:0 minmax\(0,1fr\) 0!important/)
   assert.match(source, /html\[data-wb-mobile\] \[class\*='_sidebarCol'\].*flex:0 0 0!important/)
   assert.match(source, /\.wb_mWeakRow\{display:grid;grid-template-columns:44px minmax\(0,1fr\)/)
@@ -100,10 +100,9 @@ test('mobile workbench CSS owns the shell width, weak-question cards and html da
   assert.match(source, /className:'wb_gapNum'/)
   assert.match(source, /weakSelectionTouched\.current = true/)
   assert.match(source, /数据来源：Support/)
-  assert.match(source, /html\[data-wb-mobile\]\[data-dsh-theme="dark"\] body\{color-scheme:dark/)
-  assert.match(source, /html\[data-wb-mobile\]\[data-dsh-theme="dark"\] \.wb_mWeakRow\.is-on/)
-  assert.match(source, /html\[data-dsh-theme="dark"\] \.wb_mWeakRow\.is-on/)
-  assert.match(source, /--wb-mono:[^;]+;",\s*"\}\",\s*"body\[data-ds-dark-theme\]\{/)
+  assert.doesNotMatch(source, /data-dsh-theme="dark"|data-ds-dark-theme\] .*color-scheme:dark/)
+  assert.match(source, /html\[data-wb-mobile\] body\{[^}]*--wb-bg:var\(--dsh-bg,/)
+  assert.match(source, /\.wb_mWeakGap\{[^}]*text-decoration:none!important/)
   assert.match(source, /\.wb_mSegment button\{[^}]*height:44px;min-height:44px/)
   assert.match(source, /\.wb_mChip\{[^}]*min-height:44px/)
 })

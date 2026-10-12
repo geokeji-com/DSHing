@@ -52,7 +52,44 @@ window.__ModuleLoader__.load({
 			return (keys || []).some(function (k) { return CREDENTIAL_RE.test(String(k)); });
 		}
 
+
+		/* Keep the host harness light even when the OS or saved Appearance says dark. */
+		function forceLightTheme() {
+			if (typeof document === "undefined" || !document.documentElement) return;
+			var root = document.documentElement;
+			var observer = null;
+			var observerOptions = { attributes: true, attributeFilter: ["data-dsh-theme", "data-ds-dark-theme", "class", "style"] };
+			function normalize() {
+				if (observer) observer.disconnect();
+				var body = document.body;
+				root.setAttribute("data-dsh-theme", "light");
+				root.removeAttribute("data-ds-dark-theme");
+				root.classList.remove("dark");
+				if (root.style.getPropertyValue("color-scheme") !== "light" || root.style.getPropertyPriority("color-scheme") !== "important") root.style.setProperty("color-scheme", "light", "important");
+				if (body) {
+					if (body.hasAttribute("data-dsh-theme") && body.getAttribute("data-dsh-theme") !== "light") body.setAttribute("data-dsh-theme", "light");
+					body.removeAttribute("data-ds-dark-theme");
+					body.classList.remove("dark");
+					if (body.style.getPropertyValue("color-scheme") !== "light" || body.style.getPropertyPriority("color-scheme") !== "important") body.style.setProperty("color-scheme", "light", "important");
+				}
+				if (observer) {
+					observer.observe(root, observerOptions);
+					if (body) observer.observe(body, observerOptions);
+				}
+			}
+			normalize();
+			if (window.__DSH_FORCE_LIGHT_THEME__ || typeof MutationObserver !== "function") return;
+			window.__DSH_FORCE_LIGHT_THEME__ = true;
+			observer = new MutationObserver(normalize);
+			observer.observe(root, observerOptions);
+			if (document.body) observer.observe(document.body, observerOptions);
+			window.__DSH_FORCE_LIGHT_THEME_OBSERVER__ = observer;
+		}
+		forceLightTheme();
+
 		var CSS = [
+			"html,body{color-scheme:light!important;}",
+			"[data-theme-toggle],[data-theme-switch],[data-theme-picker],button[aria-label*=\"主题\"],button[title*=\"主题\"]{display:none!important;}",
 			".mc_root { display:flex; flex-direction:column; gap:16px; font-size:13px; }",
 			".mc_head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }",
 			".mc_caption { font-size:11px; letter-spacing:.08em; text-transform:uppercase; color:var(--dsw-alias-label-tertiary); }",

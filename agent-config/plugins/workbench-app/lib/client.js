@@ -353,12 +353,48 @@ window.__ModuleLoader__.load({
 		 *   面板与 R 区     面板接线 / 文章审核 tab / 机器检查占位
 		 * ================================================================== */
 
+		/* DSH is deliberately light-only.  Keep the host harness and any
+		 * persisted Appearance choice from reintroducing a dark skin. */
+		function forceLightTheme() {
+			if (typeof document === "undefined" || !document.documentElement) return;
+			var root = document.documentElement;
+			var observer = null;
+			var observerOptions = { attributes: true, attributeFilter: ["data-dsh-theme", "data-ds-dark-theme", "class", "style"] };
+			function normalize() {
+				if (observer) observer.disconnect();
+				var body = document.body;
+				if (root.getAttribute("data-dsh-theme") !== "light") root.setAttribute("data-dsh-theme", "light");
+				root.removeAttribute("data-ds-dark-theme");
+				root.classList.remove("dark");
+				if (root.style.getPropertyValue("color-scheme") !== "light" || root.style.getPropertyPriority("color-scheme") !== "important") root.style.setProperty("color-scheme", "light", "important");
+				if (body) {
+					if (body.hasAttribute("data-dsh-theme") && body.getAttribute("data-dsh-theme") !== "light") body.setAttribute("data-dsh-theme", "light");
+					body.removeAttribute("data-ds-dark-theme");
+					body.classList.remove("dark");
+					if (body.style.getPropertyValue("color-scheme") !== "light" || body.style.getPropertyPriority("color-scheme") !== "important") body.style.setProperty("color-scheme", "light", "important");
+				}
+				if (observer) {
+					observer.observe(root, observerOptions);
+					if (body) observer.observe(body, observerOptions);
+				}
+			}
+			normalize();
+			if (window.__DSH_FORCE_LIGHT_THEME__ || typeof MutationObserver !== "function") return;
+			window.__DSH_FORCE_LIGHT_THEME__ = true;
+			observer = new MutationObserver(normalize);
+			observer.observe(root, observerOptions);
+			if (document.body) observer.observe(document.body, observerOptions);
+			window.__DSH_FORCE_LIGHT_THEME_OBSERVER__ = observer;
+		}
+		forceLightTheme();
+
 		var CSS = [
+			"html,body{color-scheme:light!important;}",
+			"[data-theme-toggle],[data-theme-switch],[data-theme-picker],button[aria-label*=\"主题\"],button[title*=\"主题\"]{display:none!important;}",
 			/* ---- tokens (原型 styles.css:8-80) ------------------------------
 			 * On `body`, not on our own root: this is the product palette, and
-			 * the conversation skin needs it too. Dark hangs off the attribute
-			 * DSH's own ThemePresenter writes, so it follows the user's
-			 * light/dark choice instead of inventing a second switch. */
+			 * the conversation skin needs it too. The light palette is fixed so
+			 * host Appearance changes cannot create a mixed skin. */
 			"body{",
 			"  --wb-bg:#ffffff; --wb-side:#f6f7f9; --wb-elev:#ffffff; --wb-elev2:#eef1f5;",
 			"  --wb-line:#e2e5ea; --wb-line-soft:#edeff3;",
@@ -371,15 +407,6 @@ window.__ModuleLoader__.load({
 			"  --wb-pop:0 8px 24px rgba(16,24,40,.14);",
 			"  --wb-font:-apple-system,\"PingFang SC\",\"Hiragino Sans GB\",\"Microsoft YaHei\",sans-serif;",
 			"  --wb-mono:ui-monospace,SFMono-Regular,Menlo,monospace;",
-			"}",
-			"body[data-ds-dark-theme]{",
-			"  --wb-bg:#14161b; --wb-side:#171a20; --wb-elev:#1c2028; --wb-elev2:#232833;",
-			"  --wb-line:#2b3140; --wb-line-soft:#232836;",
-			"  --wb-text:#e7e9ef; --wb-strong:#ffffff; --wb-dim:#9aa2b4; --wb-dim2:#6b7385;",
-			"  --wb-accent:#4d7cfe; --wb-accent-bg:#141d2e; --wb-accent-line:#26364f;",
-			"  --wb-accent-glow:rgba(77,124,254,.15);",
-			"  --wb-ok:#3ecf8e; --wb-ok-bg:#12241d; --wb-warn:#f0b429; --wb-bad:#ff7b7b; --wb-bad-bg:#3a1f1f;",
-			"  --wb-shadow:none; --wb-pop:0 8px 24px rgba(0,0,0,.55);",
 			"}",
 
 			/* ---- C 区皮肤（会话页）------------------------------------------
@@ -903,7 +930,6 @@ window.__ModuleLoader__.load({
 		CSS += `
 /* Derived from mobile-redesign/screens/ds.css. Runtime colors come from PR-1 tokens.css. */
 html[data-wb-mobile] body{--wb-bg:var(--dsh-bg,#f5f3ee);--wb-text:var(--dsh-ink,#0e1430);--wb-accent:var(--dsh-blue,#002fa7);--wb-accent-ink:var(--dsh-blue-ink,var(--wb-accent));--wb-line:var(--dsh-line,#e9e6e0);--wb-dim:var(--dsh-ink-2,#4a5170);--wb-dim2:var(--dsh-ink-3,#8b90a6);--wb-elev:var(--dsh-card,#fff);--wb-side:var(--wb-bg);--wb-content:100%;color:var(--wb-text)}
-html[data-wb-mobile][data-dsh-theme="dark"] body{color-scheme:dark;--wb-bg:var(--dsh-bg,#151517);--wb-text:var(--dsh-ink,#f5f5f5);--wb-accent:var(--dsh-blue,#3361e0);--wb-accent-ink:var(--dsh-blue-ink,#8fa8ff);--wb-accent-bg:var(--dsh-blue-50,#1d2a4d);--wb-line:var(--dsh-line,rgba(255,255,255,.12));--wb-dim:var(--dsh-ink-2,#cfd3d6);--wb-dim2:var(--dsh-ink-3,#adb2b8);--wb-elev:var(--dsh-card,#232324);--wb-side:var(--dsh-sunken,#1b1b1c);--wb-bad:var(--dsh-red,#ff7b7b);--wb-good:var(--dsh-green,#3ecf8e);--wb-soft-shadow:var(--dsh-shadow-1,0 1px 2px rgba(0,0,0,.45));--wb-drawer-shadow:var(--dsh-scrim,rgba(0,0,0,.6))}
 html[data-wb-mobile] :is(.wb_mAssembly,.wb_mScrim,.wb_mDrawer,.wb_mChat,.wb_mReview){box-sizing:border-box;font:16px/24px var(--wb-font);color:var(--wb-text)}
 html[data-wb-mobile] :is(.wb_mAssembly,.wb_mScrim,.wb_mDrawer,.wb_mChat,.wb_mReview) *{box-sizing:border-box}
 html[data-wb-mobile] :is(.wb_mAssembly,.wb_mScrim,.wb_mDrawer,.wb_mChat,.wb_mReview) :is(button,input,textarea){font:inherit;color:inherit}
@@ -938,6 +964,26 @@ html[data-wb-mobile] .wb_mRefIcon{display:grid;place-items:center;flex:none;widt
 html[data-wb-mobile] .wb_mAdd{display:flex;align-items:center;gap:12px;border:0;background:transparent;min-height:56px;padding:12px 16px;width:100%;text-align:left;color:var(--wb-accent-ink)!important;font-weight:600!important}
 html[data-wb-mobile] .wb_mChips{display:flex;flex-wrap:wrap;gap:8px;padding:2px 0}
 html[data-wb-mobile] .wb_mStyles{margin-top:12px}
+/* Mobile weak-question cards keep the full touch target and selection semantics. */
+html[data-wb-mobile] .wb_mWeakWrap{display:flex;flex-direction:column;gap:8px;margin:0 0 12px}
+html[data-wb-mobile] .wb_mWeakStat{font-size:14px;line-height:22px;color:var(--wb-dim2);font-weight:600}
+html[data-wb-mobile] .wb_mWeakList{display:flex;flex-direction:column;gap:8px;max-height:42dvh;overflow:auto;overscroll-behavior:contain}
+html[data-wb-mobile] .wb_mWeakRow{display:grid;grid-template-columns:44px minmax(0,1fr);align-items:start;gap:8px;min-height:56px;padding:8px 10px;border:1px solid var(--wb-line);border-radius:var(--dsh-r-s,10px);background:var(--dsh-card,#fff);text-align:left;touch-action:pan-y;user-select:none;cursor:pointer}
+html[data-wb-mobile] .wb_mWeakRow.is-on{border-color:var(--wb-accent-ink);background:var(--dsh-blue-50,#eef2fd)}
+html[data-wb-mobile] .wb_mWeakRow input{width:24px;height:24px;margin:2px 0 0;accent-color:var(--wb-accent);}
+html[data-wb-mobile] .wb_mWeakDetails{min-width:0;display:flex;flex-direction:column;gap:4px}
+html[data-wb-mobile] .wb_mWeakQuestion{display:flex;align-items:baseline;gap:8px;min-width:0}
+html[data-wb-mobile] .wb_mWeakQ{font-size:16px;line-height:24px;overflow-wrap:anywhere}
+html[data-wb-mobile] .wb_mWeakRoot{flex:none;font-size:13px;line-height:20px;color:var(--wb-dim2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:8em}
+html[data-wb-mobile] .wb_mWeakGaps{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}
+html[data-wb-mobile] .wb_mWeakGap{display:inline-flex;align-items:center;gap:3px;min-height:22px;padding:1px 5px;border-radius:6px;background:var(--wb-side);font-size:12px;line-height:18px;white-space:nowrap;text-decoration:none!important}
+html[data-wb-mobile] .wb_mWeakGapLabel{color:var(--wb-dim2)}
+html[data-wb-mobile] .wb_mWeakSource{color:var(--wb-dim2);font-size:11px;line-height:18px;overflow-wrap:anywhere}
+html[data-wb-mobile] .wb_mWeakEmpty{padding:16px;border:1px dashed var(--wb-line);border-radius:var(--dsh-r-s,10px);color:var(--wb-dim2);font-size:15px}
+/* Gap chips are inline-flex controls; keep inherited link styles from drawing marks between them. */
+html[data-wb-mobile] .wb_mWeakWrap,html[data-wb-mobile] .wb_mWeakList,html[data-wb-mobile] .wb_mWeakRow,html[data-wb-mobile] .wb_mWeakDetails,html[data-wb-mobile] .wb_mWeakQuestion,html[data-wb-mobile] .wb_mWeakQ,html[data-wb-mobile] .wb_mWeakRoot,html[data-wb-mobile] .wb_mWeakGaps,html[data-wb-mobile] .wb_mWeakSource,html[data-wb-mobile] .wb_mWeakEmpty{ text-decoration:none!important }
+html[data-wb-mobile] .wb_mWeakGap{ text-decoration:none!important }
+html[data-wb-mobile] .wb_mWeakGapLabel,html[data-wb-mobile] .wb_mWeakGap .wb_gapNum{ text-decoration:none!important }
 html[data-wb-mobile] .wb_mChip{position:relative;min-height:44px;max-width:100%;padding:7px 14px;border:1px solid var(--wb-line);border-radius:999px;background:var(--dsh-card,#fff);font-size:15px!important;overflow-wrap:anywhere}
 html[data-wb-mobile] .wb_mChip::after{content:'';position:absolute;inset:-2px 0}
 html[data-wb-mobile] .wb_mChip[aria-pressed=true]{border-color:var(--wb-accent-ink);background:var(--dsh-blue-50,#eef2fd);color:var(--wb-accent-ink)}
@@ -1072,115 +1118,6 @@ html[data-wb-mobile] [data-slot='conversation.composer.bar'] button[aria-label='
 html[data-wb-mobile] [data-slot='conversation.composer.bar'] button[aria-label='添加附件']::after{content:'＋';font-size:24px}
 html[data-wb-mobile] [data-slot='conversation.chat.node'] div[class*='_markdown']{font-size:16px;line-height:26px}
 html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
-/* Dark only: selected ink pills, state glyphs and native form controls need their own foreground.
-   Local shadow aliases retain the original light offsets and colors. */
-html[data-wb-mobile] body[data-ds-dark-theme]{color-scheme:dark;--wb-soft-shadow:var(--dsh-shadow-1,0 1px 2px rgba(0,0,0,.45));--wb-drawer-shadow:var(--dsh-scrim,rgba(0,0,0,.6))}
-html[data-wb-mobile] body[data-ds-dark-theme] .wb_mStyles .wb_mChip[aria-pressed=true]{color:var(--dsh-bg,#151517)}
-html[data-wb-mobile] body[data-ds-dark-theme] .wb_mProgress .wb_ticon[data-s=done]{color:var(--dsh-bg,#151517)}
-html[data-wb-mobile] body[data-ds-dark-theme] :is(.wb_mEditor textarea,.wb_mRename){background:var(--dsh-card,#232324);color:var(--wb-text)}
-html[data-wb-mobile] body[data-ds-dark-theme] .wb_mSearch input{color:var(--wb-text)}
-html[data-wb-mobile] body[data-ds-dark-theme] :is(.wb_mRename,.wb_mSearch input){outline-color:var(--wb-accent-ink)}
-html[data-wb-mobile] body[data-ds-dark-theme] :is(input,textarea)::placeholder{color:var(--wb-dim2);opacity:1}
-html[data-wb-mobile] body[data-ds-dark-theme] .wb_mClient>.wb_mRadio{border-color:var(--dsh-ink-3,#adb2b8)}
-html[data-wb-mobile] body[data-ds-dark-theme] .wb_mClient>.wb_mRadio[data-on='1']{border-color:var(--wb-accent-ink)}
-html[data-wb-mobile] body[data-ds-dark-theme] .wb_mStatus{background:var(--dsh-ink-3,#adb2b8)}
-html[data-wb-mobile] body[data-ds-dark-theme] .wb_mStatus[data-tone=blue]{background:var(--wb-accent-ink)}
-html[data-wb-mobile] body[data-ds-dark-theme] .wb_mStatus[data-tone=orange]{background:var(--dsh-orange,#ff6a1f)}
-html[data-wb-mobile] body[data-ds-dark-theme] .wb_mStatus[data-tone=green]{background:var(--dsh-green,#3ecf8e)}
-html[data-wb-mobile] body[data-ds-dark-theme] .wb_mPrimary:disabled{color:var(--dsh-on-accent,#fff)!important;opacity:1}
-html[data-wb-mobile] body[data-ds-dark-theme] [data-slot='conversation.composer.bar'] button{color:var(--wb-text)}
-html[data-wb-mobile] body[data-ds-dark-theme] [data-slot='conversation.composer.bar'] [class*='_primary']{color:var(--dsh-on-accent,#fff);opacity:1}
-html[data-wb-mobile] body[data-ds-dark-theme] .wb_mChip{background:var(--dsh-card,var(--wb-elev));border-color:var(--wb-line);color:var(--wb-text)}
-html[data-wb-mobile] body[data-ds-dark-theme] .wb_mChip[aria-pressed=true]{background:var(--wb-accent-bg);border-color:var(--wb-accent-ink);color:var(--wb-accent-ink)}
-html[data-wb-mobile][data-dsh-theme="dark"] .wb_mChip{background:var(--dsh-card,#232324);border-color:var(--wb-line);color:var(--wb-text)}
-html[data-wb-mobile][data-dsh-theme="dark"] .wb_mChip[aria-pressed=true]{background:var(--dsh-blue-50,#1d2a4d);border-color:var(--wb-accent-ink);color:var(--wb-accent-ink)}
-html[data-wb-mobile][data-dsh-theme="dark"] .wb_mWeakRow{background:var(--dsh-card,#232324);border-color:var(--wb-line)}
-html[data-wb-mobile][data-dsh-theme="dark"] .wb_mWeakRow.is-on{background:var(--dsh-blue-50,#1d2a4d);border-color:var(--wb-accent-ink)}
-html[data-wb-mobile][data-dsh-theme="dark"] .wb_mWeakGap{background:var(--dsh-sunken,#1b1b1c)}
-html[data-dsh-theme="dark"] .wb_mChip{background:var(--wb-elev);border-color:var(--wb-line);color:var(--wb-text)}
-html[data-dsh-theme="dark"] .wb_mChip[aria-pressed=true]{background:var(--wb-accent-bg);border-color:var(--wb-accent-ink);color:var(--wb-accent-ink)}
-html[data-dsh-theme="dark"] .wb_mWeakRow{background:var(--wb-elev);border-color:var(--wb-line)}
-html[data-dsh-theme="dark"] .wb_mWeakRow.is-on{background:var(--wb-accent-bg);border-color:var(--wb-accent-ink)}
-html[data-dsh-theme="dark"] .wb_mWeakGap{background:var(--wb-side)}
-html[data-dsh-theme="dark"] :is(.wb_mContext,.wb_mSegment button[aria-pressed=true],.wb_mTopic,.wb_mEmpty,.wb_mReferences,.wb_mExtra,.wb_mSheet,.wb_mEditor,.wb_mArticle,.wb_mReviewItem,.wb_mChecklist,.wb_mClient,.wb_mSession[aria-current=true],.wb_mPinned){background:var(--wb-elev);color:var(--wb-text)}
-html[data-dsh-theme="dark"] .wb_mSegment{background:var(--wb-side)}
-html[data-dsh-theme="dark"] .wb_mAction{background:var(--wb-bg);color:var(--wb-text)}
-html[data-dsh-theme="dark"] .wb_mRefIcon{background:var(--wb-side)}
-html[data-dsh-theme="dark"][data-wb-mobile] [data-slot='main.conversation']{background:var(--wb-elev);color:var(--wb-text)}
-`;
-
-		CSS += `
-
-/* Mobile weak-question cards keep the full touch target and selection semantics. */
-html[data-wb-mobile] .wb_mWeakWrap{display:flex;flex-direction:column;gap:8px;margin:0 0 12px}
-html[data-wb-mobile] .wb_mWeakStat{font-size:14px;line-height:22px;color:var(--wb-dim2);font-weight:600}
-html[data-wb-mobile] .wb_mWeakList{display:flex;flex-direction:column;gap:8px;max-height:42dvh;overflow:auto;overscroll-behavior:contain}
-html[data-wb-mobile] .wb_mWeakRow{display:grid;grid-template-columns:44px minmax(0,1fr);align-items:start;gap:8px;min-height:56px;padding:8px 10px;border:1px solid var(--wb-line);border-radius:var(--dsh-r-s,10px);background:var(--dsh-card,#fff);text-align:left;touch-action:pan-y;user-select:none;cursor:pointer}
-html[data-wb-mobile] .wb_mWeakRow.is-on{border-color:var(--wb-accent-ink);background:var(--dsh-blue-50,#eef2fd)}
-html[data-wb-mobile] .wb_mWeakRow input{width:24px;height:24px;margin:2px 0 0;accent-color:var(--wb-accent);}
-html[data-wb-mobile] .wb_mWeakDetails{min-width:0;display:flex;flex-direction:column;gap:4px}
-html[data-wb-mobile] .wb_mWeakQuestion{display:flex;align-items:baseline;gap:8px;min-width:0}
-html[data-wb-mobile] .wb_mWeakQ{font-size:16px;line-height:24px;overflow-wrap:anywhere}
-html[data-wb-mobile] .wb_mWeakRoot{flex:none;font-size:13px;line-height:20px;color:var(--wb-dim2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:8em}
-html[data-wb-mobile] .wb_mWeakGaps{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}
-html[data-wb-mobile] .wb_mWeakGap{display:inline-flex;align-items:center;gap:3px;min-height:22px;padding:1px 5px;border-radius:6px;background:var(--wb-side);font-size:12px;line-height:18px;white-space:nowrap}
-html[data-wb-mobile] .wb_mWeakGapLabel{color:var(--wb-dim2)}
-html[data-wb-mobile] .wb_mWeakSource{color:var(--wb-dim2);font-size:11px;line-height:18px;overflow-wrap:anywhere}
-html[data-wb-mobile] .wb_mWeakEmpty{padding:16px;border:1px dashed var(--wb-line);border-radius:var(--dsh-r-s,10px);color:var(--wb-dim2);font-size:15px}
-
-
-/* Restored desktop dark-theme overrides from the merged workbench skin. */
-body[data-ds-dark-theme] .wb_nv{background:var(--dsw-specific-sidebar-fill,#1b1b1c);border-color:var(--dsw-alias-border-l2,#ffffff1f);color:var(--dsw-alias-label-primary,#f9fafb);color-scheme:dark;}
-body[data-ds-dark-theme] .wb_nvBrandT,body[data-ds-dark-theme] .wb_nvFootName{color:var(--dsw-alias-label-primary,#f9fafb);}
-body[data-ds-dark-theme] .wb_nvNew{background:var(--wb-accent);border-color:var(--wb-accent);color:var(--dsh-on-accent,#fff);}
-body[data-ds-dark-theme] .wb_nvSearch{background:var(--dsw-alias-bg-layer-1,#232324);border-color:var(--dsw-alias-border-l2,#ffffff1f);color:var(--dsw-alias-label-primary,#f9fafb);}
-body[data-ds-dark-theme] .wb_nvSearch:focus-visible{border-color:var(--wb-accent-ink);}
-body[data-ds-dark-theme] .wb_nvSearch::placeholder{color:var(--dsw-alias-label-tertiary,#adb2b8);opacity:1;}
-body[data-ds-dark-theme] .wb_nvHint,body[data-ds-dark-theme] .wb_nvFootSub{color:var(--dsw-alias-label-tertiary,#adb2b8);}
-body[data-ds-dark-theme] .wb_nvGroupName,body[data-ds-dark-theme] .wb_nvItem{color:var(--dsw-alias-label-secondary,#cfd3d6);}
-body[data-ds-dark-theme] .wb_nvGroupName:hover,body[data-ds-dark-theme] .wb_nvItem:hover{background:var(--dsw-specific-sidebar-nav-item-hover,#2c2c2e);color:var(--dsw-alias-label-primary,#f9fafb);}
-body[data-ds-dark-theme] .wb_nvCur,body[data-ds-dark-theme] .wb_nvItem.wb_nvCur{background:var(--dsw-specific-sidebar-nav-item-active,#43454a);color:var(--dsw-alias-label-primary,#f9fafb);}
-body[data-ds-dark-theme] .wb_nvFoot{border-color:var(--dsw-alias-border-l2,#ffffff1f);}
-body[data-ds-dark-theme] .wb_pkRow,body[data-ds-dark-theme] .wb_pkChip,body[data-ds-dark-theme] .wb_pkAll{background:var(--wb-elev);border-color:var(--wb-line);color:var(--wb-text);}
-body[data-ds-dark-theme] .wb_pkRow{box-shadow:var(--wb-shadow);}
-body[data-ds-dark-theme] .wb_pkK{color:var(--wb-dim);}
-body[data-ds-dark-theme] .wb_pkChip.is-on{background:var(--wb-accent-bg);border-color:var(--wb-accent-ink);color:var(--wb-accent-ink);}
-body[data-ds-dark-theme] .wb_pkDot{border-color:var(--wb-line);}
-body[data-ds-dark-theme] .wb_pkDot.red{background:var(--wb-bad-bg);}
-body[data-ds-dark-theme] .wb_pkDot.red::after{background:var(--wb-bad);}
-body[data-ds-dark-theme] .wb_pkDot.green{background:var(--wb-ok-bg);}
-body[data-ds-dark-theme] .wb_pkDot.green::after{background:var(--wb-ok);}
-body[data-ds-dark-theme] .wb_ticon[data-s='done']{background:var(--wb-ok);color:var(--wb-bg);}
-body[data-ds-dark-theme] .wb_ticon[data-s='run']{background:var(--wb-elev);color:var(--wb-warn);border-color:var(--wb-warn);}
-body[data-ds-dark-theme] .wb_ticon[data-s='wait']{background:var(--wb-elev);color:var(--wb-dim2);border-color:var(--wb-dim2);}
-body[data-ds-dark-theme] .wb_rt,body[data-ds-dark-theme] .wb_rv{background:var(--wb-bg);color:var(--wb-text);color-scheme:dark;}
-body[data-ds-dark-theme] .wb_rtSub,body[data-ds-dark-theme] .wb_rtEmpty,body[data-ds-dark-theme] .wb_rvChev,body[data-ds-dark-theme] .wb_rvHint,body[data-ds-dark-theme] .wb_rvEmpty2,body[data-ds-dark-theme] .wb_rvNum,body[data-ds-dark-theme] .wb_rv .wb_reviewItemMeta,body[data-ds-dark-theme] .wb_rfHint,body[data-ds-dark-theme] .wb_riNo{color:var(--wb-dim2);}
-body[data-ds-dark-theme] .wb_rtCols,body[data-ds-dark-theme] .wb_rvCols,body[data-ds-dark-theme] .wb_rvDoneSeg,body[data-ds-dark-theme] .wb_rvFoot{border-color:var(--wb-line);}
-body[data-ds-dark-theme] .wb_rvDot{color:var(--wb-bad);}
-body[data-ds-dark-theme] .wb_rvDot.is-ok{color:var(--wb-ok);}
-body[data-ds-dark-theme] .wb_rvState,body[data-ds-dark-theme] .wb_rvCount,body[data-ds-dark-theme] .wb_rvIdx{color:var(--wb-text);}
-body[data-ds-dark-theme] .wb_rvSel{background:var(--wb-elev2);color:var(--wb-text);}
-body[data-ds-dark-theme] .wb_rvCheck,body[data-ds-dark-theme] .wb_rvConfirm{background:var(--wb-elev);border-color:var(--wb-line);color:var(--wb-text);}
-body[data-ds-dark-theme] .wb_rvProg{color:var(--wb-dim);border-color:var(--wb-line);}
-body[data-ds-dark-theme] .wb_rv .wb_reviewMain{background:var(--wb-bg);}
-body[data-ds-dark-theme] .wb_rv .wb_reviewList,body[data-ds-dark-theme] .wb_rvSep{background:var(--wb-side);border-color:var(--wb-line);color:var(--wb-dim2);}
-body[data-ds-dark-theme] .wb_ri{color:var(--wb-text);border-color:var(--wb-line-soft);}
-body[data-ds-dark-theme] .wb_ri:hover{background:var(--wb-elev2);color:var(--wb-text);}
-body[data-ds-dark-theme] .wb_ri.picked,body[data-ds-dark-theme] .wb_rv .wb_reviewItem[data-on='1']{background:var(--wb-accent-bg);border-color:var(--wb-accent-ink);}
-body[data-ds-dark-theme] .wb_ri.is-on{background:var(--wb-elev2);color:var(--wb-text);box-shadow:inset 2px 0 0 var(--wb-accent-ink);}
-body[data-ds-dark-theme] .wb_ri.done{background:var(--wb-ok-bg);color:var(--wb-ok);}
-body[data-ds-dark-theme] .wb_ri.done .wb_riNo,body[data-ds-dark-theme] .wb_ri.done .wb_riT{color:var(--wb-ok);}
-body[data-ds-dark-theme] .wb_rvConfirmAll{background:var(--wb-accent);color:var(--dsh-on-accent,#fff);}
-body[data-ds-dark-theme] .wb_root,body[data-ds-dark-theme] .wb_pkRow{color-scheme:dark;}
-body[data-ds-dark-theme] .wb_root :is(input,textarea)::placeholder{color:var(--wb-dim2);opacity:1;}
-body[data-ds-dark-theme] :is(.wb_mini,.wb_rvCheck,.wb_rvConfirm):disabled{opacity:1;background:var(--wb-elev2);color:var(--wb-dim2);}
-body[data-ds-dark-theme] :is(.wb_send,.wb_rvConfirmAll):disabled{opacity:1;background:var(--dsh-ink-4,#61666b);color:var(--dsh-on-accent,#fff);}
-body[data-ds-dark-theme] .wb_rvHead:hover .wb_rvSel{color:var(--wb-accent-ink);}
-body[data-ds-dark-theme] .wb_rvChev.is-open{color:var(--wb-accent-ink);}
-body[data-ds-dark-theme] .wb_pkChip.is-view{border-color:var(--wb-accent-ink);color:var(--wb-accent-ink);background:var(--wb-accent-bg);}
-body[data-ds-dark-theme] .wb_pkHcT{color:var(--wb-dim);}
-body[data-ds-dark-theme] .wb_pkDot.warn{background:var(--wb-warn);}
-body[data-ds-dark-theme] .wb_rvMd mark.wbHcMk{background:var(--wb-bad-bg);color:var(--wb-bad);}
 `;
 		/* The official client-package CSS pattern: one tag, keyed by
 		 * data-plugin-css, injected from apply() — HMR removes

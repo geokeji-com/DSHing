@@ -46,7 +46,44 @@ window.__ModuleLoader__.load({
 		 * user's dialogs. If the blur is ever wanted back, it needs the popovers
 		 * moved out of the sidebar's DOM first; it cannot be won with CSS here.
 		 * ------------------------------------------------------------------ */
+
+		/* Keep the host harness light even when the OS or saved Appearance says dark. */
+		function forceLightTheme() {
+			if (typeof document === "undefined" || !document.documentElement) return;
+			var root = document.documentElement;
+			var observer = null;
+			var observerOptions = { attributes: true, attributeFilter: ["data-dsh-theme", "data-ds-dark-theme", "class", "style"] };
+			function normalize() {
+				if (observer) observer.disconnect();
+				var body = document.body;
+				root.setAttribute("data-dsh-theme", "light");
+				root.removeAttribute("data-ds-dark-theme");
+				root.classList.remove("dark");
+				if (root.style.getPropertyValue("color-scheme") !== "light" || root.style.getPropertyPriority("color-scheme") !== "important") root.style.setProperty("color-scheme", "light", "important");
+				if (body) {
+					if (body.hasAttribute("data-dsh-theme") && body.getAttribute("data-dsh-theme") !== "light") body.setAttribute("data-dsh-theme", "light");
+					body.removeAttribute("data-ds-dark-theme");
+					body.classList.remove("dark");
+					if (body.style.getPropertyValue("color-scheme") !== "light" || body.style.getPropertyPriority("color-scheme") !== "important") body.style.setProperty("color-scheme", "light", "important");
+				}
+				if (observer) {
+					observer.observe(root, observerOptions);
+					if (body) observer.observe(body, observerOptions);
+				}
+			}
+			normalize();
+			if (window.__DSH_FORCE_LIGHT_THEME__ || typeof MutationObserver !== "function") return;
+			window.__DSH_FORCE_LIGHT_THEME__ = true;
+			observer = new MutationObserver(normalize);
+			observer.observe(root, observerOptions);
+			if (document.body) observer.observe(document.body, observerOptions);
+			window.__DSH_FORCE_LIGHT_THEME_OBSERVER__ = observer;
+		}
+		forceLightTheme();
+
 		var SIDEBAR_CSS = [
+			"html,body{color-scheme:light!important;}",
+			"[data-theme-toggle],[data-theme-switch],[data-theme-picker],button[aria-label*=\"主题\"],button[title*=\"主题\"]{display:none!important;}",
 			"body[data-dsh-bg-glass] .hHd-Xa_root {",
 			"  background-color: var(--dsw-specific-input-major);",
 			"  background-image: linear-gradient(180deg,",
