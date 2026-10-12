@@ -28,13 +28,17 @@ const ROUTES = [
   '/api/workbench/skills',
   '/api/workbench/mcp',
   '/api/workbench/task-meta',
-  '/api/workbench/session-client',
-  '/api/workbench/client-map',
-  '/api/workbench/assign-client-group',
   '/api/workbench/task-status',
   '/api/workbench/drafts',
   '/api/workbench/draft',
   '/api/workbench/confirm-draft',
+  '/api/workbench/check',
+  '/api/workbench/assign-client-group',
+  '/api/workbench/client-map',
+  /* 薄弱问句（2026-10-10）：宿主带密钥调外部接口，客户端只拿归一化结果。 */
+  '/api/workbench/weak-dir',
+  '/api/workbench/weak-gaps',
+  '/api/workbench/weak-raw',
 ]
 
 /** 默认工作区：装配台发起的会话都落在这里。目录不存在就建。
