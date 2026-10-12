@@ -3,7 +3,7 @@
  * npx playwright install chromium
  * node test/mobile-screens.mjs [output-directory]
  * WB_BASELINE_REF overrides the pre-polish desktop comparison; WB_LIGHT_REF
- * overrides the pre-dark mobile/review comparison. All browser routes are in memory.
+ * overrides the earlier mobile/review comparison. All browser routes are in memory.
  */
 import { createRequire } from 'node:module'
 import { readFileSync, mkdirSync, writeFileSync } from 'node:fs'
@@ -12,7 +12,7 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import assert from 'node:assert/strict'
 import { isDeepStrictEqual, promisify } from 'node:util'
-import { darkPalette, auditDarkPage } from './theme-audit.mjs'
+import { forceLightPalette, auditLightPage } from './theme-audit.mjs'
 const require = createRequire(import.meta.url)
 const { chromium } = require('playwright')
 const { build } = require('esbuild')
@@ -195,21 +195,27 @@ async function snapshot(page) {
  return page.evaluate(()=>{
   const tree=document.documentElement.cloneNode(true);tree.querySelectorAll('style,script,head').forEach(el=>el.remove());
   // DOM comparison ignores only semantically empty styles and declaration order.
-  for(const el of [tree,...tree.querySelectorAll('[style]')]){if(el.hasAttribute('style')){const s=el.style,keys=Array.from(s).sort();if(!keys.length)el.removeAttribute('style');else el.setAttribute('style',keys.map(k=>k+':'+s.getPropertyValue(k)+(s.getPropertyPriority(k)?' !important':'')).join(';'))}}
+  for(const el of [tree,...tree.querySelectorAll('[style]')]){
+   el.removeAttribute('data-dsh-theme');
+   if(el.hasAttribute('style')){el.style.removeProperty('color-scheme');const s=el.style,keys=Array.from(s).sort();if(!keys.length)el.removeAttribute('style');else el.setAttribute('style',keys.map(k=>k+':'+s.getPropertyValue(k)+(s.getPropertyPriority(k)?' !important':'')).join(';'))}
+  }
   const elements=Array.from(document.body.querySelectorAll('*')).filter(el=>!['STYLE','SCRIPT'].includes(el.tagName));
-  return {dom:tree.outerHTML,elements:elements.map(el=>{const s=getComputedStyle(el),r=el.getBoundingClientRect();return {tag:el.tagName,class:el.className,rect:[r.x,r.y,r.width,r.height],styles:Object.fromEntries(Array.from(s).filter(k=>!k.startsWith('--')).map(k=>[k,s.getPropertyValue(k)]))}})};
+  return {dom:tree.outerHTML,elements:elements.map(el=>{const s=getComputedStyle(el),r=el.getBoundingClientRect();return {tag:el.tagName,class:el.className,rect:[r.x,r.y,r.width,r.height],styles:Object.fromEntries(Array.from(s).filter(k=>!k.startsWith('--')&&k!=='color-scheme').map(k=>[k,s.getPropertyValue(k)]))}})};
  })
 }
-async function dark(page) {
- await page.addStyleTag({content:darkPalette})
- const station=await page.evaluate(()=>{const station=document.documentElement.getAttribute('data-dsh-station');document.documentElement.setAttribute('data-dsh-station','workbench');document.body.setAttribute('data-ds-dark-theme','');return station})
+async function forceLight(page) {
+ await page.emulateMedia({colorScheme:'dark'})
+ await page.addStyleTag({content:forceLightPalette})
+ const station=await page.evaluate(()=>{const station=document.documentElement.getAttribute('data-dsh-station');document.documentElement.setAttribute('data-dsh-station','workbench');document.documentElement.setAttribute('data-dsh-theme','dark');document.documentElement.classList.add('dark');document.body.setAttribute('data-ds-dark-theme','');return station})
  await settle(page)
+ const state=await page.evaluate(()=>({theme:document.documentElement.getAttribute('data-dsh-theme'),rootDark:document.documentElement.classList.contains('dark')||document.documentElement.hasAttribute('data-ds-dark-theme'),bodyDark:document.body.classList.contains('dark')||document.body.hasAttribute('data-ds-dark-theme'),scheme:getComputedStyle(document.body).colorScheme}))
+ assert.deepEqual(state,{theme:'light',rootDark:false,bodyDark:false,scheme:'light'})
  return station
 }
-async function inspectDark(page,name) {
+async function inspectLight(page,name) {
  await settle(page);await noOverflow(page);await screenshot(page,name)
- contrast.push(await auditDarkPage(page,name))
- writeFileSync(out+'/contrast.json',JSON.stringify(contrast,null,2))
+ contrast.push(await auditLightPage(page,name))
+ writeFileSync(out+'/light-theme.json',JSON.stringify(contrast,null,2))
 }
 async function lightStates(page,mobile) {
  const states={}
@@ -314,7 +320,7 @@ try {
   }
   writeFileSync(out+'/desktop-'+width+'.json',JSON.stringify(pair));assertSnapshotsEqual(pair[1],pair[0],'desktop baseline differs at '+width,'desktop-'+width+'-diff.json');desktop.push({width,states:['compose','chat'],nodes:pair[0].compose.elements.length+pair[0].chat.elements.length,differences:0});pass(width+': desktop equals baseline DOM/styles/geometry')
  }
- // Compare every standard computed property/rectangle with the immutable pre-dark source,
+ // Compare every standard computed property/rectangle with the immutable light source,
  // including mobile surfaces absent from the older desktop regression baseline.
  for(const width of [393,1440]){
   const pair=[]
@@ -324,50 +330,50 @@ try {
   }
   writeFileSync(out+'/light-'+width+'.json',JSON.stringify(pair))
   assertSnapshotsEqual(pair[1],pair[0],'light identity differs at '+width,'light-'+width+'-diff.json')
-  light.push({width,states:Object.keys(pair[0]),differences:0});pass(width+': light identity against pre-dark source')
+  light.push({width,states:Object.keys(pair[0]),differences:0});pass(width+': light identity against earlier source')
  }
  // The fixture uses real components for review and PickBar as well as assembly/chat.
  const d=await newPage({viewport:{width:1440,height:900}})
  await d.goto(base);await d.locator('.wb_nvItem').waitFor();await d.waitForTimeout(150)
- const lightBefore=await snapshot(d), desktopStation=await dark(d);await inspectDark(d,'dark-desktop-assembly-1440')
- assert.equal(await d.locator('.wb_nv').evaluate(el=>getComputedStyle(el).backgroundColor),'rgb(27, 27, 28)')
+ const lightBefore=await snapshot(d), desktopStation=await forceLight(d);await inspectLight(d,'light-forced-desktop-assembly-1440')
+ assert.equal(await d.locator('html').getAttribute('data-dsh-theme'),'light');assert.equal(await d.locator('body').getAttribute('data-ds-dark-theme'),null);assert.equal(await d.locator('body').evaluate(el=>getComputedStyle(el).colorScheme),'light')
  await d.evaluate(station=>{document.body.removeAttribute('data-ds-dark-theme');if(station===null)document.documentElement.removeAttribute('data-dsh-station');else document.documentElement.setAttribute('data-dsh-station',station)},desktopStation)
  assertSnapshotsEqual(await snapshot(d),lightBefore,'desktop live toggle restores light DOM/styles/geometry','desktop-live-toggle-diff.json')
- pass('desktop live dark/light switch without reload');await dark(d)
- await d.locator('.wb_nvItem').hover();await inspectDark(d,'dark-desktop-sidebar-hover-1440')
- await d.locator('.wb_nvItem').click();await d.locator('.wb_taskbar, .wb_task').waitFor();await inspectDark(d,'dark-desktop-chat-1440')
- await d.evaluate(()=>fixtureShow('review'));await d.locator('.wb_ri').waitFor();await inspectDark(d,'dark-desktop-review-empty-1440')
- await d.locator('.wb_pkChip').click();await d.locator('.wb_ri').click();await d.getByText('Fixture article body',{exact:true}).waitFor();await inspectDark(d,'dark-desktop-review-1440')
- await d.goto(base+'/?review&ready');await d.locator('.wb_ri.done').waitFor();await dark(d);await d.locator('.wb_ri.done').click();await d.getByText('Fixture article body',{exact:true}).waitFor();await inspectDark(d,'dark-desktop-review-done-1440');await d.close()
+ pass('desktop live force-light without reload');await forceLight(d)
+ await d.locator('.wb_nvItem').hover();await inspectLight(d,'light-forced-desktop-sidebar-hover-1440')
+ await d.locator('.wb_nvItem').click();await d.locator('.wb_taskbar, .wb_task').waitFor();await inspectLight(d,'light-forced-desktop-chat-1440')
+ await d.evaluate(()=>fixtureShow('review'));await d.locator('.wb_ri').waitFor();await inspectLight(d,'light-forced-desktop-review-empty-1440')
+ await d.locator('.wb_pkChip').click();await d.locator('.wb_ri').click();await d.getByText('Fixture article body',{exact:true}).waitFor();await inspectLight(d,'light-forced-desktop-review-1440')
+ await d.goto(base+'/?review&ready');await d.locator('.wb_ri.done').waitFor();await forceLight(d);await d.locator('.wb_ri.done').click();await d.getByText('Fixture article body',{exact:true}).waitFor();await inspectLight(d,'light-forced-desktop-review-done-1440');await d.close()
  const m=await newPage({viewport:{width:393,height:852},deviceScaleFactor:3,isMobile:true,hasTouch:true})
  await m.goto(base);await m.locator('.wb_mStart:not(:disabled)').waitFor();await m.waitForTimeout(150)
- const mobileLight=await snapshot(m), mobileStation=await dark(m);await inspectDark(m,'dark-mobile-assembly-393')
+ const mobileLight=await snapshot(m), mobileStation=await forceLight(m);await inspectLight(m,'light-forced-mobile-assembly-393')
  await m.evaluate(station=>{document.body.removeAttribute('data-ds-dark-theme');if(station===null)document.documentElement.removeAttribute('data-dsh-station');else document.documentElement.setAttribute('data-dsh-station',station)},mobileStation)
  assertSnapshotsEqual(await snapshot(m),mobileLight,'mobile live toggle restores light DOM/styles/geometry','mobile-live-toggle-diff.json')
- pass('mobile live dark/light switch without reload');await dark(m)
- await m.locator('.wb_mStyles .wb_mChip').first().click();await inspectDark(m,'dark-mobile-selected-style-393')
- await m.locator('.wb_mAdd').click();await inspectDark(m,'dark-mobile-reference-editor-393')
- await m.getByRole('textbox',{name:'参考链接或正文'}).fill('https://example.test/reference');await m.getByRole('button',{name:'完成',exact:true}).click();await inspectDark(m,'dark-mobile-reference-393')
- await m.getByRole('button',{name:/用模板/}).click();await m.getByRole('button',{name:'Fixture personal template',exact:true}).click();await inspectDark(m,'dark-mobile-templates-393')
- await m.locator('.wb_mExtra').click();await inspectDark(m,'dark-mobile-extra-editor-393');await m.getByRole('button',{name:'完成',exact:true}).click()
- await m.getByRole('button',{name:'自己输入',exact:true}).click();await inspectDark(m,'dark-mobile-topic-393')
- await m.locator('.wb_mContext').click();await inspectDark(m,'dark-mobile-sheet-393');await m.getByRole('button',{name:'确定',exact:true}).click()
- await m.getByRole('button',{name:'打开会话抽屉'}).click();await inspectDark(m,'dark-mobile-drawer-393')
- await m.locator('.wb_mSession').click();await m.getByRole('button',{name:/去审核/}).waitFor();await inspectDark(m,'dark-mobile-chat-393')
- await m.locator('.wb_mProgress summary').click();await inspectDark(m,'dark-mobile-progress-393');await m.locator('.wb_mProgress summary').click()
- await m.getByRole('button',{name:'会话更多操作'}).click();await inspectDark(m,'dark-mobile-menu-393');await m.getByRole('button',{name:'重命名',exact:true}).click();await inspectDark(m,'dark-mobile-rename-393');await m.getByRole('button',{name:'关闭',exact:true}).click()
- await m.getByRole('button',{name:/去审核/}).click();await m.locator('.wb_mReviewItem').waitFor();await inspectDark(m,'dark-mobile-review-393')
- await m.locator('.wb_mReviewItem').click();await m.getByText('Fixture article body',{exact:true}).waitFor();await inspectDark(m,'dark-mobile-article-393')
- await m.goto(base+'/?chat&wait');await m.getByRole('button',{name:/去审核/}).waitFor();await dark(m);await m.locator('.wb_mProgress summary').click();await inspectDark(m,'dark-mobile-progress-wait-393')
- await m.goto(base+'/?chat&ready');await m.getByRole('button',{name:/查看文章/}).waitFor();await dark(m);await inspectDark(m,'dark-mobile-chat-ready-393')
- await m.goto(base+'/?empty');await m.getByText('还没有分配给你的客户',{exact:true}).waitFor();await dark(m);await inspectDark(m,'dark-mobile-disabled-393')
- await m.locator('.wb_mContext').click();await inspectDark(m,'dark-mobile-empty-sheet-393')
+ pass('mobile live force-light without reload');await forceLight(m)
+ await m.locator('.wb_mStyles .wb_mChip').first().click();await inspectLight(m,'light-forced-mobile-selected-style-393')
+ await m.locator('.wb_mAdd').click();await inspectLight(m,'light-forced-mobile-reference-editor-393')
+ await m.getByRole('textbox',{name:'参考链接或正文'}).fill('https://example.test/reference');await m.getByRole('button',{name:'完成',exact:true}).click();await inspectLight(m,'light-forced-mobile-reference-393')
+ await m.getByRole('button',{name:/用模板/}).click();await m.getByRole('button',{name:'Fixture personal template',exact:true}).click();await inspectLight(m,'light-forced-mobile-templates-393')
+ await m.locator('.wb_mExtra').click();await inspectLight(m,'light-forced-mobile-extra-editor-393');await m.getByRole('button',{name:'完成',exact:true}).click()
+ await m.getByRole('button',{name:'自己输入',exact:true}).click();await inspectLight(m,'light-forced-mobile-topic-393')
+ await m.locator('.wb_mContext').click();await inspectLight(m,'light-forced-mobile-sheet-393');await m.getByRole('button',{name:'确定',exact:true}).click()
+ await m.getByRole('button',{name:'打开会话抽屉'}).click();await inspectLight(m,'light-forced-mobile-drawer-393')
+ await m.locator('.wb_mSession').click();await m.getByRole('button',{name:/去审核/}).waitFor();await inspectLight(m,'light-forced-mobile-chat-393')
+ await m.locator('.wb_mProgress summary').click();await inspectLight(m,'light-forced-mobile-progress-393');await m.locator('.wb_mProgress summary').click()
+ await m.getByRole('button',{name:'会话更多操作'}).click();await inspectLight(m,'light-forced-mobile-menu-393');await m.getByRole('button',{name:'重命名',exact:true}).click();await inspectLight(m,'light-forced-mobile-rename-393');await m.getByRole('button',{name:'关闭',exact:true}).click()
+ await m.getByRole('button',{name:/去审核/}).click();await m.locator('.wb_mReviewItem').waitFor();await inspectLight(m,'light-forced-mobile-review-393')
+ await m.locator('.wb_mReviewItem').click();await m.getByText('Fixture article body',{exact:true}).waitFor();await inspectLight(m,'light-forced-mobile-article-393')
+ await m.goto(base+'/?chat&wait');await m.getByRole('button',{name:/去审核/}).waitFor();await forceLight(m);await m.locator('.wb_mProgress summary').click();await inspectLight(m,'light-forced-mobile-progress-wait-393')
+ await m.goto(base+'/?chat&ready');await m.getByRole('button',{name:/查看文章/}).waitFor();await forceLight(m);await inspectLight(m,'light-forced-mobile-chat-ready-393')
+ await m.goto(base+'/?empty');await m.getByText('还没有分配给你的客户',{exact:true}).waitFor();await forceLight(m);await inspectLight(m,'light-forced-mobile-disabled-393')
+ await m.locator('.wb_mContext').click();await inspectLight(m,'light-forced-mobile-empty-sheet-393')
  assert.deepEqual(await m.evaluate(()=>fixtureWrites),[]);await m.close()
- const violations=contrast.flatMap(r=>[...r.failures,...r.nearWhite].map(v=>({page:r.name,...v})))
- assert.deepEqual(violations,[],'dark contrast/near-white violations; see contrast.json')
- pass('dark text, placeholders, state indicators and surface audit: '+contrast.length+' pages')
+ const violations=contrast.flatMap(r=>r.failures.map(v=>({page:r.name,...v})))
+ assert.deepEqual(violations,[],'force-light violations; see light-theme.json')
+ pass('forced-light theme audit: '+contrast.length+' pages')
  assert.deepEqual(errors,[])
- const report={passed:results.length,skipped,errors,mobileDPR:3,baselineRef,lightRef,light,contrast:contrast.map(({name,checked,states,failures,nearWhite,intentional})=>({name,texts:checked.length,states:states.length,failures,nearWhite,intentional})),screenshots:out,checks:results,metrics,desktop}
+ const report={passed:results.length,skipped,errors,mobileDPR:3,baselineRef,lightRef,light,lightTheme:contrast,screenshots:out,checks:results,metrics,desktop}
  writeFileSync(out+'/run-status.json',JSON.stringify({status:'passed'},null,2));writeFileSync(out+'/results.json',JSON.stringify(report,null,2));console.log(JSON.stringify({passed:results.length,skipped,errors,desktop,screenshots:out}))
 } catch(error) {
  writeFileSync(out+'/run-status.json',JSON.stringify({status:'failed',message:error.message,completed:results,screenshots:out},null,2));throw error
