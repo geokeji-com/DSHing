@@ -1,0 +1,22 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+
+const source = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+
+test('review panel counts writes from both articles MCP server names', () => {
+  const m = source.match(/var WB_WRITE_TOOL_RE = (\/.+\/);/)
+  assert.ok(m, 'shared write-tool regex exists')
+  const re = eval(m[1])
+  assert.ok(re.test('mcp__articles__write_article'))
+  assert.ok(re.test('mcp__sora-articles__write_article'))
+  assert.ok(!re.test('mcp__articles__read_article'))
+  assert.equal(source.includes('call.name === "mcp__sora-articles__write_article"'), false)
+})
+
+test('task bar has an explicit 文章审核 open/refresh button wired to the review tab', () => {
+  assert.match(source, /文章审核 ›/)
+  assert.match(source, /openTab\("wb-review", \{ params: \{ client: meta\.client, meta: metaId \} \}\)/)
+  assert.match(source, /wb:review-refresh/)
+  assert.match(source, /\[client, at, writeCount, rvTick\]/)
+})
