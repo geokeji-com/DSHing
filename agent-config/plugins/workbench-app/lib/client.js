@@ -202,13 +202,21 @@ window.__ModuleLoader__.load({
 						: h('div',{className:'wb_mWeakList','aria-label':'薄弱问句'},
 							weakQuestions.map(function(q){
 								var name=String(q.question||''); var on=(p.weakPicked||[]).indexOf(name)>=0;
-								return h('div',{key:name,className:'wb_mWeakRow'+(on?' is-on':''),role:'button','aria-pressed':on,
+								var gap=function(label,value,key){
+									return h('span',{className:'wb_mWeakGap',key:key||label},
+										h('span',{className:'wb_mWeakGapLabel'},label),
+										h('span',{className:'wb_gapNum','data-sign':gapSign(value),title:gapTitle(label,value)},gapText(value)));
+								};
+								var platformGaps=Array.isArray(q.platforms)?q.platforms:[];
+								return h('div',{key:name,className:'wb_mWeakRow'+(on?' is-on':''),role:'checkbox','aria-checked':on?'true':'false',tabIndex:0,
 									onPointerDown:function(e){if(typeof p.rowDown==='function')p.rowDown(name,e);},
 									onPointerEnter:function(){if(typeof p.rowEnter==='function')p.rowEnter(name);},
-									onClick:function(e){if(e.target&&e.target.type==='checkbox')return;if(typeof p.pickSet==='function')p.pickSet(name,!on);}},
+									onKeyDown:function(e){if(e.key===' '||e.key==='Enter'){e.preventDefault();if(typeof p.pickSet==='function')p.pickSet(name,!on);}}},
 									h('input',{type:'checkbox',checked:on,'aria-label':'选定 '+name,onChange:function(e){e.stopPropagation();if(typeof p.pickSet==='function')p.pickSet(name,e.target.checked);}}),
-									h('span',{className:'wb_mWeakQ'},name),
-									h('small',null,q.root||''));
+									h('div',{className:'wb_mWeakDetails'},
+										h('div',{className:'wb_mWeakQuestion'},h('span',{className:'wb_mWeakQ'},name),h('span',{className:'wb_mWeakRoot'},q.root||'—')),
+										h('div',{className:'wb_mWeakGaps'},gap('综合',q.summary&&q.summary.gap,'summary'),platformGaps.map(function(item){return gap(item.name,item.gap,item.name);})))
+								);
 							}));
 			return h('div',{className:'wb_mAssembly'},h(MobileTopBar,{title:'新建任务'}),
 				h('div',{className:'wb_mForm'},
@@ -216,7 +224,7 @@ window.__ModuleLoader__.load({
 					empty?h('div',{className:'wb_mEmpty'},h('b',null,'还没有分配给你的客户'),h('p',null,'联系管理员')):null,
 					p.clients.status==='error'?h('div',{className:'wb_mEmpty',role:'status'},'客户暂时无法加载，请稍后刷新重试'):null,
 					h('h3',null,'主题'),segment([['weak','薄弱问句'],['free','自己输入']],p.mode,p.setMode),
-					p.mode==='weak'?h('div',{className:'wb_mWeakWrap'},h('div',{className:'wb_mWeakStat'},'已选定 '+String(p.selectedCount||0)+' 条'),weakPanel):h('textarea',{className:'wb_mTopic',ref:topicRef,'aria-label':'主题',placeholder:'想写什么选题，直接打。',value:p.topic,onChange:function(e){p.setTopic(e.target.value);},rows:2}),
+					p.mode==='weak'?h('div',{className:'wb_mWeakWrap'},h('div',{className:'wb_mWeakStat'},'已选定 '+String(p.selectedCount||0)+' 条 · 共 '+String(weakQuestions.length)+' 条'),weakPanel,h('div',{className:'wb_mWeakSource'},'数据来源：Support · 薄弱问句（全局标准 v4，和 Support 页面数字一致）')):h('textarea',{className:'wb_mTopic',ref:topicRef,'aria-label':'主题',placeholder:'想写什么选题，直接打。',value:p.topic,onChange:function(e){p.setTopic(e.target.value);},rows:2}),
 					h('h3',null,'怎么写'),segment([['copy','仿写'+(p.refCount?' '+p.refCount:'')],['skill','用模板'+(p.picked.length?' '+p.picked.length:'')]],p.refTab,p.setRefTab),
 					p.refTab==='copy'?h(React.Fragment,null,
 						h('div',{className:'wb_mReferences'},p.refs.urls.map(function(url,i){return h('div',{className:'wb_mReference',key:i},h('span',{className:'wb_mRefIcon'},'↗'),h('span',{className:'wb_mGrow'},url),h('button',{type:'button',className:'wb_mIcon','aria-label':'删除参考链接',onClick:function(){p.setRefText(p.refs.urls.filter(function(_,j){return j!==i;}).concat(p.refs.body?[p.refs.body]:[]).join('\n'));}},wbIcon('close')));}),
@@ -363,6 +371,7 @@ window.__ModuleLoader__.load({
 			"  --wb-pop:0 8px 24px rgba(16,24,40,.14);",
 			"  --wb-font:-apple-system,\"PingFang SC\",\"Hiragino Sans GB\",\"Microsoft YaHei\",sans-serif;",
 			"  --wb-mono:ui-monospace,SFMono-Regular,Menlo,monospace;",
+			"}",
 			"body[data-ds-dark-theme]{",
 			"  --wb-bg:#14161b; --wb-side:#171a20; --wb-elev:#1c2028; --wb-elev2:#232833;",
 			"  --wb-line:#2b3140; --wb-line-soft:#232836;",
@@ -894,6 +903,7 @@ window.__ModuleLoader__.load({
 		CSS += `
 /* Derived from mobile-redesign/screens/ds.css. Runtime colors come from PR-1 tokens.css. */
 html[data-wb-mobile] body{--wb-bg:var(--dsh-bg,#f5f3ee);--wb-text:var(--dsh-ink,#0e1430);--wb-accent:var(--dsh-blue,#002fa7);--wb-accent-ink:var(--dsh-blue-ink,var(--wb-accent));--wb-line:var(--dsh-line,#e9e6e0);--wb-dim:var(--dsh-ink-2,#4a5170);--wb-dim2:var(--dsh-ink-3,#8b90a6);--wb-elev:var(--dsh-card,#fff);--wb-side:var(--wb-bg);--wb-content:100%;color:var(--wb-text)}
+html[data-wb-mobile][data-dsh-theme="dark"] body{color-scheme:dark;--wb-bg:var(--dsh-bg,#151517);--wb-text:var(--dsh-ink,#f5f5f5);--wb-accent:var(--dsh-blue,#3361e0);--wb-accent-ink:var(--dsh-blue-ink,#8fa8ff);--wb-accent-bg:var(--dsh-blue-50,#1d2a4d);--wb-line:var(--dsh-line,rgba(255,255,255,.12));--wb-dim:var(--dsh-ink-2,#cfd3d6);--wb-dim2:var(--dsh-ink-3,#adb2b8);--wb-elev:var(--dsh-card,#232324);--wb-side:var(--dsh-sunken,#1b1b1c);--wb-bad:var(--dsh-red,#ff7b7b);--wb-good:var(--dsh-green,#3ecf8e);--wb-soft-shadow:var(--dsh-shadow-1,0 1px 2px rgba(0,0,0,.45));--wb-drawer-shadow:var(--dsh-scrim,rgba(0,0,0,.6))}
 html[data-wb-mobile] :is(.wb_mAssembly,.wb_mScrim,.wb_mDrawer,.wb_mChat,.wb_mReview){box-sizing:border-box;font:16px/24px var(--wb-font);color:var(--wb-text)}
 html[data-wb-mobile] :is(.wb_mAssembly,.wb_mScrim,.wb_mDrawer,.wb_mChat,.wb_mReview) *{box-sizing:border-box}
 html[data-wb-mobile] :is(.wb_mAssembly,.wb_mScrim,.wb_mDrawer,.wb_mChat,.wb_mReview) :is(button,input,textarea){font:inherit;color:inherit}
@@ -912,8 +922,8 @@ html[data-wb-mobile] .wb_mContext b{font-weight:650;display:-webkit-box;-webkit-
 html[data-wb-mobile] :is(.wb_mContext,.wb_mClient) small{display:block;font-size:13px;line-height:18px;color:var(--wb-dim2)}
 html[data-wb-mobile] .wb_mContext>svg{color:var(--wb-dim2);flex:none}
 html[data-wb-mobile] .wb_mAvatar{width:40px;height:40px;border-radius:12px;background:var(--wb-accent);color:var(--dsh-on-accent,#fff);display:grid;place-items:center;font-size:17px;font-weight:750;flex:none}
-html[data-wb-mobile] .wb_mSegment{display:flex;padding:4px;gap:2px;border-radius:12px;background:var(--dsh-sunken,#efece6);margin-bottom:12px}
-html[data-wb-mobile] .wb_mSegment button{flex:1;position:relative;min-width:0;height:36px;border:0;border-radius:9px;background:transparent;font-size:15px;font-weight:600;color:var(--wb-dim)}
+html[data-wb-mobile] .wb_mSegment{display:flex;padding:2px;gap:2px;border-radius:12px;background:var(--dsh-sunken,#efece6);margin-bottom:12px}
+html[data-wb-mobile] .wb_mSegment button{flex:1;position:relative;min-width:0;height:44px;min-height:44px;border:0;border-radius:9px;background:transparent;font-size:15px;font-weight:600;color:var(--wb-dim)}
 html[data-wb-mobile] .wb_mSegment button::after{content:'';position:absolute;inset:-4px 0}
 html[data-wb-mobile] .wb_mSegment button[aria-pressed=true]{background:var(--dsh-card,#fff);color:var(--wb-text);box-shadow:var(--wb-soft-shadow,0 1px 2px #0e14300f)}
 html[data-wb-mobile] .wb_mTopic{display:block;width:100%;resize:none;min-height:72px;max-height:40vh;overflow-y:auto;font-size:16px!important;border:1px solid var(--wb-line);border-radius:var(--dsh-r-m,14px);padding:12px 16px;background:var(--dsh-card,#fff);outline-color:var(--wb-accent-ink)}
@@ -928,7 +938,7 @@ html[data-wb-mobile] .wb_mRefIcon{display:grid;place-items:center;flex:none;widt
 html[data-wb-mobile] .wb_mAdd{display:flex;align-items:center;gap:12px;border:0;background:transparent;min-height:56px;padding:12px 16px;width:100%;text-align:left;color:var(--wb-accent-ink)!important;font-weight:600!important}
 html[data-wb-mobile] .wb_mChips{display:flex;flex-wrap:wrap;gap:8px;padding:2px 0}
 html[data-wb-mobile] .wb_mStyles{margin-top:12px}
-html[data-wb-mobile] .wb_mChip{position:relative;min-height:40px;max-width:100%;padding:7px 14px;border:1px solid var(--wb-line);border-radius:999px;background:var(--dsh-card,#fff);font-size:15px!important;overflow-wrap:anywhere}
+html[data-wb-mobile] .wb_mChip{position:relative;min-height:44px;max-width:100%;padding:7px 14px;border:1px solid var(--wb-line);border-radius:999px;background:var(--dsh-card,#fff);font-size:15px!important;overflow-wrap:anywhere}
 html[data-wb-mobile] .wb_mChip::after{content:'';position:absolute;inset:-2px 0}
 html[data-wb-mobile] .wb_mChip[aria-pressed=true]{border-color:var(--wb-accent-ink);background:var(--dsh-blue-50,#eef2fd);color:var(--wb-accent-ink)}
 html[data-wb-mobile] .wb_mStyles .wb_mChip[aria-pressed=true]{border-color:var(--wb-text);background:var(--wb-text);color:var(--dsh-on-accent,#fff)}
@@ -1015,9 +1025,10 @@ html[data-wb-mobile] .wb_mPreset{white-space:pre-wrap;overflow-wrap:anywhere}
 /* Upstream compatibility boundary. All hashed-class suffix selectors live here;
    public data-slot contracts are preferred. Never match a concrete build hash.
    Keep grid children in their columns: display:none on a column shifts auto-placement. */
-html[data-wb-mobile] [class*='_frame']{grid-template-columns:0 minmax(0,1fr) 0!important;width:100%;max-width:100vw;min-width:0}
-html[data-wb-mobile] [class*='_sidebarCol'],html[data-wb-mobile] [class*='_rightbarCol']{width:0!important;min-width:0!important;overflow:hidden!important;visibility:hidden}
-html[data-wb-mobile] [class*='_centerCol']{min-width:0;max-width:100vw}
+html[data-wb-mobile] [class*='_frame'],html[data-wb-mobile] [class*='frame']{grid-template-columns:0 minmax(0,1fr) 0!important;width:100vw;max-width:100vw;min-width:0}
+html[data-wb-mobile] [class*='_sidebarCol'],html[data-wb-mobile] [class*='_rightbarCol'],html[data-wb-mobile] [class*='sidebarCol'],html[data-wb-mobile] [class*='rightbarCol']{width:0!important;min-width:0!important;max-width:0!important;flex:0 0 0!important;overflow:hidden!important;visibility:hidden}
+html[data-wb-mobile] [class*='_centerCol'],html[data-wb-mobile] [class*='centerCol']{width:100%!important;min-width:0;max-width:100vw}
+html[data-wb-mobile] .wb_mAssembly{width:100%;min-width:0;max-width:100vw}
 html[data-wb-mobile] [data-slot='main.conversation']{--dsh-content-font-size:16px;--dsh-chat-content-width:100%;--dsh-composer-side-clearance:0px;background:var(--dsh-card,#fff);min-width:0}
 html[data-wb-mobile][data-wb-scene='chat'] [data-slot='main.conversation']{position:fixed;top:var(--wb-vv-top,0px);left:0;right:0;height:var(--wb-vv-h,100dvh)}
 html[data-wb-mobile] [data-slot='conversation.session.header']{flex:none;min-width:0;border-bottom:0}
@@ -1079,6 +1090,23 @@ html[data-wb-mobile] body[data-ds-dark-theme] .wb_mStatus[data-tone=green]{backg
 html[data-wb-mobile] body[data-ds-dark-theme] .wb_mPrimary:disabled{color:var(--dsh-on-accent,#fff)!important;opacity:1}
 html[data-wb-mobile] body[data-ds-dark-theme] [data-slot='conversation.composer.bar'] button{color:var(--wb-text)}
 html[data-wb-mobile] body[data-ds-dark-theme] [data-slot='conversation.composer.bar'] [class*='_primary']{color:var(--dsh-on-accent,#fff);opacity:1}
+html[data-wb-mobile] body[data-ds-dark-theme] .wb_mChip{background:var(--dsh-card,var(--wb-elev));border-color:var(--wb-line);color:var(--wb-text)}
+html[data-wb-mobile] body[data-ds-dark-theme] .wb_mChip[aria-pressed=true]{background:var(--wb-accent-bg);border-color:var(--wb-accent-ink);color:var(--wb-accent-ink)}
+html[data-wb-mobile][data-dsh-theme="dark"] .wb_mChip{background:var(--dsh-card,#232324);border-color:var(--wb-line);color:var(--wb-text)}
+html[data-wb-mobile][data-dsh-theme="dark"] .wb_mChip[aria-pressed=true]{background:var(--dsh-blue-50,#1d2a4d);border-color:var(--wb-accent-ink);color:var(--wb-accent-ink)}
+html[data-wb-mobile][data-dsh-theme="dark"] .wb_mWeakRow{background:var(--dsh-card,#232324);border-color:var(--wb-line)}
+html[data-wb-mobile][data-dsh-theme="dark"] .wb_mWeakRow.is-on{background:var(--dsh-blue-50,#1d2a4d);border-color:var(--wb-accent-ink)}
+html[data-wb-mobile][data-dsh-theme="dark"] .wb_mWeakGap{background:var(--dsh-sunken,#1b1b1c)}
+html[data-dsh-theme="dark"] .wb_mChip{background:var(--wb-elev);border-color:var(--wb-line);color:var(--wb-text)}
+html[data-dsh-theme="dark"] .wb_mChip[aria-pressed=true]{background:var(--wb-accent-bg);border-color:var(--wb-accent-ink);color:var(--wb-accent-ink)}
+html[data-dsh-theme="dark"] .wb_mWeakRow{background:var(--wb-elev);border-color:var(--wb-line)}
+html[data-dsh-theme="dark"] .wb_mWeakRow.is-on{background:var(--wb-accent-bg);border-color:var(--wb-accent-ink)}
+html[data-dsh-theme="dark"] .wb_mWeakGap{background:var(--wb-side)}
+html[data-dsh-theme="dark"] :is(.wb_mContext,.wb_mSegment button[aria-pressed=true],.wb_mTopic,.wb_mEmpty,.wb_mReferences,.wb_mExtra,.wb_mSheet,.wb_mEditor,.wb_mArticle,.wb_mReviewItem,.wb_mChecklist,.wb_mClient,.wb_mSession[aria-current=true],.wb_mPinned){background:var(--wb-elev);color:var(--wb-text)}
+html[data-dsh-theme="dark"] .wb_mSegment{background:var(--wb-side)}
+html[data-dsh-theme="dark"] .wb_mAction{background:var(--wb-bg);color:var(--wb-text)}
+html[data-dsh-theme="dark"] .wb_mRefIcon{background:var(--wb-side)}
+html[data-dsh-theme="dark"][data-wb-mobile] [data-slot='main.conversation']{background:var(--wb-elev);color:var(--wb-text)}
 `;
 
 		CSS += `
@@ -1087,11 +1115,17 @@ html[data-wb-mobile] body[data-ds-dark-theme] [data-slot='conversation.composer.
 html[data-wb-mobile] .wb_mWeakWrap{display:flex;flex-direction:column;gap:8px;margin:0 0 12px}
 html[data-wb-mobile] .wb_mWeakStat{font-size:14px;line-height:22px;color:var(--wb-dim2);font-weight:600}
 html[data-wb-mobile] .wb_mWeakList{display:flex;flex-direction:column;gap:8px;max-height:42dvh;overflow:auto;overscroll-behavior:contain}
-html[data-wb-mobile] .wb_mWeakRow{display:grid;grid-template-columns:44px minmax(0,1fr) auto;align-items:center;gap:8px;min-height:56px;padding:6px 10px;border:1px solid var(--wb-line);border-radius:var(--dsh-r-s,10px);background:var(--dsh-card,#fff);text-align:left;touch-action:pan-y;user-select:none}
+html[data-wb-mobile] .wb_mWeakRow{display:grid;grid-template-columns:44px minmax(0,1fr);align-items:start;gap:8px;min-height:56px;padding:8px 10px;border:1px solid var(--wb-line);border-radius:var(--dsh-r-s,10px);background:var(--dsh-card,#fff);text-align:left;touch-action:pan-y;user-select:none;cursor:pointer}
 html[data-wb-mobile] .wb_mWeakRow.is-on{border-color:var(--wb-accent-ink);background:var(--dsh-blue-50,#eef2fd)}
-html[data-wb-mobile] .wb_mWeakRow input{width:24px;height:24px;margin:0;accent-color:var(--wb-accent);}
+html[data-wb-mobile] .wb_mWeakRow input{width:24px;height:24px;margin:2px 0 0;accent-color:var(--wb-accent);}
+html[data-wb-mobile] .wb_mWeakDetails{min-width:0;display:flex;flex-direction:column;gap:4px}
+html[data-wb-mobile] .wb_mWeakQuestion{display:flex;align-items:baseline;gap:8px;min-width:0}
 html[data-wb-mobile] .wb_mWeakQ{font-size:16px;line-height:24px;overflow-wrap:anywhere}
-html[data-wb-mobile] .wb_mWeakRow small{font-size:13px;line-height:20px;color:var(--wb-dim2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:8em}
+html[data-wb-mobile] .wb_mWeakRoot{flex:none;font-size:13px;line-height:20px;color:var(--wb-dim2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:8em}
+html[data-wb-mobile] .wb_mWeakGaps{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}
+html[data-wb-mobile] .wb_mWeakGap{display:inline-flex;align-items:center;gap:3px;min-height:22px;padding:1px 5px;border-radius:6px;background:var(--wb-side);font-size:12px;line-height:18px;white-space:nowrap}
+html[data-wb-mobile] .wb_mWeakGapLabel{color:var(--wb-dim2)}
+html[data-wb-mobile] .wb_mWeakSource{color:var(--wb-dim2);font-size:11px;line-height:18px;overflow-wrap:anywhere}
 html[data-wb-mobile] .wb_mWeakEmpty{padding:16px;border:1px dashed var(--wb-line);border-radius:var(--dsh-r-s,10px);color:var(--wb-dim2);font-size:15px}
 
 
@@ -2074,6 +2108,13 @@ body[data-ds-dark-theme] .wb_rvMd mark.wbHcMk{background:var(--wb-bad-bg);color:
 				try {
 					var fr = document.querySelector('[class*="frame"]');
 					if (fr === null || fr.style.gridTemplateColumns === "") return;
+					/* On phones the official shell columns stay mounted for the drawer,
+					 * but they must not reserve any width. The desktop nav width is
+					 * restored only when the media query is false. */
+					if (WB_MOBILE.matches) {
+						fr.style.gridTemplateColumns = "0px minmax(0, 1fr) 0px";
+						return;
+					}
 					var cols = fr.style.gridTemplateColumns.split(/\s+/);
 					var want = wbNavState.navW + "px";
 					if (cols[0] !== want) { cols[0] = want; fr.style.gridTemplateColumns = cols.join(" "); }
@@ -3785,9 +3826,15 @@ body[data-ds-dark-theme] .wb_rvMd mark.wbHcMk{background:var(--wb-bad-bg);color:
 				&& (weakLines.length === 0 || weakLine !== null);
 			var weakGaps = useWeakGaps(weakClientKey, weakClientId, weakEnabled);
 			var weakTicks = useWeakTicks(weakClientKey, weakClientId, weakEnabled);
+			var weakSelectionTouched = React.useRef(false);
 			React.useEffect(function () {
+				weakSelectionTouched.current = false;
 				setWeakPicked(weakPickedFromTicks(weakTicks.ticks, weakGaps.questions));
-			}, [weakClientKey, weakClientId, weakGaps.questions, weakTicks.ticks]);
+			}, [weakClientKey, weakClientId, weakGaps.questions]);
+			React.useEffect(function () {
+				if (weakSelectionTouched.current) return;
+				setWeakPicked(weakPickedFromTicks(weakTicks.ticks, weakGaps.questions));
+			}, [weakTicks.ticks]);
 			/* 这一期出现过哪些词根（给下拉用）。 */
 			var weakRoots = [];
 			for (var wr = 0; wr < weakGaps.questions.length; wr++) {
@@ -4027,6 +4074,7 @@ body[data-ds-dark-theme] .wb_rvMd mark.wbHcMk{background:var(--wb-bad-bg);color:
 				return { qid: "", question: name };
 			}
 			function weakPickedUpdate(names, on) {
+				weakSelectionTouched.current = true;
 				setWeakPicked(function (prev) {
 					var next = prev.slice();
 					for (var ni = 0; ni < names.length; ni++) {
