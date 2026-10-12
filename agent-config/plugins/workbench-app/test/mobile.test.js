@@ -95,7 +95,7 @@ test('pinned chat chrome follows mobile keyboard state and ignores zoom or deskt
 test('mobile workbench CSS owns the shell width, light tokens and underline-free weak-question cards', () => {
   assert.match(source, /html\[data-wb-mobile\] \[class\*='_frame'\],html\[data-wb-mobile\] \[class\*='frame'\].*grid-template-columns:0 minmax\(0,1fr\) 0!important/)
   assert.match(source, /html\[data-wb-mobile\] \[class\*='_sidebarCol'\].*flex:0 0 0!important/)
-  assert.match(source, /\.wb_mWeakRow\{display:grid;grid-template-columns:44px minmax\(0,1fr\)/)
+  assert.match(source, /\.wb_mWeakRow\{flex:0 0 auto;display:grid;grid-template-columns:44px minmax\(0,1fr\)/)
   assert.match(source, /\.wb_mWeakGap\{display:inline-flex/)
   assert.match(source, /className:'wb_gapNum'/)
   assert.match(source, /weakSelectionTouched\.current = true/)
