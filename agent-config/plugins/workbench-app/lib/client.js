@@ -14,9 +14,8 @@ window.__ModuleLoader__.load({
 		 *
 		 * 两条硬规矩
 		 * ----------
-		 * 1. **没接的一律留空，不塞假数据。** 薄弱问句库、skill 列表现在都没接，
-		 *    就渲染原型里那块表格/那排标签的**壳**加一句空态说明，不放编造的行。
-		 *    假数据会让人误以为接了，然后照着假形状去写后端。
+		 * 1. **没有数据就留空，不塞假数据。** 薄弱问句和 skill 都由各自接口提供，
+		 *    请求失败时只显示可解释的空态，不放编造的行。
 		 * 2. **只落在 DSH 的扩展点上。** 新的 `main` 面板 + `sidebar.panellist`
 		 *    一行 + 一个会话域的接力挂件。root / conversation / composer /
 		 *    sidebar.workspaces 一个都不碰，标准流程永远一点即达。
@@ -165,7 +164,7 @@ window.__ModuleLoader__.load({
 			"  border:none; outline:none; background:transparent; font:14px/1.7 var(--wb-font);",
 			"}",
 
-			/* A3 表格（结构照原型，行留空 —— 数据没接就不放行） */
+			/* A3 表格（结构照原型，行由 capture-words 数据驱动） */
 			".wb_tbl{width:100%; border-collapse:collapse; table-layout:fixed;}",
 			".wb_tbl th{",
 			"  position:sticky; top:0; z-index:1; text-align:left; font-size:11px; font-weight:500;",
@@ -248,6 +247,9 @@ window.__ModuleLoader__.load({
 			".wb_tblGap tbody tr{cursor:pointer;}",
 			".wb_tblGap tbody tr:hover{background:var(--wb-side);}",
 			".wb_gapQ{line-height:1.6; color:var(--wb-text);}",
+			".wb_tickMeta{display:block; color:var(--wb-dim2); font-size:10px; line-height:1.3; user-select:text; -webkit-user-select:text;}",
+			".wb_source{padding:7px 14px 3px; color:var(--wb-dim2); font-size:10.5px;}",
+			".wb_tickError{color:var(--wb-bad,#d9483b); font-size:10.5px;}",
 			".wb_gapMeta .wb_warn{color:var(--wb-bad,#d9483b);}",
 			".wb_gapEmpty{padding:14px; color:var(--wb-dim); font-size:12px;}",
 			/* 放大看（⤢）：全屏浮层，表格铺开。 */
@@ -609,9 +611,16 @@ window.__ModuleLoader__.load({
 			draft: "/api/workbench/draft",
 			confirmDraft: "/api/workbench/confirm-draft",
 			check: "/api/workbench/check",
-			/* 薄弱问句（2026-10-10）：宿主带密钥调外部接口，这里只拿结果。 */
-			weakDir: "/api/workbench/weak-dir",
-			weakGaps: "/api/workbench/weak-gaps",
+			/* 薄弱问句（Support · capture-words v4）：同源、按 ACL 过滤。 */
+			captureWordsClients: "/api/v1/capture-words/clients",
+			captureWords: "/api/v1/capture-words",
+			captureWordsTicks: "/api/v1/capture-words/ticks",
+			captureWordsTicksBulk: "/api/v1/capture-words/ticks/bulk",
+			/* 语义别名，方便表格逻辑和宿主调试时按旧分区名查路由。 */
+			weakDir: "/api/v1/capture-words/clients",
+			weakGaps: "/api/v1/capture-words",
+			weakTicks: "/api/v1/capture-words/ticks",
+			weakTicksBulk: "/api/v1/capture-words/ticks/bulk",
 			/* 会话创建（2026-10-12）：绕开 Session Intent 向导页。 */
 			sessionCreate: "/api/workbench/session-create",
 		};
@@ -625,7 +634,6 @@ window.__ModuleLoader__.load({
 			metaFor: "wb-meta-for-",              // 前缀 + sessionId
 			navW: "wb-nav-w",                     // 自绘侧栏宽度
 			rightbarW: "wb-rightbar-w",           // 右栏宽度
-			weakPicked: "wb-weak-picked",         // 薄弱问句已选清单（换客户/换筛选/刷新都不丢）
 			modelLast: "wb-model-last",           // 上次用的模型（装配台下拉的默认值）
 			modelPending: "wb-model-pending",     // 装配台 → PromptRelay：本次任务选的模型
 			effortLast: "wb-effort-last",         // 上次的思考强度（装配台下拉的默认值）
@@ -781,20 +789,98 @@ window.__ModuleLoader__.load({
 			return state[0];
 		}
 
-		/* ---- 薄弱问句：可查客户目录（知识库客户 → 万湖 ID + 采集日）------
-		 * 打开装配台查一次，本次会话内复用；目录本身在宿主侧缓存 180 秒。
-		 * 对不上的客户（没配映射、或不在 45 天窗口内）照样返回，前端自己置灰。 */
+		/* ---- 薄弱问句：capture-words v4 目录与问句 ---------------------- */
+		function captureError(response, fallback) {
+			var status = Number(response && response.status) || 0;
+			return response.json().catch(function () { return {}; }).then(function (body) {
+				body = body && typeof body === "object" ? body : {};
+				var error = body.error || fallback || "unknown";
+				if (status === 401 || status === 403) error = "not-allowed";
+				else if (status === 404) error = "no-data";
+				return {
+					ok: false,
+					error: error,
+					detail: body.detail || (status ? "HTTP " + status : ""),
+				};
+			});
+		}
+
+		function readCaptureJson(response) {
+			if (!response.ok) return captureError(response, "route-missing");
+			return response.json().catch(function () {
+				return { ok: false, error: "route-missing", detail: "HTTP " + response.status + " · 不是 JSON" };
+			});
+		}
+
+		function mapCaptureWordDir(body) {
+			var customers = [];
+			var unmapped = [];
+			var list = body && Array.isArray(body.customers) ? body.customers : [];
+			for (var index = 0; index < list.length; index++) {
+				var item = list[index] && typeof list[index] === "object" ? list[index] : {};
+				var clientKey = String(item.clientKey || "");
+				var name = String(item.name || clientKey);
+				var mapped = item.mapped === true;
+				var rawLines = Array.isArray(item.lines) ? item.lines : [];
+				var lines = rawLines.map(function (line) {
+					line = line && typeof line === "object" ? line : {};
+					return {
+						name: String(line.name || line.enterprise_id || ""),
+						id: String(line.enterprise_id || ""),
+						enterprise_id: String(line.enterprise_id || ""),
+						is_default: line.is_default === true,
+						collectedAt: "",
+						inWindow: mapped,
+					};
+				});
+				if (!mapped) { unmapped.push(name); continue; }
+				customers.push({
+					id: clientKey || name,
+					clientKey: clientKey,
+					name: name,
+					collectedAt: "",
+					inWindow: mapped,
+					lines: lines,
+				});
+			}
+			return { customers: customers, unmapped: unmapped };
+		}
+
+		function mapCaptureQuestions(body) {
+			return (body && Array.isArray(body.questions) ? body.questions : []).map(function (question) {
+				return Object.assign({}, question, { qid: question && question.qid });
+			});
+		}
+
+		function weakPickedFromTicks(ticks, questions) {
+			var byQid = {};
+			var current = Array.isArray(questions) ? questions : [];
+			for (var questionIndex = 0; questionIndex < current.length; questionIndex++) {
+				var question = current[questionIndex];
+				if (question && question.qid !== undefined && question.qid !== null) byQid[String(question.qid)] = question.question;
+			}
+			var out = [];
+			var saved = Array.isArray(ticks) ? ticks : [];
+			for (var tickIndex = 0; tickIndex < saved.length; tickIndex++) {
+				var tick = saved[tickIndex] || {};
+				var text = byQid[String(tick.qid)] || String(tick.question || "");
+				if (text !== "" && out.indexOf(text) < 0) out.push(text);
+			}
+			return out;
+		}
+
 		function useWeakDir() {
 			var state = React.useState({ status: "loading", customers: [], unmapped: [], error: "", detail: "" });
 			var setValue = state[1];
 			React.useEffect(function () {
 				var alive = true;
-				fetch(WB_API.weakDir, { headers: { accept: "application/json" } })
-					.then(readJson)
+				fetch(WB_API.weakDir, { credentials: "same-origin", headers: { accept: "application/json" } })
+					.then(readCaptureJson)
 					.then(function (body) {
 						if (!alive) return;
 						if (body && body.ok === true) {
-							setValue({ status: "ready", customers: body.customers || [], unmapped: body.unmapped || [], error: "", detail: "" });
+							var mapped = mapCaptureWordDir(body);
+							setValue({ status: "ready", customers: mapped.customers, unmapped: mapped.unmapped, error: "", detail: "" });
 						} else {
 							setValue({ status: "error", customers: [], unmapped: [], error: (body && body.error) || "unknown", detail: (body && body.detail) || "" });
 						}
@@ -807,50 +893,141 @@ window.__ModuleLoader__.load({
 			return state[0];
 		}
 
-		/* ---- 薄弱问句：某个客户本期全部问句 ----------------------------
-		 * 只在「薄弱问句」模式下、且这个客户真的可查时才请求。
-		 * `error === "no-data"` 是正常业务态（这个客户最近没采集），不是故障。 */
-		function useWeakGaps(clientId, enabled) {
-			var state = React.useState({ status: "idle", collectedAt: "", taskId: "", excluded: null, questions: [], error: "", detail: "" });
+		/* ---- 薄弱问句：某个客户/业务线全部问句 -------------------------- */
+		function useWeakGaps(clientKey, enterprise, enabled) {
+			var state = React.useState({ status: "idle", collectedAt: "", computedAt: "", taskId: "", excluded: null, questions: [], error: "", detail: "" });
 			var setValue = state[1];
 			var tickS = React.useState(0);
 			var tick = tickS[0], setTick = tickS[1];
-			/* 「刷新」按下后这一次请求带 fresh=1，绕过宿主 5 分钟缓存，直接从数据服务取。 */
-			var freshRef = React.useRef(false);
 			React.useEffect(function () {
-				var blank = { status: "idle", collectedAt: "", taskId: "", excluded: null, questions: [], error: "", detail: "" };
-				if (!enabled || clientId === "") { setValue(blank); return undefined; }
+				var blank = { status: "idle", collectedAt: "", computedAt: "", taskId: "", excluded: null, questions: [], error: "", detail: "" };
+				if (!enabled || clientKey === "") { setValue(blank); return undefined; }
 				var alive = true;
-				var query = WB_API.weakGaps + "?client_id=" + encodeURIComponent(clientId) + (freshRef.current ? "&fresh=1" : "");
-				freshRef.current = false;
-				setValue({ status: "loading", collectedAt: "", taskId: "", excluded: null, questions: [], error: "", detail: "" });
-				fetch(query, { headers: { accept: "application/json" } })
-					.then(readJson)
+				var query = WB_API.weakGaps + "?client=" + encodeURIComponent(clientKey) + "&enterprise=" + encodeURIComponent(enterprise || "");
+				setValue({ status: "loading", collectedAt: "", computedAt: "", taskId: "", excluded: null, questions: [], error: "", detail: "" });
+				fetch(query, { credentials: "same-origin", headers: { accept: "application/json" } })
+					.then(readCaptureJson)
 					.then(function (body) {
 						if (!alive) return;
 						if (body && body.ok === true) {
 							setValue({
 								status: "ready",
 								collectedAt: body.collectedAt || "",
+								computedAt: body.computedAt || "",
 								taskId: body.taskId || "",
-								excluded: (typeof body.excluded === "number" ? body.excluded : null),
-								questions: body.questions || [],
+								excluded: body.excluded === null ? null : (typeof body.excluded === "number" ? body.excluded : null),
+								questions: mapCaptureQuestions(body),
 								error: "", detail: "",
 							});
 						} else {
 							setValue({
-								status: "error", collectedAt: "", taskId: "", excluded: null, questions: [],
+								status: "error", collectedAt: "", computedAt: "", taskId: "", excluded: null, questions: [],
 								error: (body && body.error) || "unknown", detail: (body && body.detail) || "",
 							});
 						}
 					})
 					.catch(function (e) {
-						if (alive) setValue({ status: "error", collectedAt: "", taskId: "", excluded: null, questions: [], error: "unreachable", detail: String(e && e.message ? e.message : e) });
+						if (alive) setValue({ status: "error", collectedAt: "", computedAt: "", taskId: "", excluded: null, questions: [], error: "unreachable", detail: String(e && e.message ? e.message : e) });
 					});
 				return function () { alive = false; };
-			}, [clientId, enabled, tick]);
-			state[0].refresh = function () { freshRef.current = true; setTick(tick + 1); };
+			}, [clientKey, enterprise, enabled, tick]);
+			state[0].refresh = function () { setTick(tick + 1); };
 			return state[0];
+		}
+
+		function weakTicksFetch(clientKey, enterprise) {
+			var query = WB_API.weakTicks + "?client=" + encodeURIComponent(clientKey) + "&enterprise=" + encodeURIComponent(enterprise || "");
+			return fetch(query, { credentials: "same-origin", headers: { accept: "application/json" } }).then(readCaptureJson);
+		}
+		function weakTickPutRequest(clientKey, enterprise, item, ticked) {
+			return {
+				url: WB_API.weakTicks,
+				options: {
+					method: "PUT", credentials: "same-origin",
+					headers: { accept: "application/json", "Content-Type": "application/json", "X-Requested-With": "XMLHttpRequest" },
+					body: JSON.stringify({ client: clientKey, enterprise: enterprise || "", qid: item.qid, question: item.question, ticked: ticked === true }),
+				},
+			};
+		}
+		function weakTickBulkRequest(clientKey, enterprise, items, ticked) {
+			return {
+				url: WB_API.weakTicksBulk,
+				options: {
+					method: "POST", credentials: "same-origin",
+					headers: { accept: "application/json", "Content-Type": "application/json", "X-Requested-With": "XMLHttpRequest" },
+					body: JSON.stringify({ client: clientKey, enterprise: enterprise || "", items: items.slice(0, 500), ticked: ticked === true }),
+				},
+			};
+		}
+
+		function useWeakTicks(clientKey, enterprise, enabled) {
+			var initial = { status: "idle", ticks: [], error: "", detail: "" };
+			var state = React.useState(initial);
+			var value = state[0], setValue = state[1];
+			React.useEffect(function () {
+				var alive = true;
+				var blank = { status: "idle", ticks: [], error: "", detail: "" };
+				if (!enabled || clientKey === "") { setValue(blank); return undefined; }
+				function load() {
+					weakTicksFetch(clientKey, enterprise).then(function (body) {
+						if (!alive) return;
+						if (body && body.ok !== false) setValue({ status: "ready", ticks: Array.isArray(body.ticks) ? body.ticks : [], error: "", detail: "" });
+						else setValue({ status: "error", ticks: [], error: (body && body.error) || "unknown", detail: (body && body.detail) || "" });
+					}).catch(function (e) {
+						if (alive) setValue({ status: "error", ticks: [], error: "unreachable", detail: String(e && e.message ? e.message : e) });
+					});
+				}
+				load();
+				var timer = setInterval(function () {
+					if (typeof document === "undefined" || document.visibilityState === "visible" || document.visibilityState === undefined) load();
+				}, 30000);
+				var onVisibility = function () { if (typeof document === "undefined" || document.visibilityState === "visible") load(); };
+				if (typeof document !== "undefined") document.addEventListener("visibilitychange", onVisibility);
+				return function () {
+					alive = false;
+					clearInterval(timer);
+					if (typeof document !== "undefined") document.removeEventListener("visibilitychange", onVisibility);
+				};
+			}, [clientKey, enterprise, enabled]);
+
+			function optimisticTicks(previous, items, ticked) {
+				var next = previous.slice();
+				for (var i = 0; i < items.length; i++) {
+					var item = items[i] || {};
+					var at = -1;
+					for (var j = 0; j < next.length; j++) {
+						var sameQid = item.qid !== undefined && item.qid !== null && item.qid !== ""
+							&& next[j].qid !== undefined && next[j].qid !== null && next[j].qid !== ""
+							&& String(next[j].qid) === String(item.qid);
+						if (sameQid || (!sameQid && next[j].question === item.question)) { at = j; break; }
+					}
+					if (ticked && at < 0) next.push({ qid: item.qid, question: item.question, by: "", byName: "", at: "" });
+					else if (!ticked && at >= 0) next.splice(at, 1);
+				}
+				return next;
+			}
+
+			function writeItems(items, ticked, bulk) {
+				if (!enabled || clientKey === "" || items.length === 0) return;
+				var before = value.ticks.slice();
+				setValue({ status: value.status === "idle" ? "loading" : value.status, ticks: optimisticTicks(before, items, ticked), error: "", detail: "" });
+				var descriptor = bulk
+					? weakTickBulkRequest(clientKey, enterprise, items, ticked)
+					: weakTickPutRequest(clientKey, enterprise, items[0], ticked);
+				var request = fetch(descriptor.url, descriptor.options);
+				request.then(readCaptureJson).then(function (body) {
+					if (body && body.ok !== false) setValue({ status: "ready", ticks: Array.isArray(body.ticks) ? body.ticks : [], error: "", detail: "" });
+					else { setValue({ status: "error", ticks: before, error: (body && body.error) || "unknown", detail: (body && body.detail) || "" }); }
+				}).catch(function (e) {
+					setValue({ status: "error", ticks: before, error: "unreachable", detail: String(e && e.message ? e.message : e) });
+				});
+			}
+			value.refresh = function () { weakTicksFetch(clientKey, enterprise).then(function (body) {
+				if (body && body.ok !== false) setValue({ status: "ready", ticks: Array.isArray(body.ticks) ? body.ticks : [], error: "", detail: "" });
+			}); };
+			value.put = function (item, ticked) { writeItems([item], ticked, false); };
+			value.bulk = function (items, ticked) { writeItems(items.slice(0, 500), ticked, true); };
+			return value;
 		}
 
 		/** 薄弱问句那两条路由的人话报错。 */
@@ -898,6 +1075,17 @@ window.__ModuleLoader__.load({
 			if (isNaN(d.getTime())) return String(iso).slice(0, 10);
 			var beijing = new Date(d.getTime() + 8 * 3600 * 1000);
 			return beijing.toISOString().slice(0, 10);
+		}
+		function tickStamp(iso) {
+			if (!iso) return "";
+			var d = new Date(iso);
+			if (isNaN(d.getTime())) return String(iso);
+			var beijing = new Date(d.getTime() + 8 * 3600 * 1000);
+			var month = String(beijing.getUTCMonth() + 1).padStart(2, "0");
+			var day = String(beijing.getUTCDate()).padStart(2, "0");
+			var hour = String(beijing.getUTCHours()).padStart(2, "0");
+			var minute = String(beijing.getUTCMinutes()).padStart(2, "0");
+			return month + "/" + day + " " + hour + ":" + minute;
 		}
 
 		function clientsErrorText(error, detail) {
@@ -2518,10 +2706,16 @@ window.__ModuleLoader__.load({
 			var wanted = {};
 			for (var index = 0; index < pickedNames.length; index++) wanted[pickedNames[index]] = true;
 			var bits = [];
+			var found = {};
 			for (var q = 0; q < questions.length && bits.length < 20; q++) {
 				var question = questions[q];
 				if (wanted[question.question] !== true) continue;
 				bits.push(question.question);
+				found[question.question] = true;
+			}
+			for (var pickedIndex = 0; pickedIndex < pickedNames.length && bits.length < 20; pickedIndex++) {
+				var saved = pickedNames[pickedIndex];
+				if (saved !== "" && found[saved] !== true) { bits.push(saved); found[saved] = true; }
 			}
 			return bits.map(function (name, i) { return (i + 1) + ". " + name; }).join("\n");
 		}
@@ -2580,7 +2774,7 @@ window.__ModuleLoader__.load({
 		/** 薄弱问句那一格的渲染。rows 由 WorkbenchPage 算好传进来（工作条的「显示 N 条」和它共用一份）。 */
 		function renderWeakPane(args) {
 			var gaps = args.gaps;
-			if (args.entry === null) {
+			if (args.entry === null || args.entry.inWindow === false) {
 				var sub;
 				if (args.dirStatus === "loading") sub = "问一次数据服务的客户目录。";
 				else if (args.dirStatus === "error") sub = "刚才没问到客户目录（服务可能短暂不可用）—— 点工作条上的 ⟳ 重试。";
@@ -2610,9 +2804,7 @@ window.__ModuleLoader__.load({
 						type: "checkbox", checked: allOn, "aria-label": "全选",
 						onChange: function () {
 							var names = rows.map(function (row) { return row.question; });
-							args.setWeakPicked(allOn
-								? pickedNames.filter(function (item) { return names.indexOf(item) < 0; })
-								: pickedNames.concat(names.filter(function (item) { return pickedNames.indexOf(item) < 0; })));
+							args.bulkSet(names, !allOn);
 							args.setChipOff(false);
 						},
 					})),
@@ -2630,6 +2822,15 @@ window.__ModuleLoader__.load({
 				/* 行：点哪都勾；按住往下拖，划过的行跟着第一行同一个动作（原型同款）。 */
 				body = rows.map(function (question) {
 					var on = pickedNames.indexOf(question.question) >= 0;
+					var tick = null;
+					for (var ti = 0; ti < (args.ticks || []).length; ti++) {
+						var candidate = args.ticks[ti];
+						if ((question.qid !== undefined && String(candidate.qid) === String(question.qid)) || candidate.question === question.question) { tick = candidate; break; }
+					}
+					var tickWho = tick ? String(tick.byName || tick.by || "") : "";
+					var tickMeta = tick && (tickWho !== "" || tick.at)
+						? (tickWho || "已选") + (tick.at ? " · " + tickStamp(tick.at) : "")
+						: "";
 					return h("tr", {
 						key: question.question,
 						className: on ? "on" : undefined,
@@ -2645,7 +2846,9 @@ window.__ModuleLoader__.load({
 							},
 						})),
 						h("td", { className: "wb_gapRoot" }, question.root || "—"),
-						h("td", null, h("div", { className: "wb_gapQ" }, question.question)),
+						h("td", null, h("div", { className: "wb_gapQ" },
+							question.question,
+							tickMeta === "" ? null : h("span", { className: "wb_tickMeta", title: tick.at || "" }, tickMeta))),
 						h("td", null,
 							h("span", { className: "wb_gapNum", "data-sign": gapSign(question.summary.gap), title: gapTitle("综合", question.summary.gap) }, gapText(question.summary.gap))),
 						shownPlatforms.map(function (name) {
@@ -2657,6 +2860,7 @@ window.__ModuleLoader__.load({
 			}
 
 			return h("div", null,
+				h("div", { className: "wb_source" }, "数据来源：Support · 薄弱问句（全局标准 v4，和 Support 页面数字一致）"),
 				h("table", { className: "wb_tbl wb_tblGap", "data-drag": args.dragging ? "1" : "0" },
 					h("thead", null, head),
 					h("tbody", null, body)));
@@ -2689,32 +2893,9 @@ window.__ModuleLoader__.load({
 			var refStyle = refStyleS[0], setRefStyle = refStyleS[1];
 			var pickedS = React.useState([]);
 			var picked = pickedS[0], setPicked = pickedS[1];
-			/* 已选的薄弱问句（按问句原文记），**按客户分开存**（2026-10-10 定）。
-			 * 任务永远只发给单个客户，跨客户攒勾选只会制造「这 N 条是谁的」糊涂账 ——
-			 * 换客户 = 自动切到那个客户自己的清单；刷新页面不丢。和 `picked`（模板）别混。 */
-			var weakPickedS = React.useState(function () {
-				try {
-					var list = JSON.parse(sessionStorage.getItem(WB_KEY.weakPicked + ":" + pick.key) || "[]");
-					return Array.isArray(list) ? list : [];
-				} catch (error) { return []; }
-			});
+			/* 已选的薄弱问句按当前客户/业务线同步到 Support 的共享 ticks。 */
+			var weakPickedS = React.useState([]);
 			var weakPicked = weakPickedS[0], setWeakPicked = weakPickedS[1];
-			/* 换客户：当前清单归还给旧客户，装载新客户的清单。 */
-			var weakPickClientRef = React.useRef(pick.key);
-			React.useEffect(function () {
-				if (weakPickClientRef.current === pick.key) return undefined;
-				var prevClient = weakPickClientRef.current;
-				weakPickClientRef.current = pick.key;
-				try {
-					sessionStorage.setItem(WB_KEY.weakPicked + ":" + prevClient, JSON.stringify(weakPicked));
-					var list = JSON.parse(sessionStorage.getItem(WB_KEY.weakPicked + ":" + pick.key) || "[]");
-					setWeakPicked(Array.isArray(list) ? list : []);
-				} catch (error) { /* 隐身模式就算了 */ }
-				return undefined;
-			}, [pick.key]);
-			React.useEffect(function () {
-				try { sessionStorage.setItem(WB_KEY.weakPicked + ":" + weakPickClientRef.current, JSON.stringify(weakPicked)); } catch (error) { /* 隐身模式就算了 */ }
-			}, [weakPicked]);
 
 			var zoomS = React.useState(false);
 			var zoom = zoomS[0], setZoom = zoomS[1];
@@ -2814,14 +2995,34 @@ window.__ModuleLoader__.load({
 			var weakLine = null;
 			if (weakEntry !== null) {
 				if (weakLines.length === 0) weakLine = weakEntry;
+				else if (weakLines.length === 1) weakLine = weakLines[0];
 				else {
+					var selectedLineName = "";
+					for (var selectedLineIndex = 0; selectedLineIndex < lines.length; selectedLineIndex++) {
+						if (String(lines[selectedLineIndex].id || "") === String(pick.line)) {
+							selectedLineName = String(lines[selectedLineIndex].name || "");
+							break;
+						}
+					}
 					for (var wl = 0; wl < weakLines.length; wl++) {
-						if (String(weakLines[wl].name) === String(pick.line)) { weakLine = weakLines[wl]; break; }
+						if (String(weakLines[wl].id || "") === String(pick.line)
+							|| (selectedLineName !== "" && String(weakLines[wl].name || "") === selectedLineName)
+							|| (selectedLineName === "" && weakLines[wl].is_default === true)) {
+							weakLine = weakLines[wl];
+							break;
+						}
 					}
 				}
 			}
-			var weakClientId = weakLine === null ? "" : String(weakLine.id || "");
-			var weakGaps = useWeakGaps(weakClientId, mode === "weak" && weakClientId !== "");
+			var weakClientKey = weakEntry === null ? "" : String(weakEntry.clientKey || weakEntry.id || "");
+			var weakClientId = (weakLine === null || weakLine === weakEntry) ? "" : String(weakLine.id || "");
+			var weakEnabled = mode === "weak" && weakClientKey !== "" && weakEntry !== null && weakEntry.inWindow !== false
+				&& (weakLines.length === 0 || weakLine !== null);
+			var weakGaps = useWeakGaps(weakClientKey, weakClientId, weakEnabled);
+			var weakTicks = useWeakTicks(weakClientKey, weakClientId, weakEnabled);
+			React.useEffect(function () {
+				setWeakPicked(weakPickedFromTicks(weakTicks.ticks, weakGaps.questions));
+			}, [weakClientKey, weakClientId, weakGaps.questions, weakTicks.ticks]);
 			/* 这一期出现过哪些词根（给下拉用）。 */
 			var weakRoots = [];
 			for (var wr = 0; wr < weakGaps.questions.length; wr++) {
@@ -3059,19 +3260,56 @@ window.__ModuleLoader__.load({
 				: [];
 
 			/* 薄弱问句勾选：点行、拖行、勾方块、全选，都走这一个入口。 */
-			function weakPickSet(name, on) {
+			function weakTickItem(name) {
+				for (var ti = 0; ti < weakGaps.questions.length; ti++) {
+					var question = weakGaps.questions[ti];
+					if (question.question === name) return { qid: question.qid, question: question.question };
+				}
+				return { qid: "", question: name };
+			}
+			function weakPickedUpdate(names, on) {
 				setWeakPicked(function (prev) {
-					var has = prev.indexOf(name) >= 0;
-					if (on && !has) return prev.concat([name]);
-					if (!on && has) return prev.filter(function (item) { return item !== name; });
-					return prev;
+					var next = prev.slice();
+					for (var ni = 0; ni < names.length; ni++) {
+						var name = names[ni];
+						var at = next.indexOf(name);
+						if (on && at < 0) next.push(name);
+						if (!on && at >= 0) next.splice(at, 1);
+					}
+					return next;
 				});
 			}
+			function weakPickSet(name, on, write) {
+				weakPickedUpdate([name], on);
+				if (write !== false && weakTicks && typeof weakTicks.put === "function") weakTicks.put(weakTickItem(name), on);
+			}
+			function weakBulkSet(names, on) {
+				var unique = [];
+				for (var i = 0; i < names.length; i++) if (unique.indexOf(names[i]) < 0) unique.push(names[i]);
+				weakPickedUpdate(unique, on);
+				if (weakTicks && typeof weakTicks.bulk === "function") weakTicks.bulk(unique.map(weakTickItem), on);
+			}
+			function weakPickItems(names, on) {
+				var unique = [];
+				for (var i = 0; i < names.length; i++) if (unique.indexOf(names[i]) < 0) unique.push(names[i]);
+				weakPickedUpdate(unique, on);
+				if (weakTicks && typeof weakTicks.bulk === "function") weakTicks.bulk(unique.map(weakTickItem), on);
+			}
+			var weakDragCommit = React.useRef(null);
+			weakDragCommit.current = weakPickItems;
 			var weakDragS = React.useState(false);
 			var weakDragging = weakDragS[0], setWeakDragging = weakDragS[1];
 			var weakDragTo = React.useRef(null);
+			var weakDragItems = React.useRef([]);
 			React.useEffect(function () {
-				function up() { weakDragTo.current = null; setWeakDragging(false); }
+				function up() {
+					var names = weakDragItems.current.slice();
+					var on = weakDragTo.current;
+					weakDragItems.current = [];
+					weakDragTo.current = null;
+					setWeakDragging(false);
+					if (on !== null && names.length > 0 && typeof weakDragCommit.current === "function") weakDragCommit.current(names, on);
+				}
 				document.addEventListener("mouseup", up);
 				return function () { document.removeEventListener("mouseup", up); };
 			}, []);
@@ -3082,34 +3320,35 @@ window.__ModuleLoader__.load({
 				e.preventDefault();
 				var on = weakPicked.indexOf(name) < 0;
 				weakDragTo.current = on;
-				weakPickSet(name, on);
+				weakDragItems.current = [name];
+				weakPickSet(name, on, false);
 				setWeakDragging(true);
 				setChipOff(false);
 			}
 			function weakRowEnter(name) {
 				if (weakDragTo.current === null) return;
-				weakPickSet(name, weakDragTo.current);
+				if (weakDragItems.current.indexOf(name) >= 0) return;
+				weakDragItems.current.push(name);
+				weakPickSet(name, weakDragTo.current, false);
 			}
 			/* 「选前10」：一键选定当前排序下最薄的前 10 条；再点一次撤销这 10 条，防误触。 */
 			function pickTop10() {
-				setWeakPicked(function (prev) {
-					var names = weakRows.slice(0, 10).map(function (row) { return row.question; });
-					var allIn = names.length > 0 && names.every(function (n) { return prev.indexOf(n) >= 0; });
-					if (allIn) return prev.filter(function (item) { return names.indexOf(item) < 0; });
-					return prev.concat(names.filter(function (n) { return prev.indexOf(n) < 0; }));
-				});
+				var names = weakRows.slice(0, 10).map(function (row) { return row.question; });
+				var allIn = names.length > 0 && names.every(function (n) { return weakPicked.indexOf(n) >= 0; });
+				weakBulkSet(names, !allIn);
 				setChipOff(false);
 			}
 
 			/* 工作条：日期 · 平台多选 · 词根 · 勾差额前20 · 统计 · ⟳/⤢。放大时同一份搬进浮层。 */
 			var weakBar = h("span", { className: "wb_filters" },
-				mode !== "weak"
-					? h("span", { className: "wb_weakDate" }, "直接输入选题")
-					: [
-						h("span", { key: "meta", className: "wb_weakDate" },
-							(weakLine === null || !weakLine.collectedAt) ? "最新采集 —"
-								: "最新采集 " + collectedDay(weakLine.collectedAt)
-									+ (weakGaps.status === "ready" ? " · " + String(weakGaps.questions.length) + " 条" : "")),
+					mode !== "weak"
+						? h("span", { className: "wb_weakDate" }, "直接输入选题")
+						: [
+							h("span", { key: "meta", className: "wb_weakDate" },
+							weakGaps.status !== "ready" ? "最新采集 —"
+								: "采集 " + (collectedDay(weakGaps.collectedAt) || "日期未知")
+									+ (weakGaps.computedAt ? " · 计算 " + collectedDay(weakGaps.computedAt) : "")
+									+ " · " + String(weakGaps.questions.length) + " 条"),
 						h("span", { key: "plat", className: "wb_fsel" },
 							h("button", {
 								type: "button",
@@ -3156,6 +3395,7 @@ window.__ModuleLoader__.load({
 								})) : null),
 						h("button", { key: "top", type: "button", className: "wb_miniBtn", title: "一键选定当前排序下最薄的前 10 条；再点一次撤销", onClick: pickTop10 }, "选前10"),
 						h("span", { key: "stat", className: "wb_weakStat" }, "显示 " + String(weakRows.length) + " 条 · 已选定 " + String(weakPicked.length) + " 条"),
+						weakTicks.error ? h("span", { key: "tick-error", className: "wb_tickError", title: weakTicks.detail || "" }, "同步未完成：" + weakErrorText(weakTicks.error, weakTicks.detail)) : null,
 						weakGaps.status === "ready" ? h("span", { key: "icons", className: "wb_weakIcons" },
 							h("button", {
 								type: "button", className: "wb_iconBtn", title: "重新取一次数据",
@@ -3189,9 +3429,10 @@ window.__ModuleLoader__.load({
 						setSort: setSort,
 						weakPicked: weakPicked,
 						pickSet: weakPickSet,
+						bulkSet: weakBulkSet,
+						ticks: weakTicks.ticks,
 						rowDown: weakRowDown,
 						rowEnter: weakRowEnter,
-						setWeakPicked: setWeakPicked,
 						setChipOff: setChipOff,
 						dragging: weakDragging,
 					})
@@ -3660,6 +3901,13 @@ window.__ModuleLoader__.load({
 
 		exports.inject = ["slots", "layout", "sidebarRight", "sidebarRightTabs", "sessions"];
 		exports.apply = apply;
+		/* Small pure helpers are exported for the browser-package contract tests. */
+		exports.wbMapCaptureWordDir = mapCaptureWordDir;
+		exports.wbMapCaptureQuestions = mapCaptureQuestions;
+		exports.wbWeakPickedFromTicks = weakPickedFromTicks;
+		exports.wbWeakSelectionText = weakSelectionText;
+		exports.wbTickPutRequest = weakTickPutRequest;
+		exports.wbTickBulkRequest = weakTickBulkRequest;
 		return module.exports;
 	}
 });
