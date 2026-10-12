@@ -51,90 +51,22 @@ const CLIENT_MAP_PATH = '/api/workbench/client-map'
 const CLIENT_MAP_FILE = '/home/dsh/.dsh/workbench-meta/client-map.json'
 const LIBRARY_ROOT = '/srv/dsh-data/文章库'
 
-/* ---- 薄弱问句（2026-10-10 接外部接口）---------------------------------
- * 数据来自「对外客户问句差额和信源渠道 API」（交付文档见仓库
- * `对接的文档在这里/交付文档.md`）。宿主半边负责：带密钥调接口 + 缓存 +
- * 白名单过滤。密钥不出宿主，浏览器永远拿不到。
- *
- * 这个接口**不做任何权限**（返回全公司客户、只认 ID 不认调用方），所以
- * 白名单是当前唯一的权限闸门 —— 详见
- * `docs/运维与管理/待技术同事解决的问题.md` P2。 */
+/* ---- 薄弱问句 / 捕捉词（2026-10-12 改接 DSH）---------------------------
+ * 数据来自 dsh-cloud 的「捕捉词」只读接口（与 Support 薄弱问句页同一份 v4 口径）：
+ *   GET /api/v1/capture-words/clients        当前用户可见的客户 + 各期（业务线）
+ *   GET /api/v1/capture-words?client=&enterprise=  本期问句（qid / status / 差额 / 该在哪补）
+ * 宿主只做转发：把浏览器带来的 DSH 登录 cookie（dsh_sid）原样转给 dsh-cloud，
+ * 权限完全由 dsh-cloud 按登录用户判定（运营只看到分配给自己的客户）。
+ * 不再有共享密钥、不再有「客户名 → 企业 ID」硬编码映射表、宿主侧不缓存跨用户数据。 */
 const WEAK_DIR_PATH = '/api/workbench/weak-dir'
 const WEAK_GAPS_PATH = '/api/workbench/weak-gaps'
 const WEAK_RAW_PATH = '/api/workbench/weak-raw'
-
-const INSIGHTS_BASE = 'http://182.92.179.181/api/external-insights/v1'
-/** 密钥放进程环境变量，缺省用交付文档里那把共享密钥（不进 git 的只有 settings.yaml）。 */
-const INSIGHTS_KEY = firstString(process.env.WORKBENCH_INSIGHTS_KEY)
-  || 'f886619bac2251a47711aa39b782ff1f739a441f103a38e2f4094ac811aeb8cc'
-
-/** 允许在工作台上看到的客户 ID 集合（空数组 = 不限）。
- *
- * ⚠️ 这张表和 WEAK_CLIENT_MAP 已经**不是两回事**了 —— 10-10 踩过一次坑：
- * 新客户只加到映射表、忘了加白名单，结果目录里查不到、页面显示"还没有数据"，
- * 排查了半天（两处闸门，只开了一个）。
- *
- * 现在的规矩：**映射表就是唯一真相源** —— 客户配了映射就等于放行。
- * 这个常量只在需要临时收紧时才填（比如演示时只想留两个客户）。 */
-const WEAK_CLIENT_ALLOWLIST = []
-
-/** 知识库客户名 → 万湖 enterprise_id 的映射。
- *
- * 为什么需要它：知识库那边的客户**只有名字**（`哈尔斯`、`杭州民师`…），
- * 没有企业 ID；而万湖的 `enterprise_id` 名字又跟知识库对不上（万湖叫
- * 「杭州民师教招教育科技有限公司」）。两边只能靠这张表对上。
- *
- * **刻意用显式映射、不做名字模糊匹配** —— 这是身份边界，猜错就是串客户。
- *
- * 两种形状：
- *   - 单业务线客户：值直接是 ID 字符串
- *   - **多业务线客户**：值是 { 业务线名: ID }，跟装配台的「业务线」下拉一一对应。
- *     典型是华熙生物 —— 一个客户四条产品线，在万湖**本来就是四个独立企业**，
- *     采集数据也各是各的，所以没法合成一份，必须选到线才有数据。
- *
- * 加客户就在这里加。想临时改而不动代码：环境变量
- * `WORKBENCH_INSIGHTS_MAP='{"客户名":"企业ID","多线客户":{"线名":"ID"}}'`（合并生效）。 */
-const WEAK_CLIENT_MAP = {
-  '哈尔斯': '2085556051360485376',
-  '杭州民师': '2102224433627402240',
-  '移山科技': '2079923537652617216',
-  '清北中考高': '1995444826216206336',
-  '猿编程': '2043937764923281408',
-  /* 华熙生物：四条产品线，万湖侧是四个独立企业（名字用万湖的写法，
-   * 但键要跟知识库/装配台显示的业务线名对得上）。 */
-  '华熙生物': {
-    '润致耀然': '2064596152271114240',
-    '润致斐然': '2064595780697722880',
-    '润致缇透': '2064595405299126272',
-    '润致娃娃针': '1990423682916421632',
-  },
-}
-
-/** 环境变量覆盖（合并，不替换）。解析失败只打日志，用内置那份。 */
-function weakMapWithEnv() {
-  const map = Object.assign({}, WEAK_CLIENT_MAP)
-  const raw = firstString(process.env.WORKBENCH_INSIGHTS_MAP)
-  if (raw !== '') {
-    try {
-      const parsed = JSON.parse(raw)
-      if (parsed !== null && typeof parsed === 'object') {
-        for (const [name, id] of Object.entries(parsed)) {
-          if (typeof id === 'string' && id.trim() !== '') map[name] = id.trim()
-        }
-      }
-    } catch (error) {
-      process.stderr.write(`[dsh-workbench] WORKBENCH_INSIGHTS_MAP 解析失败：${String(error)}\n`)
-    }
-  }
-  return map
-}
-
-/** 缓存时长：目录 3 分钟（接口自己就缓存 180 秒）；
- * 问句差额 5 分钟（数据每 5 分钟才重算一次，查更勤没意义）。 */
-const INSIGHTS_DIR_CACHE_MS = 180000
-const INSIGHTS_GAPS_CACHE_MS = 300000
-/** 单次外部请求预算。 */
-const INSIGHTS_TIMEOUT_MS = 20000
+/** dsh-cloud 地址：工作台宿主和 dsh-web 在同一台机器上，走本机回环。 */
+const DSH_BASE = (firstString(process.env.WORKBENCH_DSH_BASE) || 'http://127.0.0.1:8787').replace(/\/+$/, '')
+const DSH_CAPTURE_CLIENTS = '/api/v1/capture-words/clients'
+const DSH_CAPTURE_WORDS = '/api/v1/capture-words'
+/** 单次请求预算。 */
+const DSH_TIMEOUT_MS = 20000
 
 /** 默认服务器名；在 cordis.patch.yml 的 config 里可改。 */
 const DEFAULT_KNOWLEDGE_SERVER = 'sora-knowledge'
@@ -285,125 +217,51 @@ function numberOrNull(value) {
   return null
 }
 
-/** 客户 ID 是否允许看。白名单为空 = 不限（开发期留的后门，别在生产用）。 */
-function weakClientAllowed(clientId) {
-  if (WEAK_CLIENT_ALLOWLIST.length === 0) return true
-  return WEAK_CLIENT_ALLOWLIST.includes(clientId)
-}
-
-/** 知识库客户名 → 映射值。查不到返回 null（**不猜**）。
- * 值可能是 ID 字符串（单业务线），也可能是 { 业务线: ID }（多业务线）。 */
-function weakMappingFor(name) {
-  const wanted = firstString(name)
-  if (wanted === '') return null
-  const map = weakMapWithEnv()
-  if (Object.prototype.hasOwnProperty.call(map, wanted)) return map[wanted]
-  const squash = value => String(value).replace(/\s+/g, '')
-  for (const [key, value] of Object.entries(map)) {
-    if (squash(key) === squash(wanted)) return value
+/** 从浏览器请求里取 DSH 登录 cookie（只取 dsh_sid，别的 cookie 不外传）。 */
+function dshSessionCookie(req) {
+  const header = req && req.headers ? String(req.headers.cookie || '') : ''
+  for (const part of header.split(';')) {
+    const item = part.trim()
+    if (item.startsWith('dsh_sid=') && item.length > 'dsh_sid='.length) return item
   }
-  return null
+  return ''
 }
 
-/** 这个客户的业务线 → ID 清单。单业务线返回 `[{ name: '', id }]`；
- * 多业务线返回每条线一项；没配映射返回 `[]`。 */
-function weakLinesFor(name) {
-  const mapping = weakMappingFor(name)
-  if (mapping === null || mapping === undefined) return []
-  if (typeof mapping === 'string') {
-    const id = firstString(mapping)
-    return id === '' ? [] : [{ name: '', id }]
-  }
-  if (typeof mapping === 'object') {
-    const out = []
-    for (const [line, id] of Object.entries(mapping)) {
-      const value = firstString(id)
-      if (value !== '') out.push({ name: String(line), id: value })
-    }
-    return out
-  }
-  return []
-}
-
-/** 知识库客户名 → 万湖 enterprise_id（单业务线用；多业务线取第一条）。
- * 保留这个函数是为了向后兼容；要多业务线请用 weakLinesFor()。 */
-function weakClientIdForName(name) {
-  const lines = weakLinesFor(name)
-  return lines.length === 0 ? '' : lines[0].id
-}
-
-/** 被允许的客户 ID 集合；白名单为空时返回 null（表示不限）。 */
-function weakAllowedSet() {
-  return WEAK_CLIENT_ALLOWLIST.length === 0 ? null : new Set(WEAK_CLIENT_ALLOWLIST)
-}
-
-/** 带 TTL 的记忆缓存。外部接口有限流（共享密钥 120 次/分钟），
- * 而且它自己每 5 分钟才重算一次 —— 查更勤是白查。 */
-const weakCache = new Map()
-
-/** 调外部接口一次。返回 { ok, status, json } 或 { ok:false, error, detail }。
- * 绝不抛异常，让调用方决定怎么说人话。 */
-async function insightsRequest(method, path, body, timeoutMs) {
-  const controller = new AbortController()
-  const timer = setTimeout(() => { controller.abort() }, timeoutMs)
+/** 以当前登录用户身份调 dsh-cloud 一次。返回 { ok, status, json } 或 { ok:false, error, detail }。绝不抛异常。 */
+async function dshGet(req, path) {
+  const cookie = dshSessionCookie(req)
+  if (cookie === '') return { ok: false, error: 'not-logged-in', detail: '没拿到 DSH 登录状态，请从 DSH 页面重新进入工作台。' }
   try {
-    const init = {
-      method,
-      headers: {
-        'X-API-Key': INSIGHTS_KEY,
-        accept: 'application/json',
-      },
-      signal: controller.signal,
-    }
-    if (body !== undefined) {
-      init.headers['content-type'] = 'application/json'
-      init.body = JSON.stringify(body)
-    }
-    const response = await fetch(`${INSIGHTS_BASE}${path}`, init)
-    const text = await response.text()
+    const response = await fetch(`${DSH_BASE}${path}`, {
+      method: 'GET',
+      headers: { accept: 'application/json', cookie, 'accept-encoding': 'identity' },
+      signal: AbortSignal.timeout(DSH_TIMEOUT_MS),
+    })
     let json = null
-    try { json = JSON.parse(text) } catch { json = null }
-    return {
-      ok: true,
-      status: response.status,
-      json,
-      headers: {
-        taskId: firstString(response.headers.get('x-collection-task-id')),
-        excluded: numberOrNull(response.headers.get('x-excluded-unmapped-question-count')),
-        requestId: firstString(response.headers.get('x-request-id')),
-      },
-    }
+    try { json = await response.json() } catch { json = null }
+    return { ok: true, status: response.status, json }
   } catch (error) {
-    const aborted = error !== null && typeof error === 'object' && error.name === 'AbortError'
-    return {
-      ok: false,
-      error: aborted ? 'timeout' : 'network',
-      detail: `请求 ${path} 失败：${String(error && error.message ? error.message : error)}`,
-    }
-  } finally {
-    clearTimeout(timer)
+    return { ok: false, error: 'unreachable', detail: `连不上 DSH 数据服务：${String(error && error.message ? error.message : error)}` }
   }
 }
 
-/** 带缓存地调外部接口。`fresh` 为真时跳过并清掉这条缓存（用户点「刷新」）。 */
-async function insightsCached(key, ttlMs, method, path, body, fresh) {
-  const now = Date.now()
-  if (fresh === true) weakCache.delete(key)
-  const hit = weakCache.get(key)
-  if (hit !== undefined && now - hit.at < ttlMs) return hit.value
-  const value = await insightsRequest(method, path, body, INSIGHTS_TIMEOUT_MS)
-  weakCache.set(key, { at: now, value })
-  return value
+/** dsh-cloud 返回码 → 人话。 */
+function dshErrorText(status, json) {
+  const detail = json !== null && typeof json === 'object' && typeof json.detail === 'string' ? json.detail : ''
+  if (status === 401) return '登录已过期，请刷新 DSH 页面后再试'
+  if (status === 403) return detail || '这个客户没有分配给你'
+  if (status === 404) return detail || '这个客户还没有这一期的数据'
+  return detail || `数据服务返回 HTTP ${String(status)}`
 }
 
-/** 外部接口的 404 有三种：客户不在 45 天窗口、没有可用采集、路由不存在。
- * 前两种对用户是「这个客户暂无数据」，第三种是我们自己调错了。 */
-function insightsErrorText(status, json) {
-  const code = json !== null && typeof json === 'object' && typeof json.error === 'string' ? json.error : ''
-  if (code === 'customer_outside_45_day_window') return '这个客户最近 45 天没有采集任务'
-  if (code === 'no_successful_collection' || code === 'no_collection') return '这个客户还没有成功的采集'
-  if (code !== '') return `数据服务返回：${code}`
-  return `数据服务返回 HTTP ${String(status)}`
+/** 当前用户可见的客户（来自 dsh-cloud，按登录用户过滤）。返回 { ok, customers } 或 { ok:false, error, detail, status }。 */
+async function dshClients(req) {
+  const called = await dshGet(req, DSH_CAPTURE_CLIENTS)
+  if (!called.ok) return called
+  if (called.status !== 200 || called.json === null || !Array.isArray(called.json.customers)) {
+    return { ok: false, error: called.status === 401 ? 'not-logged-in' : 'dsh-failed', status: called.status, detail: dshErrorText(called.status, called.json) }
+  }
+  return { ok: true, customers: called.json.customers }
 }
 
 /** 把标量字段拼成一句人话（files / chars 这种），没有就不写。 */function metaOf(item) {
@@ -515,192 +373,84 @@ export function create(ctx, config) {
       })
     }
 
-    /* ---- 薄弱问句：可查客户目录 -------------------------------------
-     * 从**知识库的客户**出发（那才是我们认识的客户），用映射对到万湖的
-     * enterprise_id，再带上这次采集的日期。对不上映射的客户照样返回，
-     * 但 `enterpriseId` 是空的 —— 前端据此置灰，不猜。 */
+    /* ---- 薄弱问句：可查客户目录（来自 dsh-cloud，按登录用户过滤）-----------
+     * 形状保持不变：customers[{ id(默认期企业 ID), clientKey, name, collectedAt, inWindow, lines[] }]。
+     * 前端按客户名和知识库客户对上（两边都来自 DSH，名字一致）。 */
     handlers[WEAK_DIR_PATH] = async (req, res) => {
       if (req.method !== 'GET') { methodNotAllowed(res); return }
-      const called = await insightsCached('dir', INSIGHTS_DIR_CACHE_MS, 'GET', '/customers')
-      const insightsCustomers = []
-      let insightsError = null
-      if (!called.ok) {
-        insightsError = called.detail
-      } else if (called.status !== 200 || called.json === null) {
-        insightsError = insightsErrorText(called.status, called.json)
-      } else {
-        const list = Array.isArray(called.json['客户']) ? called.json['客户'] : []
-        for (const item of list) {
-          if (item === null || typeof item !== 'object') continue
-          const id = firstString(item['客户ID'], item.customer_id)
-          if (id === '') continue
-          insightsCustomers.push({
-            id,
-            name: firstString(item['客户'], id),
-            collectedAt: firstString(item['最近采集时间']),
-          })
-        }
-      }
-      const byId = new Map(insightsCustomers.map(item => [item.id, item]))
-      const allowed = weakAllowedSet()
-      let kb = []
-      const tool = pickTool(hostCtx, knowledgeServer, clientsTool, [/hierarch/i, /(list|space|customer|client)/i])
-      if (tool !== '') {
-        const listed = await callTool(hostCtx, knowledgeServer, tool, {})
-        if (listed.ok) {
-          const normalized = normalize(listed.value)
-          if (normalized !== null) kb = normalized
-        }
-      }
+      const listed = await dshClients(req)
+      if (!listed.ok) { sendJson(res, { ok: false, error: listed.error, detail: listed.detail }); return }
       const customers = []
       const unmapped = []
-      for (const item of kb) {
-        const lines = weakLinesFor(item.name)
-        if (lines.length === 0) { unmapped.push(item.name); continue }
-        /* 每条线各自带自己的采集日；单业务线客户就只有一项（name 为空串）。 */
-        const detailed = []
-        for (const line of lines) {
-          if (allowed !== null && !allowed.has(line.id)) continue
-          const hint = byId.get(line.id) || null
-          detailed.push({
-            name: line.name,
-            id: line.id,
-            collectedAt: hint === null ? '' : hint.collectedAt,
-            inWindow: hint !== null,
-          })
-        }
-        if (detailed.length === 0) continue
-        const primary = detailed[0]
+      for (const item of listed.customers) {
+        const lines = Array.isArray(item.lines) ? item.lines : []
+        const name = firstString(item.name, item.clientKey)
+        if (lines.length === 0) { unmapped.push(name); continue }
+        const primary = lines.find(line => line.is_default) || lines[0]
         customers.push({
-          id: primary.id,
-          clientKey: item.id,
-          name: item.name,
-          meta: item.meta,
-          collectedAt: primary.collectedAt,
-          inWindow: primary.inWindow,
-          /* 多业务线客户：前端拿这个填「业务线」下拉。单业务线客户是空数组。 */
-          lines: detailed.length > 1 || detailed[0].name !== '' ? detailed : [],
+          id: firstString(primary.enterprise_id),
+          clientKey: firstString(item.clientKey),
+          name,
+          meta: '',
+          collectedAt: '',
+          inWindow: true,
+          /* 多期/多业务线客户：前端拿这个填「业务线」下拉。单期客户是空数组。 */
+          lines: lines.length > 1
+            ? lines.map(line => ({ name: firstString(line.name, line.enterprise_id), id: firstString(line.enterprise_id), collectedAt: '', inWindow: true }))
+            : [],
         })
       }
-      customers.sort((a, b) => String(b.collectedAt).localeCompare(String(a.collectedAt)))
-      sendJson(res, {
-        ok: true,
-        customers,
-        unmapped,
-        insightsError,
-        insightsTotal: insightsCustomers.length,
-        allowlist: WEAK_CLIENT_ALLOWLIST.length,
-      })
+      sendJson(res, { ok: true, customers, unmapped, insightsError: null, source: 'dsh' })
     }
 
-    /* ---- 薄弱问句：万湖侧的原始客户目录（诊断用）-------------------
-     * 只给名字和日期，用来把知识库客户对到 enterprise_id（补映射表用）。
-     * 有白名单时只回白名单内那些，避免把全公司客户列出来。 */
+    /* ---- 诊断：原样返回 dsh-cloud 的客户目录（只含当前用户可见的客户）------ */
     handlers[WEAK_RAW_PATH] = async (req, res) => {
       if (req.method !== 'GET') { methodNotAllowed(res); return }
-      const called = await insightsCached('dir', INSIGHTS_DIR_CACHE_MS, 'GET', '/customers')
-      if (!called.ok) {
-        sendJson(res, { ok: false, error: called.error, detail: called.detail })
-        return
-      }
-      if (called.status !== 200 || called.json === null) {
-        sendJson(res, { ok: false, error: 'insights-failed', status: called.status, detail: insightsErrorText(called.status, called.json) })
-        return
-      }
-      const list = Array.isArray(called.json['客户']) ? called.json['客户'] : []
-      const allowed = weakAllowedSet()
-      const customers = []
-      for (const item of list) {
-        if (item === null || typeof item !== 'object') continue
-        const id = firstString(item['客户ID'], item.customer_id)
-        if (id === '') continue
-        if (allowed !== null && !allowed.has(id)) continue
-        customers.push({ id, name: firstString(item['客户'], id), collectedAt: firstString(item['最近采集时间']) })
-      }
-      sendJson(res, {
-        ok: true,
-        windowDays: Number(called.json['统计窗口天数']) || null,
-        customers,
-        total: list.length,
-        mapping: weakMapWithEnv(),
-      })
+      const listed = await dshClients(req)
+      sendJson(res, listed.ok ? { ok: true, base: DSH_BASE, customers: listed.customers } : { ok: false, error: listed.error, detail: listed.detail })
     }
 
-    /* ---- 薄弱问句：某个客户本期全部问句的差额 ----------------------
-     * 直接透传外部接口的形状（问句 / 词根 / 平台[名称,差额] / 汇总），
-     * 筛选、排序、红绿都在客户端做 —— 接口本身也不接受这些参数。 */
+    /* ---- 薄弱问句：某个客户本期全部问句（转发 dsh-cloud 捕捉词接口）---------
+     * 前端只传企业 ID（client_id）；宿主在当前用户可见的客户里找到它属于哪个客户，
+     * 找不到就是没权限 —— 不猜、不外查。 */
     handlers[WEAK_GAPS_PATH] = async (req, res) => {
       if (req.method !== 'GET') { methodNotAllowed(res); return }
       const url = new URL(req.url ?? '/', 'http://dsh.invalid')
-      const clientId = (url.searchParams.get('client_id') ?? '').trim()
-      const fresh = url.searchParams.get('fresh') === '1'
-      if (clientId === '') {
-        sendJson(res, { ok: false, error: 'bad-request', detail: '缺少 client_id 参数' })
-        return
+      const enterpriseId = (url.searchParams.get('client_id') ?? '').trim()
+      if (enterpriseId === '') { sendJson(res, { ok: false, error: 'bad-request', detail: '缺少 client_id 参数' }); return }
+      const listed = await dshClients(req)
+      if (!listed.ok) { sendJson(res, { ok: false, error: listed.error, detail: listed.detail }); return }
+      let clientKey = ''
+      for (const item of listed.customers) {
+        if ((Array.isArray(item.lines) ? item.lines : []).some(line => firstString(line.enterprise_id) === enterpriseId)) { clientKey = firstString(item.clientKey); break }
       }
-      if (!weakClientAllowed(clientId)) {
-        /* 白名单外不调接口 —— 省一次请求，也不泄漏"这个客户存在"这件事。 */
-        sendJson(res, { ok: false, error: 'not-allowed', detail: '这个客户不在当前可查名单里。' })
-        return
-      }
-      const called = await insightsCached(
-        `gaps:${clientId}`, INSIGHTS_GAPS_CACHE_MS, 'POST', '/question-gaps', { customer_id: clientId }, fresh,
-      )
-      if (!called.ok) {
-        sendJson(res, { ok: false, error: called.error, detail: called.detail })
-        return
-      }
-      if (called.status === 404) {
-        sendJson(res, {
-          ok: false,
-          error: 'no-data',
-          status: 404,
-          code: called.json !== null && typeof called.json === 'object' ? called.json.error : '',
-          detail: insightsErrorText(404, called.json),
-        })
-        return
-      }
+      if (clientKey === '') { sendJson(res, { ok: false, error: 'not-allowed', detail: '这个客户没有分配给你。' }); return }
+      const called = await dshGet(req, `${DSH_CAPTURE_WORDS}?client=${encodeURIComponent(clientKey)}&enterprise=${encodeURIComponent(enterpriseId)}`)
+      if (!called.ok) { sendJson(res, { ok: false, error: called.error, detail: called.detail }); return }
       if (called.status !== 200 || called.json === null) {
-        sendJson(res, {
-          ok: false,
-          error: 'insights-failed',
-          status: called.status,
-          detail: insightsErrorText(called.status, called.json),
-        })
+        sendJson(res, { ok: false, error: called.status === 403 ? 'not-allowed' : called.status === 404 ? 'no-data' : 'dsh-failed', status: called.status, detail: dshErrorText(called.status, called.json) })
         return
       }
-      const raw = called.json
-      const questions = Array.isArray(raw['问句']) ? raw['问句'] : []
-      const out = []
-      for (const item of questions) {
-        if (item === null || typeof item !== 'object') continue
-        const platforms = []
-        for (const platform of (Array.isArray(item['平台']) ? item['平台'] : [])) {
-          if (platform === null || typeof platform !== 'object') continue
-          platforms.push({
-            name: firstString(platform['名称']),
-            gap: numberOrNull(platform['差额']),
-          })
-        }
-        const summary = item['汇总'] !== null && typeof item['汇总'] === 'object' ? item['汇总'] : {}
-        out.push({
-          question: firstString(item['问句']),
-          root: firstString(item['词根']),
-          platforms,
-          summary: {
-            gap: numberOrNull(summary['差额']),
-            weakCount: numberOrNull(summary['弱平台数']),
-          },
-        })
+      const body = called.json
+      const questions = Array.isArray(body.questions) ? body.questions : []
+      if (questions.length === 0) {
+        sendJson(res, { ok: false, error: 'no-data', status: 404, detail: '这个客户这一期还没有薄弱问句数据（可能还在计算）。' })
+        return
       }
       sendJson(res, {
         ok: true,
-        client: firstString(raw['客户'], clientId),
-        clientId,
-        collectedAt: firstString(raw['采集时间']),
-        taskId: called.headers.taskId,
-        excluded: called.headers.excluded,
-        questions: out,
+        client: firstString(body.client, clientKey),
+        clientKey,
+        clientId: enterpriseId,
+        collectedAt: firstString(body.collectedAt),
+        taskId: firstString(body.taskId),
+        excluded: null,
+        algoVersion: firstString(body.algo_version),
+        runId: firstString(body.run_id),
+        counts: body.counts || null,
+        /* 每条：qid / question / root / status(weak|behind|lead) / platforms[{name,gap,status}] /
+         * summary{gap,weakCount} / sources_top（该在哪补前 3）。gap 单位百分点，正数 = 我们落后。 */
+        questions,
       })
     }
 
@@ -727,13 +477,18 @@ export function create(ctx, config) {
         sendJson(res, { ok: false, error: 'bad-reply', detail: `认不出 ${tool} 的返回形状（收到 ${describe(called.value)}）`, server: knowledgeServer, tool })
         return
       }
-      /* 知识库不给产品线时，用映射表里的业务线补上 —— 业务线是**选的**，
-       * 而 ID 绑在业务线上（华熙生物四条线各一个企业）。纯本地查表，不请求。 */
+      /* 知识库不给产品线时，用 DSH 里该客户的各期（业务线）补上 —— 业务线是**选的**，
+       * 而企业 ID 绑在业务线上（华熙生物四条线各一个企业）。取不到就不补，不影响名单。 */
+      const dshListed = await dshClients(req)
+      const dshLinesByName = new Map()
+      if (dshListed.ok) {
+        for (const item of dshListed.customers) dshLinesByName.set(firstString(item.name), Array.isArray(item.lines) ? item.lines : [])
+      }
       for (const customer of customers) {
         if (Array.isArray(customer.business_lines) && customer.business_lines.length > 0) continue
-        const lines = weakLinesFor(customer.name)
-        if (lines.length > 1 || (lines.length === 1 && lines[0].name !== '')) {
-          customer.business_lines = lines.map(line => ({ id: line.name, name: line.name }))
+        const lines = dshLinesByName.get(firstString(customer.name)) || []
+        if (lines.length > 1) {
+          customer.business_lines = lines.map(line => ({ id: firstString(line.name, line.enterprise_id), name: firstString(line.name, line.enterprise_id) }))
         }
       }
       sendJson(res, { ok: true, customers, server: knowledgeServer, tool })
