@@ -275,15 +275,17 @@ const TOOL_TIMEOUT_MS = 15000
  * hostCtx/ctx 下。不要把这些形状差异带进每个路由，统一在这里取。
  */
 function toolService(ctx) {
-  const candidates = [ctx, ctx && ctx.hostCtx, ctx && ctx.ctx, ctx && ctx.harness]
+  /* Cordis contexts throw on un-injected property reads ("cannot get property … without inject"). */
+  const peek = (obj, key) => { try { return obj ? obj[key] : undefined } catch { return undefined } }
+  const candidates = [ctx, peek(ctx, 'hostCtx'), peek(ctx, 'ctx'), peek(ctx, 'harness')]
   for (const candidate of candidates) {
     if (candidate === null || typeof candidate !== 'object') continue
-    const tools = candidate.tools
+    const tools = peek(candidate, 'tools')
     if (tools !== null && typeof tools === 'object'
       && (typeof tools.schemas === 'function' || Array.isArray(tools.schemas)
         || typeof tools.execute === 'function')) return tools
-    if (typeof candidate.schemas === 'function' || Array.isArray(candidate.schemas)
-      || typeof candidate.execute === 'function') return candidate
+    const schemas = peek(candidate, 'schemas'), execute = peek(candidate, 'execute')
+    if (typeof schemas === 'function' || Array.isArray(schemas) || typeof execute === 'function') return candidate
   }
   return null
 }

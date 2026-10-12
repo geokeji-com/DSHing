@@ -77,3 +77,4 @@ test('merges local and Support draft/ready metadata without duplicate titles', (
   assert.deepEqual(new Set(merged.drafts.map(item => item.title)), new Set(['本地草稿', '本地正式', '远端草稿']))
   assert.deepEqual(merged.library.sort(), ['本地正式', '远端正式'])
 })
+
