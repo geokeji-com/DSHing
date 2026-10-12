@@ -20,3 +20,15 @@ test('task bar has an explicit 文章审核 open/refresh button wired to the rev
   assert.match(source, /wb:review-refresh/)
   assert.match(source, /\[client, at, writeCount, rvTick\]/)
 })
+
+test('both review confirmation requests carry session and client binding fields', () => {
+  const bodies = [...source.matchAll(/fetch\(WB_API\.confirmDraft,[\s\S]*?body: JSON\.stringify\(\{([\s\S]*?)\}\)/g)]
+    .map(match => match[1])
+  assert.equal(bodies.length, 2)
+  for (const body of bodies) {
+    assert.match(body, /client:\s*client/)
+    assert.match(body, /client_key:/)
+    assert.match(body, /session_id:/)
+    assert.match(body, /title:\s*title/)
+  }
+})
