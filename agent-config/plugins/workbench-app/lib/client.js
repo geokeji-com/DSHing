@@ -678,6 +678,7 @@ window.__ModuleLoader__.load({
 			".wb_task{padding:8px 20px 6px;border-bottom:1px solid var(--wb-line-soft);display:flex;flex-direction:column;gap:2px;background:var(--wb-bg);}",
 			".wb_taskRow{display:flex;align-items:baseline;gap:10px;min-width:0;}",
 			".wb_taskRow2{display:flex;gap:12px;font-size:12px;color:var(--wb-dim);min-width:0;overflow:hidden;}",
+			".wb_reviewOpen{margin-left:8px;font-size:12px;padding:2px 10px;cursor:pointer;}",
 			".wb_taskHead{display:inline-flex;gap:6px;align-items:baseline;min-width:0;}",
 			".wb_taskClient{font-weight:600;font-size:13.5px;color:var(--wb-strong);}",
 			".wb_taskDim{color:var(--wb-dim2);font-size:12px;}",
@@ -1168,6 +1169,8 @@ body[data-ds-dark-theme] .wb_rvMd mark.wbHcMk{background:var(--wb-bad-bg);color:
 		var WORKBENCH_KEY = "workbench";
 
 		/* ---- 工作台后端 API（路径收口，别再散写魔法串）---------------- */
+		/* 文章库写入工具名：正式站 MCP 服务名是 articles，旧部署是 sora-articles —— 两种都算本会话的产物。 */
+		var WB_WRITE_TOOL_RE = /^mcp__(?:articles|sora-articles)__write_article$/;
 		var WB_API = {
 			clients: "/api/workbench/clients",
 			skills: "/api/workbench/skills",
@@ -2441,7 +2444,7 @@ body[data-ds-dark-theme] .wb_rvMd mark.wbHcMk{background:var(--wb-bad-bg);color:
 					for (var wsi = 0; wsi < legacyNodes.length; wsi++) {
 						var wsn = legacyNodes[wsi];
 						if (wsn && wsn.kind === "tool-result" && wsn.call
-							&& wsn.call.name === "mcp__sora-articles__write_article" && wsn.isError !== true) {
+							&& WB_WRITE_TOOL_RE.test(String(wsn.call.name || "")) && wsn.isError !== true) {
 							try {
 								var wargs = JSON.parse(wsn.call.argsRaw || "{}");
 								var wtitle = String(wargs.title || wargs.file || "").replace(/\.md$/i, "");
@@ -2717,6 +2720,13 @@ body[data-ds-dark-theme] .wb_rvMd mark.wbHcMk{background:var(--wb-bad-bg);color:
 						.catch(function () { });
 					return function () { alive = false; };
 				}, [metaId]);
+				/* 「文章审核」按钮 / 手动刷新：任务条派发 wb:review-refresh，这里重拉草稿列表 */
+				var rvTickS = React.useState(0); var rvTick = rvTickS[0];
+				React.useEffect(function () {
+					var on = function () { rvTickS[1](function (n) { return n + 1; }); };
+					window.addEventListener("wb:review-refresh", on);
+					return function () { window.removeEventListener("wb:review-refresh", on); };
+				}, []);
 				React.useEffect(function () {
 					if (!client) { setL(function (p) { return Object.assign({}, p, { drafts: null, sel: "", body: "", checked: {}, done: {} }); }); return; }
 					var alive = true;
@@ -2742,7 +2752,7 @@ body[data-ds-dark-theme] .wb_rvMd mark.wbHcMk{background:var(--wb-bad-bg);color:
 						})
 						.catch(function () { });
 					return function () { alive = false; };
-				}, [client, at, writeCount]);   /* at / writeCount 回来要重拉重过滤 */
+				}, [client, at, writeCount, rvTick]);   /* at / writeCount / 手动刷新 回来要重拉重过滤 */
 
 				/* 检查结果持久化恢复：本组件 state 归属正确，客户一定就从 sessionStorage 捞 */
 				React.useEffect(function () {
@@ -3319,7 +3329,7 @@ body[data-ds-dark-theme] .wb_rvMd mark.wbHcMk{background:var(--wb-bad-bg);color:
 				for (var wi = 0; wi < list.length; wi++) {
 					var tn = list[wi];
 					if (tn && tn.kind === "tool-result" && tn.call
-						&& tn.call.name === "mcp__sora-articles__write_article" && tn.isError !== true) {
+						&& WB_WRITE_TOOL_RE.test(String(tn.call.name || "")) && tn.isError !== true) {
 						writeDone += 1;
 						try {
 							var targs = JSON.parse(tn.call.argsRaw || "{}");
@@ -3388,6 +3398,15 @@ body[data-ds-dark-theme] .wb_rvMd mark.wbHcMk{background:var(--wb-bad-bg);color:
 				var colR = h("div", { className: "wb_col wb_colDiv" },
 					h("div", { className: "wb_colTitle" },
 						"任务进程",
+						h("button", {
+							type: "button", className: "wb_mini wb_reviewOpen", title: "在右侧打开「文章审核」并刷新草稿列表",
+							onClick: function () {
+								var ctrl = WbCtx && WbCtx.sidebarRight;
+								try { if (ctrl && typeof ctrl.openTab === "function") ctrl.openTab("wb-review", { params: { client: meta.client, meta: metaId } }); }
+								catch (e) { console.warn("[dsh-workbench] 打开审核侧栏失败：", String(e)); }
+								setTimeout(function () { window.dispatchEvent(new CustomEvent("wb:review-refresh")); }, 50);
+							},
+						}, "文章审核 ›"),
 						h("span", { className: "wb_tstat" }, (function () {
 							var done = 0;
 							for (var k = 0; k < taskRows.length; k++) if (taskRows[k][0] === "done") done++;
