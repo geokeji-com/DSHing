@@ -41,6 +41,28 @@ test('does not let a wrong preferred tool hide the fallback tool', () => {
   )
 })
 
+test('resolves article tools from production server-id and host context shapes', () => {
+  const names = [
+    'mcp__articles__read_article',
+    'mcp__articles__write_article',
+  ]
+  const registry = { schemas: () => names.map(name => ({ name })) }
+  for (const { ctx, server } of [
+    { ctx: { tools: registry }, server: 'articles' },
+    { ctx: { hostCtx: { tools: registry } }, server: 'articles' },
+    { ctx: { tools: { schemas: () => names.map(name => ({ name: name.replace('mcp__articles__', 'mcp__mcp-articles__') })) } }, server: 'mcp-articles' },
+  ]) {
+    assert.deepEqual(
+      resolveTool(ctx, 'mcp-articles', ['articles', 'sora-articles'], 'write_article', [/write_article/i, /write/i]),
+      { server, tool: 'write_article' },
+    )
+    assert.deepEqual(
+      resolveTool(ctx, 'mcp__articles__', ['articles'], 'read_article', [/read_article/i, /read/i]),
+      { server, tool: 'read_article' },
+    )
+  }
+})
+
 test('merges local and Support draft/ready metadata without duplicate titles', () => {
   const mcp = normalizeLibraryArticles([
     { title: '远端草稿', status: 'draft', chars: 12, updated_at: '2026-09-29T01:00:00Z' },

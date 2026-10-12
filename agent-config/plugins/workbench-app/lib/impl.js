@@ -260,22 +260,78 @@ function forbidden(res) { sendJson(res, { ok: false, error: 'forbidden' }, 403) 
 const DEFAULT_KNOWLEDGE_SERVER = 'sora-knowledge'
 const DEFAULT_LIBRARY_SERVER = 'sora-articles'
 
-const KNOWLEDGE_SERVER_ALIASES = ['knowledge', 'sora-knowledge']
-const LIBRARY_SERVER_ALIASES = ['articles', 'sora-articles']
+const KNOWLEDGE_SERVER_ALIASES = ['knowledge', 'sora-knowledge', 'mcp-knowledge']
+const LIBRARY_SERVER_ALIASES = ['articles', 'sora-articles', 'mcp-articles']
 
 /** 一次工具调用的预算。 */
 const TOOL_TIMEOUT_MS = 15000
 
 /* ---------------------------------------------------------------- 工具注册表 */
 
-/** 某个 MCP server 在本 Host 上注册了哪些工具（去掉 `mcp__<server>__` 前缀）。 */
+/**
+ * MCP 工具注册表的兼容读取。
+ *
+ * 生产 Host 的工具服务挂在 ctx.tools；一些 harness/旧宿主把它包在
+ * hostCtx/ctx 下。不要把这些形状差异带进每个路由，统一在这里取。
+ */
+function toolService(ctx) {
+  const candidates = [ctx, ctx && ctx.hostCtx, ctx && ctx.ctx, ctx && ctx.harness]
+  for (const candidate of candidates) {
+    if (candidate === null || typeof candidate !== 'object') continue
+    const tools = candidate.tools
+    if (tools !== null && typeof tools === 'object'
+      && (typeof tools.schemas === 'function' || Array.isArray(tools.schemas)
+        || typeof tools.execute === 'function')) return tools
+    if (typeof candidate.schemas === 'function' || Array.isArray(candidate.schemas)
+      || typeof candidate.execute === 'function') return candidate
+  }
+  return null
+}
+
+function schemaNames(ctx) {
+  const tools = toolService(ctx)
+  if (tools === null) return []
+  try {
+    const raw = typeof tools.schemas === 'function' ? tools.schemas() : tools.schemas
+    if (Array.isArray(raw)) return raw
+      .map(schema => typeof schema === 'string' ? schema : schema && schema.name)
+      .filter(name => typeof name === 'string' && name !== '')
+    if (Array.isArray(tools)) return tools
+      .map(schema => typeof schema === 'string' ? schema : schema && schema.name)
+      .filter(name => typeof name === 'string' && name !== '')
+  } catch { /* a disconnected registry is equivalent to no tools */ }
+  return []
+}
+
+/** Normalize config/plugin-id/prefix spellings to the serverName used in calls. */
+function canonicalServerName(value) {
+  let name = firstString(value)
+  if (name.startsWith('mcp__')) name = name.slice('mcp__'.length)
+  if (name.endsWith('__')) name = name.slice(0, -'__'.length)
+  if (name === 'mcp-articles' || name === 'sora-articles') return 'articles'
+  if (name === 'mcp-knowledge' || name === 'sora-knowledge') return 'knowledge'
+  return name
+}
+
+function sameServer(left, right) {
+  return canonicalServerName(left) !== ''
+    && canonicalServerName(left) === canonicalServerName(right)
+}
+
+/** Parse both canonical `mcp__server__tool` and bare `server__tool` names. */
+function splitToolName(value) {
+  const name = firstString(value)
+  const match = /^(?:mcp__)?(.+)__(.+)$/.exec(name)
+  return match === null ? null : { server: match[1], tool: match[2], name }
+}
+
+function registeredTools(ctx, server) {
+  return schemaNames(ctx).map(splitToolName).filter(entry => entry !== null && sameServer(entry.server, server))
+}
+
+/** 某个 MCP server 在本 Host 上注册了哪些工具（去掉 server 前缀）。 */
 function toolsOf(ctx, server) {
-  const prefix = `mcp__${server}__`
-  return ctx.tools.schemas()
-    .map(schema => schema.name)
-    .filter(name => name.startsWith(prefix))
-    .map(name => name.slice(prefix.length))
-    .sort()
+  return registeredTools(ctx, server).map(entry => entry.tool).sort()
 }
 
 /** 挑一个工具：优先用户指定的，其次按名字猜（hierarchy → list → 第一个）。 */
@@ -301,7 +357,8 @@ function resolveServer(ctx, preferred, fallbacks) {
     if (name !== '' && !candidates.includes(name)) candidates.push(name)
   }
   for (const server of candidates) {
-    if (toolsOf(ctx, server).length > 0) return server
+    const hit = registeredTools(ctx, server)[0]
+    if (hit !== undefined) return hit.server
   }
   return candidates[0] || ''
 }
@@ -318,20 +375,24 @@ function resolveTool(ctx, preferred, fallbacks, configured, hints) {
    * fallback server's list/write tool. */
   if (configured !== '') {
     for (const server of candidates) {
-      if (toolsOf(ctx, server).includes(configured)) return { server, tool: configured }
+      const hit = registeredTools(ctx, server).find(entry => entry.tool === configured)
+      if (hit !== undefined) return { server: hit.server, tool: hit.tool }
     }
     for (const server of candidates) {
-      const names = toolsOf(ctx, server)
+      const names = registeredTools(ctx, server)
       for (const hint of hints) {
-        const hit = names.find(name => hint.test(name))
-        if (hit !== undefined) return { server, tool: hit }
+        const hit = names.find(entry => hint.test(entry.tool))
+        if (hit !== undefined) return { server: hit.server, tool: hit.tool }
       }
     }
     return { server: resolveServer(ctx, preferred, fallbacks), tool: '' }
   }
   for (const server of candidates) {
-    const tool = pickTool(ctx, server, configured, hints)
-    if (tool !== '') return { server, tool }
+    const names = registeredTools(ctx, server)
+    if (names.length > 0) {
+      const hit = names.find(entry => hints.some(hint => hint.test(entry.tool))) || names[0]
+      return { server: hit.server, tool: hit.tool }
+    }
   }
   return { server: resolveServer(ctx, preferred, fallbacks), tool: '' }
 }
@@ -346,7 +407,11 @@ function resolveTool(ctx, preferred, fallbacks, configured, hints) {
  */
 async function callTool(ctx, server, tool, args) {
   try {
-    const result = await ctx.tools.execute({
+    const tools = toolService(ctx)
+    if (tools === null || typeof tools.execute !== 'function') {
+      return { ok: false, error: 'mcp-missing', detail: 'Host 工具服务不可用' }
+    }
+    const result = await tools.execute({
       callId: `workbench-${tool}-${String(Date.now())}`,
       name: `mcp__${server}__${tool}`,
       arguments: args,
@@ -844,9 +909,9 @@ export function create(ctx, config) {
       const byId = new Map(insightsCustomers.map(item => [item.id, item]))
       const allowed = weakAllowedSet()
       let kb = []
-      const tool = pickTool(hostCtx, knowledgeServer, clientsTool, [/hierarch/i, /(list|space|customer|client)/i])
-      if (tool !== '') {
-        const listed = await callTool(hostCtx, knowledgeServer, tool, {})
+      const resolvedKnowledge = resolveTool(hostCtx, knowledgeServer, knowledgeServers, clientsTool, [/hierarch/i, /(list|space|customer|client)/i])
+      if (resolvedKnowledge.tool !== '') {
+        const listed = await callTool(hostCtx, resolvedKnowledge.server, resolvedKnowledge.tool, {})
         if (listed.ok) {
           const normalized = normalize(listed.value)
           if (normalized !== null) kb = normalized
@@ -1016,7 +1081,7 @@ export function create(ctx, config) {
     handlers[MCP_INFO_PATH] = (req, res) => {
       if (req.method !== 'GET') { methodNotAllowed(res); return }
       const servers = new Map()
-      for (const name of hostCtx.tools.schemas().map(schema => schema.name)) {
+      for (const name of schemaNames(hostCtx)) {
         const match = /^mcp__([^_]+(?:_[^_]+)*)__(.+)$/.exec(name)
         if (match === null) continue
         if (!servers.has(match[1])) servers.set(match[1], [])
@@ -1028,7 +1093,7 @@ export function create(ctx, config) {
         servers: [...servers.entries()]
           .map(([server, tools]) => ({ server, tools: tools.sort() }))
           .sort((a, b) => a.server.localeCompare(b.server)),
-        toolCount: hostCtx.tools.schemas().length,
+        toolCount: schemaNames(hostCtx).length,
       })
     }
 
@@ -1046,7 +1111,7 @@ export function create(ctx, config) {
           error: 'mcp-missing',
           workspace,
           detail: `没找到 ${knowledgeServer} / knowledge / sora-knowledge 的工具。设置 → MCP 里确认这台服务器已连接。`,
-          available: hostCtx.tools.schemas().map(schema => schema.name).filter(name => name.startsWith('mcp__')).sort(),
+          available: schemaNames(hostCtx).filter(name => name.startsWith('mcp__')).sort(),
         })
         return
       }
@@ -1478,15 +1543,15 @@ export function create(ctx, config) {
           }
           article = called.value
         } else {
-          if (!localSource) {
-            sendJson(res, {
-              ok: false,
-              error: 'write-article-missing',
-              detail: 'Support 草稿已读取，但没有可用的 write_article 工具。',
-            }, 502)
-            return
-          }
-          process.stderr.write('[dsh-workbench] confirm-draft：未找到 write_article，仅做本地 rename（Support 未更新）\n')
+          /* A local mirror is not proof that Support was updated. Never report
+           * success or move it into the ready directory when the remote write
+           * tool is unavailable. */
+          sendJson(res, {
+            ok: false,
+            error: 'write-article-missing',
+            detail: '没有可用的 write_article 工具，Support 草稿未更新。',
+          }, 502)
+          return
         }
         /* 本地卷：远端成功后挪/清草稿；仅本地路径时保持原 409 查重。 */
         let movedTo = null

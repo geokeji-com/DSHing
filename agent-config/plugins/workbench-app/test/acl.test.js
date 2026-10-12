@@ -260,6 +260,24 @@ test('authorized confirmation keeps session, metadata and body-only workflows', 
   assert.ok(writes.every(c => c.arguments.client === 'CUS-Y' && c.arguments.draft === false))
 })
 
+test('confirmation fails closed when write_article is unavailable and keeps the local draft', async t => {
+  const f = fixture(t)
+  f.ctx.tools.schemas = () => [
+    'mcp__knowledge__list_clients',
+    'mcp__articles__read_article',
+  ].map(name => ({ name }))
+  const response = await f.request('confirm-draft', {
+    method: 'POST',
+    body: { session_id: 'y', title: 'x' },
+  })
+  assert.equal(response.status, 502)
+  assert.equal(response.body.ok, false)
+  assert.equal(response.body.error, 'write-article-missing')
+  assert.equal(existsSync(f.draft), true)
+  assert.equal(existsSync(join(f.library, '猿编程', 'x.md')), false)
+  assert.equal(f.calls.some(call => call.name.endsWith('__write_article')), false)
+})
+
 test('uid fallback requires the exact cloud homes directory and header takes precedence', async t => {
   const f = fixture(t)
   process.env.DSH_ROOT = '/opt/dsh'

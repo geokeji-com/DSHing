@@ -32,3 +32,12 @@ test('both review confirmation requests carry session and client binding fields'
     assert.match(body, /title:\s*title/)
   }
 })
+
+test('every WB_API key used by the browser is defined', () => {
+  const referenced = new Set([...source.matchAll(/WB_API\.([A-Za-z_$][\w$]*)/g)].map(match => match[1]))
+  const start = source.indexOf('var WB_API = {')
+  const end = source.indexOf('\n\t\t};', start)
+  assert.ok(start >= 0 && end > start, 'WB_API registry exists')
+  const registry = source.slice(start, end)
+  for (const key of referenced) assert.match(registry, new RegExp('\\b' + key + '\\s*:'), key)
+})
