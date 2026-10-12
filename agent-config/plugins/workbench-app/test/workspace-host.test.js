@@ -94,7 +94,7 @@ test('index ensures only the personal directory and registers it once, without u
   assert.deepEqual(f.calls, [
     ['mkdir', personalPath, { recursive: true }], ['create', personalPath, '我的工作区'],
   ])
-  assert.equal(f.routes.length, 12)
+  assert.equal(f.routes.length, 17)
   assert.equal(f.rows[0], legacy)
   assert.deepEqual(f.rows[0].sessionIds, ['old-session'])
   f.index.apply(f.ctx, {})
@@ -114,7 +114,7 @@ test('index skips with a log when DSH_HOME is absent and still registers every r
   const f = host({ env: {} })
   f.index.apply(f.ctx, {})
   assert.deepEqual(f.calls, [])
-  assert.equal(f.routes.length, 12)
+  assert.equal(f.routes.length, 17)
   assert.match(f.logs.join(''), /DSH_HOME.*跳过/)
 })
 
@@ -123,7 +123,7 @@ test('index directory and registry failures never prevent route registration', a
     const f = host({ failure })
     assert.doesNotThrow(() => f.index.apply(f.ctx, {}))
     await new Promise(resolve => setImmediate(resolve))
-    assert.equal(f.routes.length, 12)
+    assert.equal(f.routes.length, 17)
     assert.match(f.logs.join(''), /失败/)
   }
 })

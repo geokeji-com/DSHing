@@ -7,8 +7,8 @@
  * 浏览器做不到的事：调 MCP、列技能。全部走 DSH 自己已经挂好的东西，
  * **不自己配地址、不碰任何 token**：
  *
- *   客户    → `ctx.tools.execute('mcp__sora-knowledge__list_clients')`
- *   文章库  → `ctx.tools.execute('mcp__sora-articles__list_articles')`
+ *   客户    → `ctx.tools.execute('mcp__knowledge__list_clients')`
+ *   文章库  → `ctx.tools.execute('mcp__articles__list_articles')`
  *   技能    → `ctx.skills.list()`（dsh-skill-remote 注册的 provider）
  *
  * 好处：用户在「设置 → MCP」里换地址/换服务器，或者换技能服务，工作台自动跟着走。
@@ -23,33 +23,41 @@
  *   GET /api/workbench/skills               → { ok, skills:  [{name,description,whenToUse,source,provider}] }
  *   GET /api/workbench/articles?client=NAME → { ok, articles:[{id,title}] }
  *   GET /api/workbench/mcp                  → 诊断：这台 Host 挂了哪些 MCP、各有哪些工具
+ *   POST/GET /api/workbench/task-meta       → 装配参数；POST 持久化 client_key(CUS-*) + display client
+ *   GET/POST /api/workbench/session-client  → session_id ↔ client_key 索引
+ *   POST /api/workbench/confirm-draft       → 绑死 client_key → write_article(draft:false) + 本地草稿挪正式
  */
 
-import { mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, existsSync, renameSync, copyFileSync } from 'node:fs'
-import { join, dirname, basename } from 'node:path'
+
+import { mkdirSync, realpathSync, readFileSync, writeFileSync, readdirSync, statSync, existsSync, renameSync, unlinkSync } from 'node:fs'
+import { join, dirname, basename, resolve } from 'node:path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-const execFileP = promisify(execFile)
+
+const execFileP = typeof execFile === 'function' && typeof promisify === 'function'
+  ? promisify(execFile)
+  : async () => { throw new Error('hardcheck runner unavailable') }
 
 const CLIENTS_PATH = '/api/workbench/clients'
 const SKILLS_PATH = '/api/workbench/skills'
 const ARTICLES_PATH = '/api/workbench/articles'
 const MCP_INFO_PATH = '/api/workbench/mcp'
 const TASK_META_PATH = '/api/workbench/task-meta'
-const TASK_META_DIR = '/home/dsh/.dsh/workbench-meta'
+// Test overrides are resolved at use time; production storage stays in place.
+const taskMetaDir = () => process.env.DSH_WORKBENCH_META_DIR || '/home/dsh/.dsh/workbench-meta'
 const TASK_STATUS_PATH = '/api/workbench/task-status'
 const DRAFTS_PATH = '/api/workbench/drafts'
 const DRAFT_PATH = '/api/workbench/draft'
 const CONFIRM_DRAFT_PATH = '/api/workbench/confirm-draft'
-const CHECK_PATH = '/api/workbench/check'
-/* 文章硬检脚本（09-30 上线）：独立 Node 工具，git 仓库 DSHing/文章硬检/。
- * 只查草稿区（draftDir）现存的文件 —— 已入库的不再拦。 */
-const HARDCHECK_SCRIPT = '/home/dsh/DSHing/文章硬检/硬检.mjs'
-const WORKSPACE_ROOT = '/home/dsh/生文'
+const SESSION_CLIENT_PATH = '/api/workbench/session-client'
+const sessionClientIndex = () => join(taskMetaDir(), 'session-client-index.json')
 const ASSIGN_GROUP_PATH = '/api/workbench/assign-client-group'
 const CLIENT_MAP_PATH = '/api/workbench/client-map'
-const CLIENT_MAP_FILE = '/home/dsh/.dsh/workbench-meta/client-map.json'
-const LIBRARY_ROOT = '/srv/dsh-data/文章库'
+const clientMapFile = () => join(taskMetaDir(), 'client-map.json')
+const personalWorkspacePath = () => process.env.DSH_WORKBENCH_PERSONAL_WORKSPACE
+  || (process.env.DSH_HOME ? join(process.env.DSH_HOME, 'workspaces', 'default') : null)
+const workspaceRoot = () => process.env.DSH_WORKBENCH_WORKSPACE_ROOT || personalWorkspacePath()
+const libraryRoot = () => process.env.DSH_WORKBENCH_LIBRARY_ROOT || '/srv/dsh-data/文章库'
 
 /* ---- 薄弱问句（2026-10-10 接外部接口）---------------------------------
  * 数据来自「对外客户问句差额和信源渠道 API」（交付文档见仓库
@@ -62,6 +70,8 @@ const LIBRARY_ROOT = '/srv/dsh-data/文章库'
 const WEAK_DIR_PATH = '/api/workbench/weak-dir'
 const WEAK_GAPS_PATH = '/api/workbench/weak-gaps'
 const SESSION_CREATE_PATH = '/api/workbench/session-create'
+const CHECK_PATH = '/api/workbench/check'
+const HARDCHECK_SCRIPT = process.env.WORKBENCH_HARDCHECK_SCRIPT || '/home/dsh/DSHing/文章硬检/硬检.mjs'
 const WEAK_RAW_PATH = '/api/workbench/weak-raw'
 
 const INSIGHTS_BASE = 'http://182.92.179.181/api/external-insights/v1'
@@ -137,9 +147,121 @@ const INSIGHTS_GAPS_CACHE_MS = 300000
 /** 单次外部请求预算。 */
 const INSIGHTS_TIMEOUT_MS = 20000
 
+
+// Missing legacy directories still have registry rows; never recreate them.
+function canonicalWorkspacePath(path) {
+  try { return realpathSync(path) } catch { return resolve(path) }
+}
+
+const legacySharedRoot = () => canonicalWorkspacePath(process.env.DSH_WORKBENCH_LEGACY_SHARED_ROOT || '/home/dsh/生文')
+
+/** Runs on the hot-loaded request path, independently of index.js startup. */
+async function resolvePersonalWorkspace(hostCtx) {
+  const path = personalWorkspacePath()
+  if (!path) throw new Error('DSH_HOME 未设置，无法确定个人工作区')
+  const registry = hostCtx.workspaceRegistry
+  if (!registry) throw new Error('workspaceRegistry 不可用')
+  if (canonicalWorkspacePath(path) === legacySharedRoot()) throw new Error('个人工作区不能使用旧共享目录')
+  mkdirSync(path, { recursive: true })
+  const canonical = realpathSync(path)
+  const row = registry.list().find(w => canonicalWorkspacePath(w.path) === canonical)
+    || await registry.create(canonical, '我的工作区')
+  if (!row || typeof row.id !== 'string' || !row.id) throw new Error('个人工作区缺少 ID')
+  return { id: row.id, path: canonical }
+}
+
+async function workspaceInfo(hostCtx) {
+  const personal = await resolvePersonalWorkspace(hostCtx)
+  const legacy = legacySharedRoot()
+  const legacySharedIds = hostCtx.workspaceRegistry.list()
+    .filter(w => canonicalWorkspacePath(w.path) === legacy).map(w => w.id)
+  return { personal, legacySharedIds }
+}
+
+const clientPathName = value => String(value ?? '').replace(/[/\\]/g, '')
+
+function jsonArray(raw) {
+  if (typeof raw !== 'string') return undefined
+  try {
+    const value = JSON.parse(raw)
+    return Array.isArray(value) ? value : undefined
+  } catch { return undefined }
+}
+
+function grantSet(raw) {
+  const values = jsonArray(raw)
+  return values === undefined ? undefined : new Set(values.filter(value => typeof value === 'string' && value !== ''))
+}
+
+/** Identity and grants come only from the trusted gateway / harness environment. */
+function requestScope(req) {
+  const headers = req.headers || {}
+  const cloud = process.env.DSH_ROOT !== undefined || process.env.DSH_ALLOWED_PROJECT_IDS !== undefined
+    || headers['x-dsh-allowed-client-keys'] !== undefined
+  const env = grantSet(process.env.DSH_ALLOWED_PROJECT_IDS)
+  const live = grantSet(headers['x-dsh-allowed-client-keys'])
+  const allowed = env !== undefined && live !== undefined
+    ? new Set([...env].filter(key => live.has(key))) : (env ?? live ?? new Set())
+  let uid = firstString(headers['x-dsh-uid'])
+  if (!uid && process.env.DSH_ROOT && process.env.DSH_HOME) {
+    const home = resolve(process.env.DSH_HOME)
+    if (dirname(home) === resolve(process.env.DSH_ROOT, 'homes')) uid = basename(home)
+  }
+  const namesHeader = headers['x-dsh-allowed-clients']
+  const names = new Set()
+  for (const entry of jsonArray(namesHeader) || []) {
+    if (entry && allowed.has(entry.key) && typeof entry.name === 'string' && entry.name !== '') names.add(clientPathName(entry.name))
+  }
+  return { cloud, uid, allowed, names, needsNames: namesHeader === undefined }
+}
+
+function authorizedClient(scope, value) {
+  if (!scope.cloud) return true
+  if (typeof value !== 'string' || value === '') return false
+  const name = clientPathName(value)
+  // These directory components must never address the shared root or its parent.
+  if (!name || name === '.' || name === '..') return false
+  return scope.allowed.has(value) || scope.allowed.has(name) || scope.names.has(name)
+}
+
+function visibleRecord(scope, record) {
+  if (!scope || !scope.cloud) return true
+  if (!record || typeof record !== 'object' || Array.isArray(record)) return false
+  if (record.owner_uid && record.owner_uid !== scope.uid) return false
+  if (record.client_key) return scope.allowed.has(record.client_key)
+  if (record.client) return authorizedClient(scope, record.client)
+  return Boolean(record.owner_uid) && record.owner_uid === scope.uid
+}
+
+function visibleEntries(scope, index) {
+  return scope.cloud ? Object.fromEntries(Object.entries(index).filter(([, entry]) => visibleRecord(scope, entry))) : index
+}
+
+function authorizedBinding(scope, body) {
+  const key = firstString(body && body.client_key)
+  return !scope.cloud || (key !== '' ? scope.allowed.has(key) : !firstString(body && body.client) || authorizedClient(scope, firstString(body.client)))
+}
+
+function stampOwner(scope, record) {
+  if (scope.cloud) {
+    delete record.owner_uid
+    if (scope.uid) record.owner_uid = scope.uid
+  }
+  return record
+}
+
+function ownEntry(index, id) {
+  return Object.hasOwn(index, id) ? index[id] : undefined
+}
+
+function forbidden(res) { sendJson(res, { ok: false, error: 'forbidden' }, 403) }
+
 /** 默认服务器名；在 cordis.patch.yml 的 config 里可改。 */
 const DEFAULT_KNOWLEDGE_SERVER = 'sora-knowledge'
 const DEFAULT_LIBRARY_SERVER = 'sora-articles'
+
+const KNOWLEDGE_SERVER_ALIASES = ['knowledge', 'sora-knowledge']
+const LIBRARY_SERVER_ALIASES = ['articles', 'sora-articles']
 
 /** 一次工具调用的预算。 */
 const TOOL_TIMEOUT_MS = 15000
@@ -164,7 +286,54 @@ function pickTool(ctx, server, configured, hints) {
     const hit = names.filter(name => hint.test(name))
     if (hit.length > 0) return hit[0]
   }
+  if (configured !== '') return ''
   return names.length > 0 ? names[0] : ''
+}
+
+/**
+ * Resolve a configured server to the first alias that has any registered tools.
+ * The configured name remains first so Noah's sora-* names continue to work.
+ */
+function resolveServer(ctx, preferred, fallbacks) {
+  const candidates = []
+  for (const server of [preferred, ...(Array.isArray(fallbacks) ? fallbacks : [])]) {
+    const name = firstString(server)
+    if (name !== '' && !candidates.includes(name)) candidates.push(name)
+  }
+  for (const server of candidates) {
+    if (toolsOf(ctx, server).length > 0) return server
+  }
+  return candidates[0] || ''
+}
+
+/** Pick a tool and its server, trying aliases when the preferred server has no match. */
+function resolveTool(ctx, preferred, fallbacks, configured, hints) {
+  const candidates = []
+  for (const server of [preferred, ...(Array.isArray(fallbacks) ? fallbacks : [])]) {
+    const name = firstString(server)
+    if (name !== '' && !candidates.includes(name)) candidates.push(name)
+  }
+  /* An explicitly configured tool must win on any alias before heuristic
+   * selection; otherwise a preferred server's read tool could mask a
+   * fallback server's list/write tool. */
+  if (configured !== '') {
+    for (const server of candidates) {
+      if (toolsOf(ctx, server).includes(configured)) return { server, tool: configured }
+    }
+    for (const server of candidates) {
+      const names = toolsOf(ctx, server)
+      for (const hint of hints) {
+        const hit = names.find(name => hint.test(name))
+        if (hit !== undefined) return { server, tool: hit }
+      }
+    }
+    return { server: resolveServer(ctx, preferred, fallbacks), tool: '' }
+  }
+  for (const server of candidates) {
+    const tool = pickTool(ctx, server, configured, hints)
+    if (tool !== '') return { server, tool }
+  }
+  return { server: resolveServer(ctx, preferred, fallbacks), tool: '' }
 }
 
 /**
@@ -222,7 +391,8 @@ function unwrapMcp(value) {
   if (structured !== undefined && structured !== null) {
     if (Array.isArray(structured)) return structured
     if (typeof structured === 'object'
-      && (Array.isArray(structured.customers) || Array.isArray(structured.clients) || Array.isArray(structured.items))) {
+      && (Array.isArray(structured.customers) || Array.isArray(structured.clients)
+        || Array.isArray(structured.items) || Array.isArray(structured.articles))) {
       return structured
     }
   }
@@ -274,140 +444,8 @@ function firstString() {
   return ''
 }
 
-/* ------------------------------------------------------ 薄弱问句（外部接口） */
-
-/** 宽松取数：认 number，也认数字字符串；认不出返回 null（**不当 0**）。 */
-function numberOrNull(value) {
-  if (typeof value === 'number' && Number.isFinite(value)) return value
-  if (typeof value === 'string' && value.trim() !== '') {
-    const parsed = Number(value)
-    if (Number.isFinite(parsed)) return parsed
-  }
-  return null
-}
-
-/** 客户 ID 是否允许看。白名单为空 = 不限（开发期留的后门，别在生产用）。 */
-function weakClientAllowed(clientId) {
-  if (WEAK_CLIENT_ALLOWLIST.length === 0) return true
-  return WEAK_CLIENT_ALLOWLIST.includes(clientId)
-}
-
-/** 知识库客户名 → 映射值。查不到返回 null（**不猜**）。
- * 值可能是 ID 字符串（单业务线），也可能是 { 业务线: ID }（多业务线）。 */
-function weakMappingFor(name) {
-  const wanted = firstString(name)
-  if (wanted === '') return null
-  const map = weakMapWithEnv()
-  if (Object.prototype.hasOwnProperty.call(map, wanted)) return map[wanted]
-  const squash = value => String(value).replace(/\s+/g, '')
-  for (const [key, value] of Object.entries(map)) {
-    if (squash(key) === squash(wanted)) return value
-  }
-  return null
-}
-
-/** 这个客户的业务线 → ID 清单。单业务线返回 `[{ name: '', id }]`；
- * 多业务线返回每条线一项；没配映射返回 `[]`。 */
-function weakLinesFor(name) {
-  const mapping = weakMappingFor(name)
-  if (mapping === null || mapping === undefined) return []
-  if (typeof mapping === 'string') {
-    const id = firstString(mapping)
-    return id === '' ? [] : [{ name: '', id }]
-  }
-  if (typeof mapping === 'object') {
-    const out = []
-    for (const [line, id] of Object.entries(mapping)) {
-      const value = firstString(id)
-      if (value !== '') out.push({ name: String(line), id: value })
-    }
-    return out
-  }
-  return []
-}
-
-/** 知识库客户名 → 万湖 enterprise_id（单业务线用；多业务线取第一条）。
- * 保留这个函数是为了向后兼容；要多业务线请用 weakLinesFor()。 */
-function weakClientIdForName(name) {
-  const lines = weakLinesFor(name)
-  return lines.length === 0 ? '' : lines[0].id
-}
-
-/** 被允许的客户 ID 集合；白名单为空时返回 null（表示不限）。 */
-function weakAllowedSet() {
-  return WEAK_CLIENT_ALLOWLIST.length === 0 ? null : new Set(WEAK_CLIENT_ALLOWLIST)
-}
-
-/** 带 TTL 的记忆缓存。外部接口有限流（共享密钥 120 次/分钟），
- * 而且它自己每 5 分钟才重算一次 —— 查更勤是白查。 */
-const weakCache = new Map()
-
-/** 调外部接口一次。返回 { ok, status, json } 或 { ok:false, error, detail }。
- * 绝不抛异常，让调用方决定怎么说人话。 */
-async function insightsRequest(method, path, body, timeoutMs) {
-  const controller = new AbortController()
-  const timer = setTimeout(() => { controller.abort() }, timeoutMs)
-  try {
-    const init = {
-      method,
-      headers: {
-        'X-API-Key': INSIGHTS_KEY,
-        accept: 'application/json',
-      },
-      signal: controller.signal,
-    }
-    if (body !== undefined) {
-      init.headers['content-type'] = 'application/json'
-      init.body = JSON.stringify(body)
-    }
-    const response = await fetch(`${INSIGHTS_BASE}${path}`, init)
-    const text = await response.text()
-    let json = null
-    try { json = JSON.parse(text) } catch { json = null }
-    return {
-      ok: true,
-      status: response.status,
-      json,
-      headers: {
-        taskId: firstString(response.headers.get('x-collection-task-id')),
-        excluded: numberOrNull(response.headers.get('x-excluded-unmapped-question-count')),
-        requestId: firstString(response.headers.get('x-request-id')),
-      },
-    }
-  } catch (error) {
-    const aborted = error !== null && typeof error === 'object' && error.name === 'AbortError'
-    return {
-      ok: false,
-      error: aborted ? 'timeout' : 'network',
-      detail: `请求 ${path} 失败：${String(error && error.message ? error.message : error)}`,
-    }
-  } finally {
-    clearTimeout(timer)
-  }
-}
-
-/** 带缓存地调外部接口。`fresh` 为真时跳过并清掉这条缓存（用户点「刷新」）。 */
-async function insightsCached(key, ttlMs, method, path, body, fresh) {
-  const now = Date.now()
-  if (fresh === true) weakCache.delete(key)
-  const hit = weakCache.get(key)
-  if (hit !== undefined && now - hit.at < ttlMs) return hit.value
-  const value = await insightsRequest(method, path, body, INSIGHTS_TIMEOUT_MS)
-  weakCache.set(key, { at: now, value })
-  return value
-}
-
-/** 外部接口的 404 有三种：客户不在 45 天窗口、没有可用采集、路由不存在。
- * 前两种对用户是「这个客户暂无数据」，第三种是我们自己调错了。 */
-function insightsErrorText(status, json) {
-  const code = json !== null && typeof json === 'object' && typeof json.error === 'string' ? json.error : ''
-  if (code === 'customer_outside_45_day_window') return '这个客户最近 45 天没有采集任务'
-  if (code === 'no_successful_collection' || code === 'no_collection') return '这个客户还没有成功的采集'
-  if (code !== '') return `数据服务返回：${code}`
-  return `数据服务返回 HTTP ${String(status)}`
-}
-
-/** 把标量字段拼成一句人话（files / chars 这种），没有就不写。 */function metaOf(item) {
+/** 把标量字段拼成一句人话（files / chars 这种），没有就不写。 */
+function metaOf(item) {
   const bits = []
   if (Number.isFinite(item.files)) bits.push(`${String(item.files)} 个文件`)
   if (Number.isFinite(item.chars)) bits.push(`${String(Math.round(item.chars / 1000))}k 字`)
@@ -449,7 +487,15 @@ function normalize(raw) {
 
 /** 文章列表可以是字符串数组，也可以是对象数组；统一成 {id,title}。 */
 function normalizeArticles(raw) {
-  const list = Array.isArray(raw) ? raw : (raw !== null && typeof raw === 'object' && Array.isArray(raw.items) ? raw.items : null)
+  const items = normalizeLibraryArticles(raw)
+  return items === null ? null : items.map(item => ({ id: item.id, title: item.title }))
+}
+
+/** Normalize article metadata while retaining the fields used by draft parity. */
+function normalizeLibraryArticles(raw) {
+  const list = Array.isArray(raw) ? raw : (raw !== null && typeof raw === 'object'
+    ? (Array.isArray(raw.items) ? raw.items : (Array.isArray(raw.articles) ? raw.articles : null))
+    : null)
   if (list === null) return null
   const out = []
   for (const item of list) {
@@ -460,13 +506,222 @@ function normalizeArticles(raw) {
     if (item === null || typeof item !== 'object') continue
     const title = firstString(item.title, item.name, item.file, item.id)
     if (title === '') continue
-    out.push({ id: firstString(item.id, item.key, title) || title, title })
+    const entry = { id: firstString(item.id, item.key, title) || title, title }
+    const status = firstString(item.status, item.state).toLowerCase()
+    if (status !== '') entry.status = status
+    if (Number.isFinite(Number(item.chars))) entry.chars = Number(item.chars)
+    const updatedAt = firstString(item.updatedAt, item.updated_at, item.updated)
+    if (updatedAt !== '') entry.updatedAt = updatedAt
+    out.push(entry)
   }
   return out
 }
 
-function sendJson(res, body) {
-  res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+/** Read article content from the common Support MCP response shapes. */
+function articleContent(raw) {
+  const value = unwrapMcp(raw)
+  if (typeof value === 'string') return value
+  if (value === null || typeof value !== 'object') return null
+  for (const key of ['content', 'body_inline', 'body', 'text', 'markdown']) {
+    if (typeof value[key] === 'string') return value[key]
+  }
+  return null
+}
+
+/**
+ * Merge local filesystem entries with Support article metadata.
+ * Local ready entries remain in drafts for the existing locked-section UI;
+ * MCP ready entries are exposed through `library` and MCP drafts through `drafts`.
+ */
+function mergeDraftLists(localDrafts, localReady, mcpArticles) {
+  const drafts = Array.isArray(localDrafts) ? localDrafts.map(item => ({ ...item })) : []
+  const ready = Array.isArray(localReady) ? localReady : []
+  const draftTitles = new Set(drafts.map(item => firstString(item && item.title)).filter(Boolean))
+  const library = []
+  const addLibrary = title => {
+    const clean = firstString(title)
+    if (clean !== '' && !library.includes(clean)) library.push(clean)
+  }
+  for (const item of ready) {
+    const title = firstString(item && item.title)
+    if (title === '') continue
+    addLibrary(title)
+    if (!draftTitles.has(title)) {
+      drafts.push({ ...item, title })
+      draftTitles.add(title)
+    }
+  }
+  if (Array.isArray(mcpArticles)) {
+    for (const item of mcpArticles) {
+      const title = firstString(item && item.title)
+      if (title === '') continue
+      const status = firstString(item.status).toLowerCase()
+      if (status === 'ready') addLibrary(title)
+      if (status === 'draft' && !draftTitles.has(title)) {
+        drafts.push({ ...item, title })
+        draftTitles.add(title)
+      }
+    }
+  }
+  drafts.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')))
+  return { drafts, library }
+}
+
+/** 从 POST body 造 task-meta 落盘记录：强制字符串化 client_key / client。 */
+function taskMetaRecordFromBody(parsed) {
+  const base = parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? { ...parsed } : {}
+  const clientKey = firstString(base.client_key)
+  const client = firstString(base.client)
+  if (clientKey !== '') base.client_key = clientKey
+  else delete base.client_key
+  if (client !== '') base.client = client
+  base.savedAt = new Date().toISOString()
+  return base
+}
+
+/** 读 session↔client 索引；坏文件当空对象。 */
+function readSessionClientIndex(filePath) {
+  const path = filePath || sessionClientIndex()
+  try {
+    const raw = readFileSync(path, 'utf8')
+    const parsed = JSON.parse(raw)
+    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed
+  } catch { /* 缺文件 / 坏 JSON → 空 */ }
+  return {}
+}
+
+/** 原子写索引。 */
+function writeSessionClientIndex(index, filePath) {
+  const path = filePath || sessionClientIndex()
+  mkdirSync(dirname(path), { recursive: true })
+  const tmp = path + '.tmp'
+  writeFileSync(tmp, JSON.stringify(index, null, 2))
+  renameSync(tmp, path)
+}
+
+/**
+ * 合并一条绑定。session_id 必填；client_key 可空（表示未归类占位）。
+ * @returns 更新后的 entry。
+ */
+function mergeSessionClientBinding(index, sessionId, entry) {
+  const id = firstString(sessionId)
+  if (id === '') throw new Error('missing-session-id')
+  const stored = ownEntry(index, id)
+  const prev = (stored !== null && typeof stored === 'object') ? stored : {}
+  const next = {
+    client_key: firstString(entry && entry.client_key, prev.client_key),
+    client: firstString(entry && entry.client, prev.client),
+    meta_id: firstString(entry && entry.meta_id, prev.meta_id),
+    topic: firstString(entry && entry.topic, prev.topic),
+    bound_at: firstString(entry && entry.bound_at) || new Date().toISOString(),
+  }
+  if (prev.owner_uid) next.owner_uid = prev.owner_uid
+  Object.defineProperty(index, id, { value: next, enumerable: true, configurable: true, writable: true })
+  return next
+}
+
+
+/**
+ * 读 task-meta JSON；坏 id / 缺文件 → null。
+ * @param {string} metaId
+ * @returns {object|null}
+ */
+function readTaskMetaRecord(metaId) {
+  const id = firstString(metaId)
+  if (!/^wbtm-[a-z0-9-]+$/.test(id)) return null
+  try {
+    const raw = readFileSync(join(taskMetaDir(), id + '.json'), 'utf8')
+    const parsed = JSON.parse(raw)
+    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed
+  } catch { /* missing / bad */ }
+  return null
+}
+
+/**
+ * 确认入库绑死客户：优先 session-client 索引，其次 task-meta。
+ * body 可带 session_id / meta_id / client_key / client。
+ * @returns {{ client_key: string, client: string, source: string }|null}
+ */
+function resolveBoundClientForConfirm(body, scope) {
+  const parsed = body !== null && typeof body === 'object' && !Array.isArray(body) ? body : {}
+  const sessionId = firstString(parsed.session_id, parsed.session)
+  const metaId = firstString(parsed.meta_id, parsed.metaId)
+  if (sessionId !== '') {
+    const index = readSessionClientIndex()
+    const entry = ownEntry(index, sessionId)
+    if (entry !== undefined && !visibleRecord(scope, entry)) return { forbidden: true }
+    if (entry !== null && typeof entry === 'object') {
+      const key = firstString(entry.client_key)
+      if (key !== '') {
+        return {
+          client_key: key,
+          client: firstString(entry.client, parsed.client),
+          source: 'session-client',
+        }
+      }
+      const viaMeta = firstString(entry.meta_id)
+      if (viaMeta !== '') {
+        const meta = readTaskMetaRecord(viaMeta)
+        if (meta !== null && !visibleRecord(scope, meta)) return { forbidden: true }
+        const key2 = firstString(meta && meta.client_key)
+        if (key2 !== '') {
+          return {
+            client_key: key2,
+            client: firstString(meta && meta.client, entry.client, parsed.client),
+            source: 'session-task-meta',
+          }
+        }
+      }
+    }
+  }
+  if (metaId !== '') {
+    const meta = readTaskMetaRecord(metaId)
+    if (meta !== null && !visibleRecord(scope, meta)) return { forbidden: true }
+    const key = firstString(meta && meta.client_key)
+    if (key !== '') {
+      return {
+        client_key: key,
+        client: firstString(meta && meta.client, parsed.client),
+        source: 'task-meta',
+      }
+    }
+  }
+  const bodyKey = firstString(parsed.client_key)
+  if (bodyKey !== '') {
+    return {
+      client_key: bodyKey,
+      client: firstString(parsed.client),
+      source: 'body',
+    }
+  }
+  return null
+}
+
+/**
+ * body 声明的 client / client_key 必须与会话绑定一致。
+ * @returns {{ ok:true }|{ ok:false, error:string, detail?:string }}
+ */
+function assertConfirmClientMatch(bound, body) {
+  if (bound === null || typeof bound !== 'object' || firstString(bound.client_key) === '') {
+    return { ok: false, error: 'client-unbound', detail: '会话未绑定 client_key，无法确认入库' }
+  }
+  const parsed = body !== null && typeof body === 'object' && !Array.isArray(body) ? body : {}
+  const reqKey = firstString(parsed.client_key)
+  const reqClient = firstString(parsed.client)
+  const boundKey = firstString(bound.client_key)
+  const boundClient = firstString(bound.client)
+  if (reqKey !== '' && reqKey !== boundKey) {
+    return { ok: false, error: 'client-mismatch', detail: `body.client_key=${reqKey} ≠ bound=${boundKey}` }
+  }
+  if (reqClient !== '' && boundClient !== '' && reqClient !== boundClient && reqClient !== boundKey) {
+    return { ok: false, error: 'client-mismatch', detail: `body.client=${reqClient} ≠ bound.client=${boundClient}` }
+  }
+  return { ok: true }
+}
+
+function sendJson(res, body, status) {
+  const code = Number.isFinite(status) && status >= 100 ? status : 200
+  res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
   res.end(JSON.stringify(body))
 }
 
@@ -475,9 +730,29 @@ function methodNotAllowed(res) {
   res.end(JSON.stringify({ ok: false, error: 'method-not-allowed' }))
 }
 
+function fail(res, status, error, detail) { sendJson(res, { ok: false, error, detail }, status) }
+
 /* 归一化函数导出，只为离线自检用（宿主加载器只用 apply）：
  *   node --input-type=module -e "import('./lib/index.js').then(m => …)" */
-export { normalize, normalizeArticles, payloadOf }
+export {
+  resolvePersonalWorkspace,
+  workspaceRoot,
+  normalize,
+  normalizeArticles,
+  normalizeLibraryArticles,
+  payloadOf,
+  articleContent,
+  mergeDraftLists,
+  resolveServer,
+  resolveTool,
+  taskMetaRecordFromBody,
+  readSessionClientIndex,
+  writeSessionClientIndex,
+  mergeSessionClientBinding,
+  resolveBoundClientForConfirm,
+  assertConfirmClientMatch,
+  readTaskMetaRecord,
+}
 
 /**
  * 造出这一版实现的路由处理函数。壳（lib/index.js）每个请求调一次，
@@ -492,53 +767,59 @@ export function create(ctx, config) {
   const libraryServer = firstString(cfg.libraryServer) || DEFAULT_LIBRARY_SERVER
   const clientsTool = firstString(cfg.clientsTool)
   const articlesTool = firstString(cfg.articlesTool) || 'list_articles'
+  const knowledgeServers = [knowledgeServer, ...KNOWLEDGE_SERVER_ALIASES]
+  const libraryServers = [libraryServer, ...LIBRARY_SERVER_ALIASES]
 
   const hostCtx = ctx
   const handlers = {}
+
+  // Called only when names are needed. Never learn grants from writable metadata.
+  async function loadClientNames(scope) {
+    if (!scope.cloud || !scope.needsNames || scope.allowed.size === 0) return
+    scope.needsNames = false
+    const resolved = resolveTool(hostCtx, knowledgeServer, knowledgeServers, 'list_clients', [/^list_clients$/i])
+    if (!resolved.tool) return
+    const called = await callTool(hostCtx, resolved.server, resolved.tool, {})
+    if (!called.ok) return
+    for (const customer of normalize(called.value) || []) {
+      if (scope.allowed.has(customer.id)) scope.names.add(clientPathName(customer.name))
+    }
+  }
 
     /* ---- 会话创建：绕开「探索未至之境」向导页 ------------------------
      * startSession() 现在落 Session Intent hero，装配台的接力挂件不在那里，
      * 提示词没人消费。这里直接调宿主 sessionController.create 造一个真实
      * （普通）会话，前端拿到 id 后 openSession 打开 —— 挂件在场，正常接力。 */
-    handlers[SESSION_CREATE_PATH] = async (req, res) => {
+    handlers[SESSION_CREATE_PATH] = async (req, res, scope) => {
       if (req.method !== 'POST') { methodNotAllowed(res); return }
       try {
-        const value = await hostCtx.sessionController.create({})
-        const sessionId = value !== null && typeof value === 'object' ? String(value.sessionId || '') : ''
+        /* Resolve the caller's personal registry row before creating anything.
+         * Passing that id keeps the deploy-line fallback on the same per-user
+         * workspace as openWorkspace(), and never silently falls back to the
+         * legacy shared directory. */
+        const personal = await resolvePersonalWorkspace(hostCtx)
+        if (scope.cloud && scope.uid === '') {
+          forbidden(res)
+          return
+        }
+        const value = await hostCtx.sessionController.create({ workspaceId: personal.id })
+        const sessionId = value !== null && typeof value === 'object' ? String(value.sessionId || value.id || '') : ''
         if (sessionId === '') {
           fail(res, 502, 'session-create-empty', '宿主返回的会话 id 为空')
           return
         }
-        sendJson(res, { ok: true, sessionId })
+        sendJson(res, { ok: true, sessionId, workspaceId: personal.id })
       } catch (error) {
         fail(res, 500, 'session-create-failed', String(error && error.message ? error.message : error))
       }
     }
 
-    /* ---- 诊断：这台 Host 挂了哪些 MCP、各有哪些工具 ---------------- */    handlers[MCP_INFO_PATH] = (req, res) => {
-      if (req.method !== 'GET') { methodNotAllowed(res); return }
-      const servers = new Map()
-      for (const name of hostCtx.tools.schemas().map(schema => schema.name)) {
-        const match = /^mcp__([^_]+(?:_[^_]+)*)__(.+)$/.exec(name)
-        if (match === null) continue
-        if (!servers.has(match[1])) servers.set(match[1], [])
-        servers.get(match[1]).push(match[2])
-      }
-      sendJson(res, {
-        ok: true,
-        configured: { knowledgeServer, libraryServer, clientsTool, articlesTool },
-        servers: [...servers.entries()]
-          .map(([server, tools]) => ({ server, tools: tools.sort() }))
-          .sort((a, b) => a.server.localeCompare(b.server)),
-        toolCount: hostCtx.tools.schemas().length,
-      })
-    }
 
     /* ---- 薄弱问句：可查客户目录 -------------------------------------
      * 从**知识库的客户**出发（那才是我们认识的客户），用映射对到万湖的
      * enterprise_id，再带上这次采集的日期。对不上映射的客户照样返回，
      * 但 `enterpriseId` 是空的 —— 前端据此置灰，不猜。 */
-    handlers[WEAK_DIR_PATH] = async (req, res) => {
+    handlers[WEAK_DIR_PATH] = async (req, res, scope) => {
       if (req.method !== 'GET') { methodNotAllowed(res); return }
       const called = await insightsCached('dir', INSIGHTS_DIR_CACHE_MS, 'GET', '/customers')
       const insightsCustomers = []
@@ -574,12 +855,14 @@ export function create(ctx, config) {
       const customers = []
       const unmapped = []
       for (const item of kb) {
+        if (scope.cloud && !authorizedClient(scope, item.id) && !authorizedClient(scope, item.name)) continue
         const lines = weakLinesFor(item.name)
         if (lines.length === 0) { unmapped.push(item.name); continue }
         /* 每条线各自带自己的采集日；单业务线客户就只有一项（name 为空串）。 */
         const detailed = []
         for (const line of lines) {
           if (allowed !== null && !allowed.has(line.id)) continue
+          if (scope.cloud && !scope.allowed.has(line.id)) continue
           const hint = byId.get(line.id) || null
           detailed.push({
             name: line.name,
@@ -615,7 +898,7 @@ export function create(ctx, config) {
     /* ---- 薄弱问句：万湖侧的原始客户目录（诊断用）-------------------
      * 只给名字和日期，用来把知识库客户对到 enterprise_id（补映射表用）。
      * 有白名单时只回白名单内那些，避免把全公司客户列出来。 */
-    handlers[WEAK_RAW_PATH] = async (req, res) => {
+    handlers[WEAK_RAW_PATH] = async (req, res, scope) => {
       if (req.method !== 'GET') { methodNotAllowed(res); return }
       const called = await insightsCached('dir', INSIGHTS_DIR_CACHE_MS, 'GET', '/customers')
       if (!called.ok) {
@@ -634,6 +917,7 @@ export function create(ctx, config) {
         const id = firstString(item['客户ID'], item.customer_id)
         if (id === '') continue
         if (allowed !== null && !allowed.has(id)) continue
+        if (scope.cloud && !scope.allowed.has(id)) continue
         customers.push({ id, name: firstString(item['客户'], id), collectedAt: firstString(item['最近采集时间']) })
       }
       sendJson(res, {
@@ -648,13 +932,17 @@ export function create(ctx, config) {
     /* ---- 薄弱问句：某个客户本期全部问句的差额 ----------------------
      * 直接透传外部接口的形状（问句 / 词根 / 平台[名称,差额] / 汇总），
      * 筛选、排序、红绿都在客户端做 —— 接口本身也不接受这些参数。 */
-    handlers[WEAK_GAPS_PATH] = async (req, res) => {
+    handlers[WEAK_GAPS_PATH] = async (req, res, scope) => {
       if (req.method !== 'GET') { methodNotAllowed(res); return }
       const url = new URL(req.url ?? '/', 'http://dsh.invalid')
       const clientId = (url.searchParams.get('client_id') ?? '').trim()
       const fresh = url.searchParams.get('fresh') === '1'
       if (clientId === '') {
         sendJson(res, { ok: false, error: 'bad-request', detail: '缺少 client_id 参数' })
+        return
+      }
+      if (scope.cloud && !scope.allowed.has(clientId)) {
+        sendJson(res, { ok: false, error: 'not-allowed', detail: '这个客户不在当前可查名单里。' })
         return
       }
       if (!weakClientAllowed(clientId)) {
@@ -723,109 +1011,139 @@ export function create(ctx, config) {
       })
     }
 
-    /* ---- 知识库：客户名单（不缓存）-------------------------------- */
-    handlers[CLIENTS_PATH] = async (req, res) => {
+
+    /* ---- 诊断：这台 Host 挂了哪些 MCP、各有哪些工具 ---------------- */
+    handlers[MCP_INFO_PATH] = (req, res) => {
       if (req.method !== 'GET') { methodNotAllowed(res); return }
-      const tool = pickTool(hostCtx, knowledgeServer, clientsTool, [/hierarch/i, /(list|space|customer|client)/i])
-      if (tool === '') {
+      const servers = new Map()
+      for (const name of hostCtx.tools.schemas().map(schema => schema.name)) {
+        const match = /^mcp__([^_]+(?:_[^_]+)*)__(.+)$/.exec(name)
+        if (match === null) continue
+        if (!servers.has(match[1])) servers.set(match[1], [])
+        servers.get(match[1]).push(match[2])
+      }
+      sendJson(res, {
+        ok: true,
+        configured: { knowledgeServer, libraryServer, clientsTool, articlesTool },
+        servers: [...servers.entries()]
+          .map(([server, tools]) => ({ server, tools: tools.sort() }))
+          .sort((a, b) => a.server.localeCompare(b.server)),
+        toolCount: hostCtx.tools.schemas().length,
+      })
+    }
+
+    /* ---- 知识库：客户名单（不缓存）-------------------------------- */
+    handlers[CLIENTS_PATH] = async (req, res, scope) => {
+      if (req.method !== 'GET') { methodNotAllowed(res); return }
+      let workspace = null
+      try { workspace = await workspaceInfo(hostCtx) } catch {
+        process.stderr.write('[dsh-workbench] 个人工作区暂不可用，新会话需重试\n')
+      }
+      const resolved = resolveTool(hostCtx, knowledgeServer, knowledgeServers, clientsTool, [/hierarch/i, /(list|space|customer|client)/i])
+      if (resolved.tool === '') {
         sendJson(res, {
           ok: false,
           error: 'mcp-missing',
-          detail: `没找到 ${knowledgeServer} 的工具。设置 → MCP 里确认这台服务器已连接。`,
+          workspace,
+          detail: `没找到 ${knowledgeServer} / knowledge / sora-knowledge 的工具。设置 → MCP 里确认这台服务器已连接。`,
           available: hostCtx.tools.schemas().map(schema => schema.name).filter(name => name.startsWith('mcp__')).sort(),
         })
         return
       }
-      const called = await callTool(hostCtx, knowledgeServer, tool, {})
+      const { server, tool } = resolved
+      const called = await callTool(hostCtx, server, tool, {})
       if (!called.ok) {
-        sendJson(res, { ok: false, error: called.error, detail: called.detail, server: knowledgeServer, tool })
+        sendJson(res, { ok: false, error: called.error, detail: called.detail, server, tool, workspace })
         return
       }
       const customers = normalize(called.value)
       if (customers === null) {
-        sendJson(res, { ok: false, error: 'bad-reply', detail: `认不出 ${tool} 的返回形状（收到 ${describe(called.value)}）`, server: knowledgeServer, tool })
+        sendJson(res, { ok: false, error: 'bad-reply', detail: `认不出 ${tool} 的返回形状（收到 ${describe(called.value)}）`, server, tool, workspace })
         return
       }
-      /* 知识库不给产品线时，用映射表里的业务线补上 —— 业务线是**选的**，
-       * 而 ID 绑在业务线上（华熙生物四条线各一个企业）。纯本地查表，不请求。 */
-      for (const customer of customers) {
-        if (Array.isArray(customer.business_lines) && customer.business_lines.length > 0) continue
-        const lines = weakLinesFor(customer.name)
-        if (lines.length > 1 || (lines.length === 1 && lines[0].name !== '')) {
-          customer.business_lines = lines.map(line => ({ id: line.name, name: line.name }))
-        }
-      }
-      sendJson(res, { ok: true, customers, server: knowledgeServer, tool })
+      sendJson(res, { ok: true, customers: scope.cloud ? customers.filter(customer => scope.allowed.has(customer.id)) : customers, server, tool, workspace })
     }
 
     /* ---- 文章库：某个客户已有的文章 -------------------------------- */
-    handlers[ARTICLES_PATH] = async (req, res) => {
+    handlers[ARTICLES_PATH] = async (req, res, scope) => {
       if (req.method !== 'GET') { methodNotAllowed(res); return }
       const url = new URL(req.url ?? '/', 'http://dsh.invalid')
       const client = (url.searchParams.get('client') ?? '').trim()
+      await loadClientNames(scope)
+      if (!authorizedClient(scope, client)) { forbidden(res); return }
       if (client === '') {
         sendJson(res, { ok: false, error: 'bad-request', detail: '缺少 client 参数' })
         return
       }
-      const tool = pickTool(hostCtx, libraryServer, articlesTool, [/list/i, /article/i])
-      if (tool === '') {
+      const resolved = resolveTool(hostCtx, libraryServer, libraryServers, articlesTool, [/^list_articles$/i, /^list/i])
+      if (resolved.tool === '') {
         sendJson(res, {
           ok: false,
           error: 'mcp-missing',
-          detail: `没找到 ${libraryServer} 的工具。设置 → MCP 里确认这台服务器已连接。`,
+          detail: `没找到 ${libraryServer} / articles / sora-articles 的工具。设置 → MCP 里确认这台服务器已连接。`,
         })
         return
       }
-      const called = await callTool(hostCtx, libraryServer, tool, { client })
+      const { server, tool } = resolved
+      const called = await callTool(hostCtx, server, tool, { client })
       if (!called.ok) {
-        sendJson(res, { ok: false, error: called.error, detail: called.detail, server: libraryServer, tool })
+        sendJson(res, { ok: false, error: called.error, detail: called.detail, server, tool })
         return
       }
       const articles = normalizeArticles(called.value)
       if (articles === null) {
-        sendJson(res, { ok: false, error: 'bad-reply', detail: `认不出 ${tool} 的返回形状（收到 ${describe(called.value)}）`, server: libraryServer, tool })
+        sendJson(res, { ok: false, error: 'bad-reply', detail: `认不出 ${tool} 的返回形状（收到 ${describe(called.value)}）`, server, tool })
         return
       }
-      sendJson(res, { ok: true, articles, client, server: libraryServer, tool })
+      sendJson(res, { ok: true, articles, client, server, tool })
     }
 
-    /* ---- 客户分组（2026-09-26）：左侧栏"工作区"当客户分组用 ----------
-     * 装配台发起 → PromptRelay 拿到空白会话 id 后调这里：
-     * 找 title=客户 的工作区（没有就建一个），把会话 attach 进去。
-     * 左侧树就变成「客户 → 会话」，不再是无分组的工作区平铺。 */
-    handlers[ASSIGN_GROUP_PATH] = async (req, res) => {
+    /* ---- Noah 左树兼容映射：session → 客户/topic ----------------------
+     * P1 的正式索引仍是 session-client；这份 map 只保留 Noah 旧壳需要的
+     * topic/登记时间，并与 session-client 合并读取，不参与 confirm 鉴权。 */
+    handlers[ASSIGN_GROUP_PATH] = async (req, res, scope) => {
       if (req.method !== 'POST') { methodNotAllowed(res); return }
       let body = ''
       req.on('data', chunk => { body += chunk })
       await new Promise(resolve => req.on('end', resolve))
-      let parsed = {}
+      let parsed
       try { parsed = JSON.parse(body || '{}') } catch { parsed = {} }
-      const sessionId = String(parsed.session ?? '')
-      const client = String(parsed.client ?? '').replace(/[/\\]/g, '')
-      const topic = String(parsed.topic ?? '').slice(0, 120)
-      if (!sessionId || !client) { sendJson(res, { ok: false, error: 'no-args' }); return }
+      const sessionId = firstString(parsed.session_id, parsed.session)
+      const client = firstString(parsed.client)
+      if (sessionId === '') { sendJson(res, { ok: false, error: 'no-args' }, 400); return }
+      await loadClientNames(scope)
+      if (!authorizedBinding(scope, parsed)) { forbidden(res); return }
       try {
         let map = {}
-        try { map = JSON.parse(readFileSync(CLIENT_MAP_FILE, 'utf8')) } catch { map = {} }
-        map[sessionId] = { client, topic, at: new Date().toISOString() }
-        mkdirSync(dirname(CLIENT_MAP_FILE), { recursive: true })
-        writeFileSync(CLIENT_MAP_FILE, JSON.stringify(map, null, 2))
-        sendJson(res, { ok: true })
+        try {
+          const raw = readFileSync(clientMapFile(), 'utf8')
+          const value = JSON.parse(raw)
+          if (value !== null && typeof value === 'object' && !Array.isArray(value)) map = value
+        } catch { /* first registration */ }
+        if (Object.hasOwn(map, sessionId) && !visibleRecord(scope, map[sessionId])) { forbidden(res); return }
+        const entry = stampOwner(scope, {
+          client,
+          client_key: firstString(parsed.client_key),
+          topic: firstString(parsed.topic),
+          meta_id: firstString(parsed.meta_id),
+          at: new Date().toISOString(),
+        })
+        Object.defineProperty(map, sessionId, { value: entry, enumerable: true, configurable: true, writable: true })
+        mkdirSync(dirname(clientMapFile()), { recursive: true })
+        writeFileSync(clientMapFile(), JSON.stringify(map, null, 2))
+        sendJson(res, { ok: true, session_id: sessionId, entry: map[sessionId] })
       } catch (error) {
-        sendJson(res, { ok: false, error: 'map-failed', detail: String(error && error.message ? error.message : error) })
+        sendJson(res, { ok: false, error: 'map-failed', detail: String(error && error.message ? error.message : error) }, 500)
       }
     }
-
-    /* 自绘侧栏（2026-09-26）：左侧栏整体自绘，"客户"只是前端分组。
-     * 会话清单来自官方 sessions 服务；这里是"会话→客户"的业务映射表。 */
-    handlers[CLIENT_MAP_PATH] = async (req, res) => {
+    handlers[CLIENT_MAP_PATH] = async (req, res, scope) => {
       if (req.method !== 'GET') { methodNotAllowed(res); return }
+      await loadClientNames(scope)
       try {
-        const map = JSON.parse(readFileSync(CLIENT_MAP_FILE, 'utf8'))
-        sendJson(res, { ok: true, map })
-      } catch {
-        sendJson(res, { ok: true, map: {} })
-      }
+        const raw = readFileSync(clientMapFile(), 'utf8')
+        const map = JSON.parse(raw)
+        sendJson(res, { ok: true, map: visibleEntries(scope, map !== null && typeof map === 'object' && !Array.isArray(map) ? map : {}) })
+      } catch { sendJson(res, { ok: true, map: {} }) }
     }
 
     /* ---- 技能：dsh-skill-remote 注册的 provider 目录 ---------------- */
@@ -866,21 +1184,24 @@ export function create(ctx, config) {
      * 装配台发起时 POST 一份装配参数，拿到 id；预填消息尾部带 [任务编号：id]，
      * 会话页顶部的任务条凭 id 读回参数展示。存 /home/dsh/.dsh/workbench-meta/
      * （不在工作区内容里，agent 碰不到 —— 它没有文件工具）。 */
-    handlers[TASK_META_PATH] = async (req, res) => {
+    handlers[TASK_META_PATH] = async (req, res, scope) => {
       if (req.method === 'POST') {
         let body = ''
         req.on('data', chunk => { body += chunk })
         await new Promise(resolve => req.on('end', resolve))
         let parsed
         try { parsed = JSON.parse(body || '{}') } catch { parsed = {} }
+        const record = taskMetaRecordFromBody(parsed)
+        if (scope.cloud && record.client_key && !scope.allowed.has(record.client_key)) { forbidden(res); return }
+        stampOwner(scope, record)
         const id = 'wbtm-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6)
         try {
-          mkdirSync(TASK_META_DIR, { recursive: true })
+          mkdirSync(taskMetaDir(), { recursive: true })
           writeFileSync(
-            join(TASK_META_DIR, id + '.json'),
-            JSON.stringify({ ...parsed, savedAt: new Date().toISOString() }, null, 2),
+            join(taskMetaDir(), id + '.json'),
+            JSON.stringify(record, null, 2),
           )
-          sendJson(res, { ok: true, id })
+          sendJson(res, { ok: true, id, client_key: record.client_key || '', client: record.client || '' })
         } catch (error) {
           sendJson(res, { ok: false, error: 'save-failed', detail: String(error && error.message ? error.message : error) })
         }
@@ -889,13 +1210,82 @@ export function create(ctx, config) {
       if (req.method === 'GET') {
         const url = new URL(req.url, 'http://localhost')
         const id = String(url.searchParams.get('id') ?? '')
-        if (!/^wbtm-[a-z0-9-]+$/.test(id)) { sendJson(res, { ok: false, error: 'bad-id' }); return }
+        if (!/^wbtm-[a-z0-9-]+$/.test(id)) {
+          sendJson(res, { ok: false, error: scope.cloud ? 'not-found' : 'bad-id' }, scope.cloud ? 404 : 200)
+          return
+        }
+        await loadClientNames(scope)
         try {
-          const raw = readFileSync(join(TASK_META_DIR, id + '.json'), 'utf8')
+          const raw = readFileSync(join(taskMetaDir(), id + '.json'), 'utf8')
+          if (scope.cloud && !visibleRecord(scope, JSON.parse(raw))) {
+            sendJson(res, { ok: false, error: 'not-found' }, 404)
+            return
+          }
           res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
           res.end(raw)
         } catch {
-          sendJson(res, { ok: false, error: 'not-found' })
+          sendJson(res, { ok: false, error: 'not-found' }, scope.cloud ? 404 : 200)
+        }
+        return
+      }
+      methodNotAllowed(res)
+    }
+
+    /* ---- session ↔ client 索引（WB-SUP P1）--------------------------
+     * 形状：{ "<session_id>": { client_key, client, meta_id, topic, bound_at } }
+     * 存 /home/dsh/.dsh/workbench-meta/session-client-index.json。
+     * GET ?session= 单条；?client_key= 该客户下会话；无 query 全量。
+     * POST 绑定（装配台起会话后拿到 session id 时写）。失败不挡发消息。 */
+    handlers[SESSION_CLIENT_PATH] = async (req, res, scope) => {
+      if (req.method === 'GET') {
+        const url = new URL(req.url ?? '/', 'http://dsh.invalid')
+        const session = (url.searchParams.get('session') ?? '').trim()
+        const clientKey = (url.searchParams.get('client_key') ?? '').trim()
+        if (scope.cloud && url.searchParams.has('client_key') && !scope.allowed.has(clientKey)) { forbidden(res); return }
+        await loadClientNames(scope)
+        const index = visibleEntries(scope, readSessionClientIndex())
+        if (session !== '' || (scope.cloud && url.searchParams.has('session'))) {
+          const binding = ownEntry(index, session) ?? null
+          if (scope.cloud && binding === null) { sendJson(res, { ok: false, error: 'not-found' }, 404); return }
+          sendJson(res, { ok: true, session, binding })
+          return
+        }
+        if (clientKey !== '') {
+          const sessions = []
+          for (const [sid, entry] of Object.entries(index)) {
+            if (entry !== null && typeof entry === 'object' && firstString(entry.client_key) === clientKey) {
+              sessions.push({ session_id: sid, ...entry })
+            }
+          }
+          sessions.sort((a, b) => String(b.bound_at || '').localeCompare(String(a.bound_at || '')))
+          sendJson(res, { ok: true, client_key: clientKey, sessions })
+          return
+        }
+        sendJson(res, { ok: true, index })
+        return
+      }
+      if (req.method === 'POST') {
+        let body = ''
+        req.on('data', chunk => { body += chunk })
+        await new Promise(resolve => req.on('end', resolve))
+        let parsed
+        try { parsed = JSON.parse(body || '{}') } catch { parsed = {} }
+        const sessionId = firstString(parsed.session_id, parsed.session)
+        if (sessionId === '') {
+          sendJson(res, { ok: false, error: 'bad-request', detail: '缺少 session_id' })
+          return
+        }
+        await loadClientNames(scope)
+        if (!authorizedBinding(scope, parsed)) { forbidden(res); return }
+        try {
+          const index = readSessionClientIndex()
+          if (Object.hasOwn(index, sessionId) && !visibleRecord(scope, index[sessionId])) { forbidden(res); return }
+          const entry = stampOwner(scope, mergeSessionClientBinding(index, sessionId, parsed))
+          writeSessionClientIndex(index)
+          sendJson(res, { ok: true, session_id: sessionId, binding: entry })
+        } catch (error) {
+          process.stderr.write(`[dsh-workbench] session-client 绑定失败：${String(error && error.message ? error.message : error)}\n`)
+          sendJson(res, { ok: false, error: 'save-failed', detail: String(error && error.message ? error.message : error) })
         }
         return
       }
@@ -905,10 +1295,12 @@ export function create(ctx, config) {
     /* ---- 任务进程的客观卡点（2026-09-23）--------------------------
      * 按客户名探测两个位置：工作区目录（产物）与文章库（入库）。
      * 只报事实：目录是否存在 / 文件数 / 最近 24h 新增数。 */
-    handlers[TASK_STATUS_PATH] = (req, res) => {
+    handlers[TASK_STATUS_PATH] = async (req, res, scope) => {
       if (req.method !== 'GET') { methodNotAllowed(res); return }
       const url = new URL(req.url, 'http://localhost')
       const client = String(url.searchParams.get('client') ?? '').replace(/[/\\]/g, '')
+      await loadClientNames(scope)
+      if (!authorizedClient(scope, client)) { forbidden(res); return }
       if (!client) { sendJson(res, { ok: false, error: 'no-client' }); return }
       /* 2026-09-24：卡点按「本任务」算 —— since = 任务发起时刻（meta.savedAt）。
        * 不传 since 才退回 24h 窗口。上一单的入库不再冒充本任务的进度。 */
@@ -916,173 +1308,258 @@ export function create(ctx, config) {
       const sinceParsed = Date.parse(sinceRaw)
       const since = Number.isFinite(sinceParsed) && sinceParsed > 0 ? sinceParsed : Date.now() - 24 * 3600 * 1000
       function probe(root) {
-        const dir = join(root, client)
         try {
+          if (!root) return { exists: false, files: 0, recent: 0, list: [] }
+          const dir = join(root, client)
           const entries = readdirSync(dir, { withFileTypes: true })
           const files = entries.filter(e => e.isFile()).map(e => e.name)
           let recent = 0
           for (const name of files) {
             try { if (statSync(join(dir, name)).mtimeMs > since) recent += 1 } catch { }
           }
-          /* 明细清单：前端拿它跟会话消息流的 write 调用做交集，
-           * "本任务新增 N 篇"才真的归属本会话（时刻口径会串）。 */
-          const list = files.filter(n => n.toLowerCase().endsWith('.md')).map(n => n.replace(/\.md$/i, ''))
+          const list = files.filter(name => name.toLowerCase().endsWith('.md')).map(name => name.replace(/\.md$/i, ''))
           return { exists: true, files: files.length, recent, list }
         } catch {
           return { exists: false, files: 0, recent: 0, list: [] }
         }
       }
-      sendJson(res, { ok: true, workspace: probe(WORKSPACE_ROOT), library: probe(LIBRARY_ROOT) })
+      sendJson(res, { ok: true, workspace: probe(workspaceRoot()), library: probe(libraryRoot()) })
     }
 
     /* ---- 草稿区（2026-09-24）：write(draft:true) 落「文章库/<客户>/草稿/」，
      * 人在工作台预览 → 确认 → 宿主把文件挪到正式位置（rename，查重幂等）。
      * 卷共享，入库动作不经过 MCP 容器。 */
-    const draftDir = client => join(LIBRARY_ROOT, String(client).replace(/[/\\]/g, ''), '草稿')
+    const draftDir = client => join(libraryRoot(), String(client).replace(/[/\\]/g, ''), '草稿')
     const safeFile = name => {
       const s = String(name ?? '')
       if (!s || s.includes('/') || s.includes('\\') || s.includes('..')) throw new Error('bad file name')
       return s.endsWith('.md') ? s : s + '.md'
     }
-    handlers[DRAFTS_PATH] = (req, res) => {
+    handlers[DRAFTS_PATH] = async (req, res, scope) => {
       if (req.method !== 'GET') { methodNotAllowed(res); return }
       const url = new URL(req.url, 'http://localhost')
       const client = String(url.searchParams.get('client') ?? '').replace(/[/\\]/g, '')
+      await loadClientNames(scope)
+      if (!authorizedClient(scope, client)) { forbidden(res); return }
       if (!client) { sendJson(res, { ok: false, error: 'no-client' }); return }
+      const localDrafts = []
+      const localReady = []
       try {
         const dir = draftDir(client)
-        const out = []
         for (const name of readdirSync(dir)) {
           if (!name.toLowerCase().endsWith('.md')) continue
           const st = statSync(join(dir, name))
-          out.push({ title: name.replace(/\.md$/i, ''), chars: st.size, updatedAt: new Date(st.mtimeMs).toISOString() })
+          localDrafts.push({ title: name.replace(/\.md$/i, ''), chars: st.size, updatedAt: new Date(st.mtimeMs).toISOString() })
         }
-        out.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
-        /* 正式库同名清单：前端用它把已入库的稿标绿锁定 */
-        const library = []
-        try {
-          const libDir = join(LIBRARY_ROOT, client)
-          for (const name of readdirSync(libDir)) {
-            if (!name.toLowerCase().endsWith('.md')) continue
-            const clean = name.replace(/\.md$/i, '')
-            library.push(clean)
-            /* 草稿区没有、正式库有的（入库时复制的）也列出来，带真实入库
-             * 时间 —— 前端统一按"本任务发起时刻"过滤，旧任务的进不来。 */
-            if (!out.some(d => d.title === clean)) {
-              const lst = statSync(join(libDir, name))
-              out.push({ title: clean, chars: lst.size, updatedAt: new Date(lst.mtimeMs).toISOString() })
-            }
-          }
-        } catch { /* 客户还没有正式库目录 */ }
-        sendJson(res, { ok: true, drafts: out, library })
-      } catch { sendJson(res, { ok: true, drafts: [] }) }
-    }
-    /* 草稿：GET 读正文；PUT 保存审校面板里手改过的正文。
-     * 写只落草稿区（覆盖同名文件）—— 正式库只能靠 confirm-draft 复制过去，
-     * 这里绝不碰；路径照样过 safeFile + 只认草稿区已存在的文件。 */
-    handlers[DRAFT_PATH] = (req, res) => {
-      if (req.method === 'GET') {
-        const url = new URL(req.url, 'http://localhost')
-        const client = String(url.searchParams.get('client') ?? '').replace(/[/\\]/g, '')
-        try {
-          const file = safeFile(url.searchParams.get('title'))
-          const text = readFileSync(join(draftDir(client), file), 'utf8')
-          res.writeHead(200, { 'content-type': 'text/markdown; charset=utf-8', 'cache-control': 'no-store' })
-          res.end(text)
-        } catch { sendJson(res, { ok: false, error: 'not-found' }, 404) }
-        return
+      } catch { /* 本地草稿目录不存在时继续查 Support */ }
+      try {
+        const libDir = join(libraryRoot(), client)
+        for (const name of readdirSync(libDir)) {
+          if (!name.toLowerCase().endsWith('.md')) continue
+          const st = statSync(join(libDir, name))
+          localReady.push({ title: name.replace(/\.md$/i, ''), chars: st.size, updatedAt: new Date(st.mtimeMs).toISOString() })
+        }
+      } catch { /* 客户还没有正式库目录 */ }
+
+      /* Support 是正式站的权威源；MCP 不可用时仍返回本地兼容目录。 */
+      let mcpArticles = []
+      const resolved = resolveTool(hostCtx, libraryServer, libraryServers, articlesTool, [/^list_articles$/i, /^list/i])
+      if (resolved.tool !== '') {
+        const called = await callTool(hostCtx, resolved.server, resolved.tool, { client })
+        if (called.ok) {
+          const normalized = normalizeLibraryArticles(called.value)
+          if (normalized !== null) mcpArticles = normalized
+        }
       }
-      if (req.method !== 'PUT') { methodNotAllowed(res); return }
-      let body = ''
-      req.on('data', c => { body += c; if (body.length > 4e6) req.destroy() })
-      req.on('end', () => {
-        try {
-          const { client, title, text } = JSON.parse(body || '{}')
-          const cl = String(client ?? '').replace(/[/\\]/g, '')
-          if (!cl) { sendJson(res, { ok: false, error: 'no-client' }, 400); return }
-          if (typeof text !== 'string') { sendJson(res, { ok: false, error: 'no-text' }, 400); return }
-          const dst = join(draftDir(cl), safeFile(title))
-          if (!existsSync(dst)) { sendJson(res, { ok: false, error: 'draft-missing' }, 404); return }
-          writeFileSync(dst, text, 'utf8')
-          sendJson(res, { ok: true, bytes: Buffer.byteLength(text, 'utf8') })
-        } catch (e) {
-          sendJson(res, { ok: false, error: 'save-failed', detail: String(e && e.message ? e.message : e) }, 500)
-        }
-      })
+      const merged = mergeDraftLists(localDrafts, localReady, mcpArticles)
+      sendJson(res, { ok: true, drafts: merged.drafts, library: merged.library })
     }
-    handlers[CONFIRM_DRAFT_PATH] = (req, res) => {
+    handlers[DRAFT_PATH] = async (req, res, scope) => {
+      if (req.method !== 'GET') { methodNotAllowed(res); return }
+      const url = new URL(req.url, 'http://localhost')
+      const client = String(url.searchParams.get('client') ?? '').replace(/[/\\]/g, '')
+      await loadClientNames(scope)
+      if (!authorizedClient(scope, client)) { forbidden(res); return }
+      if (!client) { sendJson(res, { ok: false, error: 'not-found' }, 404); return }
+      const title = firstString(url.searchParams.get('title'))
+      try {
+        const file = safeFile(title)
+        const text = readFileSync(join(draftDir(client), file), 'utf8')
+        res.writeHead(200, { 'content-type': 'text/markdown; charset=utf-8', 'cache-control': 'no-store' })
+        res.end(text)
+        return
+      } catch { /* Support fallback below */ }
+      try {
+        const resolved = resolveTool(hostCtx, libraryServer, libraryServers, 'read_article', [/read_article/i, /read/i])
+        if (title === '' || resolved.tool === '') throw new Error('article-missing')
+        const called = await callTool(hostCtx, resolved.server, resolved.tool, { client, title })
+        if (!called.ok) throw new Error('article-missing')
+        const text = articleContent(called.value)
+        if (text === null) throw new Error('article-missing')
+        res.writeHead(200, { 'content-type': 'text/markdown; charset=utf-8', 'cache-control': 'no-store' })
+        res.end(text)
+      } catch { sendJson(res, { ok: false, error: 'not-found' }, 404) }
+    }
+    handlers[CONFIRM_DRAFT_PATH] = async (req, res, scope) => {
       if (req.method !== 'POST') { methodNotAllowed(res); return }
       let body = ''
       req.on('data', c => { body += c; if (body.length > 1e6) req.destroy() })
-      req.on('end', () => {
-        try {
-          const { client, title } = JSON.parse(body || '{}')
-          const src = join(draftDir(client), safeFile(title))
-          if (!existsSync(src)) { sendJson(res, { ok: false, error: 'draft-missing' }, 404); return }
-          /* 正式库重名不再拒绝（2026-10-10）：自动把时间缀到文件名上，
-           * 例如《geo公司哪家好》→《geo公司哪家好-20261010-153045.md》。
-           * 同一秒撞车（基本不可能）再退到 -2、-3。原文件永远不被覆盖。 */
-          const dir = join(LIBRARY_ROOT, String(client).replace(/[/\\]/g, ''))
-          const raw = safeFile(title)
-          const base = raw.toLowerCase().endsWith('.md') ? raw.slice(0, -3) : raw
-          const p2 = n => String(n).padStart(2, '0')
-          const d = new Date()
-          const stamp = `${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}-${p2(d.getHours())}${p2(d.getMinutes())}${p2(d.getSeconds())}`
-          let dst = join(dir, `${base}.md`)
-          if (existsSync(dst)) {
-            dst = join(dir, `${base}-${stamp}.md`)
-            let n = 2
-            while (existsSync(dst)) { dst = join(dir, `${base}-${stamp}-${n}.md`); n += 1 }
+      await new Promise(resolve => req.on('end', resolve))
+      let parsed
+      try { parsed = JSON.parse(body || '{}') } catch { parsed = {} }
+      try {
+        const title = firstString(parsed.title)
+        if (title === '') {
+          sendJson(res, { ok: false, error: 'bad-request', detail: '缺少 title' }, 400)
+          return
+        }
+        /* WB-SUP P2：绑死会话 client_key；跨客户确认失败关闭。 */
+        await loadClientNames(scope)
+        const bound = resolveBoundClientForConfirm(parsed, scope)
+        if (bound && (bound.forbidden || (scope.cloud && !scope.allowed.has(bound.client_key)))) { forbidden(res); return }
+        const displayClient = firstString(bound && bound.client, parsed.client, bound && bound.client_key)
+        if (bound && !authorizedClient(scope, displayClient)) { forbidden(res); return }
+        const match = assertConfirmClientMatch(bound, parsed)
+        if (!match.ok) {
+          sendJson(res, { ok: false, error: match.error, detail: match.detail || '' }, 400)
+          return
+        }
+        const boundKey = bound.client_key
+        const fileName = safeFile(title)
+        /* 草稿目录仍按显示名（现网 write draft:true 落盘约定）；再试 client_key 目录。 */
+        let src = join(draftDir(displayClient), fileName)
+        if (!existsSync(src) && displayClient !== boundKey) {
+          const alt = join(draftDir(boundKey), fileName)
+          if (existsSync(alt)) src = alt
+        }
+        const localSource = existsSync(src)
+        let content = null
+        if (localSource) {
+          content = readFileSync(src, 'utf8')
+        } else {
+          /* Support-only draft：工作台卷没有镜像时，从权威文章库读正文再确认。 */
+          const readResolved = resolveTool(hostCtx, libraryServer, libraryServers, 'read_article', [/read_article/i, /read/i])
+          if (readResolved.tool === '') {
+            sendJson(res, { ok: false, error: 'draft-missing', detail: `草稿不存在：${displayClient}/草稿/${fileName}` }, 404)
+            return
           }
+          const readCalled = await callTool(hostCtx, readResolved.server, readResolved.tool, { client: boundKey, title })
+          if (!readCalled.ok) {
+            sendJson(res, { ok: false, error: 'draft-missing', detail: `Support 草稿不存在：${title}` }, 404)
+            return
+          }
+          content = articleContent(readCalled.value)
+          if (content === null) {
+            sendJson(res, { ok: false, error: 'draft-missing', detail: `Support 草稿不存在：${title}` }, 404)
+            return
+          }
+        }
+        const dst = join(libraryRoot(), String(displayClient).replace(/[/\\]/g, ''), fileName)
+        /* 先远端 write_article(draft:false) 用绑死的 client_key，再挪本地文件。 */
+        const writeResolved = resolveTool(hostCtx, libraryServer, libraryServers, 'write_article', [/write_article/i, /write/i])
+        let article = null
+        if (writeResolved.tool !== '') {
+          const called = await callTool(hostCtx, writeResolved.server, writeResolved.tool, {
+            client: boundKey,
+            title,
+            content,
+            draft: false,
+          })
+          if (!called.ok) {
+            sendJson(res, {
+              ok: false,
+              error: 'write-article-failed',
+              detail: called.detail || called.error,
+              client_key: boundKey,
+              server: writeResolved.server,
+              tool: writeResolved.tool,
+            }, 502)
+            return
+          }
+          article = called.value
+        } else {
+          if (!localSource) {
+            sendJson(res, {
+              ok: false,
+              error: 'write-article-missing',
+              detail: 'Support 草稿已读取，但没有可用的 write_article 工具。',
+            }, 502)
+            return
+          }
+          process.stderr.write('[dsh-workbench] confirm-draft：未找到 write_article，仅做本地 rename（Support 未更新）\n')
+        }
+        /* 本地卷：远端成功后挪/清草稿；仅本地路径时保持原 409 查重。 */
+        let movedTo = null
+        if (!localSource) {
+          /* Support-only draft has no local file to move. */
+        } else if (existsSync(dst)) {
+          if (article === null) {
+            sendJson(res, { ok: false, error: 'already-exists', detail: '正式库已有同名文章，未覆盖' }, 409)
+            return
+          }
+          try { unlinkSync(src) } catch { /* 远端已 ready，草稿删不掉不挡 */ }
+          movedTo = dst
+        } else {
           mkdirSync(dirname(dst), { recursive: true })
-          /* 原型约定：入库后工作区草稿暂时不删（跟定期自动清理一起做）——
-           * 复制不移动，R 区还能看到已入库的稿（绿勾锁定）。 */
-          copyFileSync(src, dst)
-          sendJson(res, { ok: true, movedTo: dst, finalTitle: basename(dst, '.md') })
-        } catch (e) { sendJson(res, { ok: false, error: 'confirm-failed', detail: String(e && e.message ? e.message : e) }, 500) }
-      })
+          renameSync(src, dst)
+          movedTo = dst
+        }
+        sendJson(res, {
+          ok: true,
+          client_key: boundKey,
+          client: displayClient,
+          title,
+          draft: false,
+          movedTo,
+          article,
+          bound_source: bound.source,
+        })
+      } catch (e) {
+        sendJson(res, { ok: false, error: 'confirm-failed', detail: String(e && e.message ? e.message : e) }, 500)
+      }
     }
 
-    /* 硬检：前端点名要查哪几篇（界面看到几篇查几篇，不扫目录）。
-     * 逐篇定位草稿区文件，拼给硬检脚本 --json，透传结构化结果。 */
-    handlers[CHECK_PATH] = (req, res) => {
+    /* ---- 文章硬检：只接受当前调用方能访问的客户 ---------------------- */
+    handlers[CHECK_PATH] = async (req, res, scope) => {
       if (req.method !== 'POST') { methodNotAllowed(res); return }
       let body = ''
-      req.on('data', c => { body += c; if (body.length > 1e6) req.destroy() })
-      req.on('end', async () => {
-        try {
-          const { client, titles } = JSON.parse(body || '{}')
-          const cl = String(client ?? '').replace(/[/\\]/g, '')
-          const list = (Array.isArray(titles) ? titles : []).slice(0, 50)
-          if (!cl || list.length === 0) { sendJson(res, { ok: false, error: 'no-client-or-titles' }); return }
-          const files = []
-          for (const raw of list) {
-            try {
-              const safe = safeFile(raw)
-              const draft = join(draftDir(cl), safe)
-              if (existsSync(draft)) { files.push(draft); continue }
-              /* 正式库兜底：已入库的文章也能复查（老文件当年是 rename 走的，草稿区没有） */
-              const lib = join(LIBRARY_ROOT, cl, safe)
-              if (existsSync(lib)) files.push(lib)
-            } catch { /* 坏名字直接跳过 */ }
-          }
-          if (files.length === 0) { sendJson(res, { ok: false, error: 'no-files' }); return }
-          let stdout = ''
+      req.on('data', chunk => { body += chunk; if (body.length > 1e6) req.destroy() })
+      await new Promise(resolve => req.on('end', resolve))
+      try {
+        const parsed = JSON.parse(body || '{}')
+        const client = String(parsed.client ?? '').replace(/[/\\]/g, '')
+        const titles = (Array.isArray(parsed.titles) ? parsed.titles : []).slice(0, 50)
+        await loadClientNames(scope)
+        if (!client || titles.length === 0) { sendJson(res, { ok: false, error: 'no-client-or-titles' }); return }
+        if (!authorizedClient(scope, client)) { forbidden(res); return }
+        const files = []
+        for (const raw of titles) {
           try {
-            stdout = (await execFileP(process.execPath, [HARDCHECK_SCRIPT, ...files, '--json'],
-              { timeout: 20000, maxBuffer: 10 * 1024 * 1024 })).stdout
-          } catch (eRun) {
-            /* 硬检 CLI 惯例：查出「拦」时退出码 1 —— stdout 里的 JSON 仍是完整结果 */
-            stdout = (eRun && eRun.stdout) || ''
-            if (!stdout) throw eRun
-          }
-          const parsed = JSON.parse(stdout)
-          sendJson(res, { ok: true, results: parsed.results || [] })
-        } catch (e) {
-          sendJson(res, { ok: false, error: 'hardcheck-failed', detail: (String(e && e.message ? e.message : e) + ' ' + String(e && e.stderr ? e.stderr : '')).slice(0, 400) }, 500)
+            const safe = safeFile(raw)
+            const draft = join(draftDir(client), safe)
+            if (existsSync(draft)) { files.push(draft); continue }
+            const lib = join(libraryRoot(), client, safe)
+            if (existsSync(lib)) files.push(lib)
+          } catch { /* bad names are ignored */ }
         }
-      })
+        if (files.length === 0) { sendJson(res, { ok: false, error: 'no-files' }); return }
+        let stdout = ''
+        try {
+          stdout = (await execFileP(process.execPath, [HARDCHECK_SCRIPT, ...files, '--json'],
+            { timeout: 20000, maxBuffer: 10 * 1024 * 1024 })).stdout
+        } catch (runError) {
+          stdout = (runError && runError.stdout) || ''
+          if (!stdout) throw runError
+        }
+        const result = JSON.parse(stdout)
+        sendJson(res, { ok: true, results: Array.isArray(result.results) ? result.results : [] })
+      } catch (error) {
+        sendJson(res, { ok: false, error: 'hardcheck-failed', detail: String(error && error.message ? error.message : error).slice(0, 400) }, 500)
+      }
     }
 
+  for (const [path, handler] of Object.entries(handlers)) {
+    handlers[path] = (req, res) => handler(req, res, requestScope(req))
+  }
   return { handlers }
 }
