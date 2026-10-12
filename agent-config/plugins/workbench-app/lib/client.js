@@ -1941,7 +1941,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			 * body 下没有这层，浮层定位稳定。左=草稿列表，右=正文 + 确认入库。 */
 			var WbCtx = null; /* apply 时赋值：TaskBar 自动弹侧栏用 */
 
-			function wbOpenReview(client, onChanged) {
+			function wbOpenReview(client, onChanged, clientKey, sessionId, metaId) {
 				var old = document.getElementById("wb-review-overlay");
 				if (old) old.remove();
 				var wrap = document.createElement("div");
@@ -1969,6 +1969,12 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				document.body.appendChild(wrap);
 
 				var mainTitle = null, mainText = null, mainFoot = null, msgEl = null, currentTitle = "";
+				var resolvedSessionId = typeof sessionId === "string" ? sessionId : "";
+				var resolvedClientKey = String(clientKey || "");
+				var resolvedMetaId = String(metaId || "");
+				var bound = resolvedSessionId && wbNavState.bindings ? wbNavState.bindings[resolvedSessionId] : null;
+				if (bound && !resolvedClientKey) resolvedClientKey = String(bound.client_key || "");
+				if (bound && !resolvedMetaId) resolvedMetaId = String(bound.meta_id || "");
 				function ensureMain() {
 					if (mainTitle) return;
 					mainTitle = document.createElement("div"); mainTitle.className = "wb_reviewMainTitle";
@@ -2013,7 +2019,13 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					if (!title) return;
 					fetch(WB_API.confirmDraft, {
 						method: "POST", headers: { "content-type": "application/json", accept: "application/json" },
-						body: JSON.stringify({ client: client, title: title }),
+						body: JSON.stringify({
+							client: client,
+							client_key: resolvedClientKey,
+							title: title,
+							session_id: resolvedSessionId,
+							meta_id: resolvedMetaId,
+						}),
 					})
 						.then(function (r) { return r.json().then(function (b) { return { code: r.status, body: b }; }); })
 						.then(function (res) {
@@ -2388,8 +2400,9 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				var mobile = useWbMobile();
 				var sessionId = props.sessionId;
 				var useChat = props.useChat;
-				var st = React.useState({ client: "", drafts: null, sel: "", body: "", msg: "", done: {}, editing: false, editText: "", saving: false });
-				var client = st[0].client, drafts = st[0].drafts, sel = st[0].sel, bodyText = st[0].body, msg = st[0].msg, doneMap = st[0].done;
+				var initialBinding = sessionId && wbNavState.bindings ? wbNavState.bindings[sessionId] : null;
+				var st = React.useState({ client: "", client_key: initialBinding && initialBinding.client_key || "", drafts: null, sel: "", body: "", msg: "", done: {}, editing: false, editText: "", saving: false });
+				var client = st[0].client, clientKey = st[0].client_key, drafts = st[0].drafts, sel = st[0].sel, bodyText = st[0].body, msg = st[0].msg, doneMap = st[0].done;
 				var setL = st[1];
 				useWbPickTick();   // 勾选集合在输入框挑篇条里维护 —— 订阅它，选中变化时这里跟着重渲
 				var checked = WB_PICK.sel;
@@ -2398,10 +2411,12 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				}).length;
 
 				/* 客户解析：params → 当前会话首条 user 消息的任务编号 → meta.client */
-				var clientFromParams = null;
+				var clientFromParams = null, clientKeyFromParams = null;
 				try {
 					var info = typeof props.useTabInfo === "function" ? props.useTabInfo() : null;
-					clientFromParams = info && info.navigation && info.navigation.params ? (info.navigation.params.client || null) : null;
+					var navParams = info && info.navigation && info.navigation.params ? info.navigation.params : null;
+					clientFromParams = navParams ? (navParams.client || null) : null;
+					clientKeyFromParams = navParams ? (navParams.client_key || null) : null;
 				} catch (e) { }
 				var chatSnap = null;
 				if (!clientFromParams && typeof useChat === "function" && sessionId) {
@@ -2448,17 +2463,31 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					}
 				}
 				React.useEffect(function () {
-					if (clientFromParams) { setL(function (p) { return Object.assign({}, p, { client: clientFromParams }); }); return; }
-					if (metaId === "") { setL(function (p) { return Object.assign({}, p, { client: "" }); }); return; }
 					var alive = true;
-					fetch(WB_API.taskMeta + "?id=" + encodeURIComponent(metaId), { headers: { accept: "application/json" } })
-						.then(function (r) { return r.json(); })
-						.then(function (body) {
-							if (alive && body && typeof body.client === "string") setL(function (p) { return Object.assign({}, p, { client: body.client }); });
-						})
-						.catch(function () { });
+					function applyClient(disp, key) {
+						if (!alive) return;
+						setL(function (p) { return Object.assign({}, p, { client: disp || p.client || "", client_key: key || p.client_key || "" }); });
+					}
+					function fallbackMeta() {
+						if (clientFromParams || clientKeyFromParams) { applyClient(clientFromParams || "", clientKeyFromParams || ""); return; }
+						if (metaId === "") { applyClient("", ""); return; }
+						fetch(WB_API.taskMeta + "?id=" + encodeURIComponent(metaId), { headers: { accept: "application/json" } })
+							.then(function (r) { return r.json(); })
+							.then(function (body) { if (body) applyClient(typeof body.client === "string" ? body.client : "", typeof body.client_key === "string" ? body.client_key : ""); })
+							.catch(function () { });
+					}
+					if (typeof sessionId === "string" && sessionId !== "") {
+						fetch(WB_API.sessionClient + "?session=" + encodeURIComponent(sessionId), { headers: { accept: "application/json" } })
+							.then(function (r) { return r.json(); })
+							.then(function (body) {
+								var binding = body && body.binding ? body.binding : null;
+								if (binding && binding.client_key) applyClient(binding.client || clientFromParams || "", binding.client_key);
+								else fallbackMeta();
+							})
+							.catch(function () { fallbackMeta(); });
+					} else fallbackMeta();
 					return function () { alive = false; };
-				}, [clientFromParams, metaId]);
+				}, [clientFromParams, clientKeyFromParams, metaId, sessionId]);
 
 				/* 本任务发起时刻：草稿列表只显示该时刻之后落盘的（C1 口径 ——
 				 * 否则同客户的旧会话草稿会混进来）。时刻拿不到就退回全列。 */
@@ -2845,7 +2874,13 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				function confirmOne(title) {
 					return fetch(WB_API.confirmDraft, {
 						method: "POST", headers: { "content-type": "application/json", accept: "application/json" },
-						body: JSON.stringify({ client: client, title: title }),
+						body: JSON.stringify({
+							client: client,
+							client_key: clientKey || "",
+							title: title,
+							session_id: typeof sessionId === "string" ? sessionId : "",
+							meta_id: metaId || "",
+						}),
 					})
 						.then(function (r) { return r.json().then(function (b) { return { code: r.status, body: b }; }); })
 						.then(function (res) {
