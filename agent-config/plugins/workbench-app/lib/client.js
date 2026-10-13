@@ -5,302 +5,6 @@ window.__ModuleLoader__.load({
 		var exports = module.exports;
 		var React = require("react");
 		var h = React.createElement;
-		var createPortal = require("react-dom").createPortal;
-		/* Mobile adapters: keep the desktop tree and every write handler intact. */
-		var WB_MOBILE = typeof window.matchMedia === 'function'
-			? window.matchMedia('(max-width: 767px)')
-			: { matches: false, addEventListener: function () {}, removeEventListener: function () {} };
-		function useWbMobile() {
-			var st = React.useState(WB_MOBILE.matches);
-			React.useEffect(function () {
-				function changed() { st[1](WB_MOBILE.matches); }
-				WB_MOBILE.addEventListener('change', changed);
-				return function () { WB_MOBILE.removeEventListener('change', changed); };
-			}, []);
-			return st[0];
-		}
-		function wbKeyboardInset(height, viewport) {
-			return !viewport || viewport.scale !== 1 ? 0 : Math.max(0, height - viewport.height - viewport.offsetTop);
-		}
-		function wbMobileViewport(mobile, height, viewport, shellKeyboard) {
-			var inset = mobile ? wbKeyboardInset(height, viewport) : 0;
-			var keyboard = mobile && (shellKeyboard === 'open' || inset > 150);
-			return { inset: inset, keyboard: keyboard, pinned: mobile && !keyboard };
-		}
-		function wbNormalizeLabel(text) {
-			return String(text || '').normalize('NFKC').replace(/\s+/g, ' ').trim();
-		}
-		function wbContextLabel(parts) {
-			var seen = new Set();
-			return parts.map(function(part){return String(part || '').replace(/\s+/g, ' ').trim();}).filter(function(part){
-				var key = wbNormalizeLabel(part);
-				if (!key || seen.has(key)) return false;
-				seen.add(key); return true;
-			}).join(' · ');
-		}
-		function wbStripLeadingTitle(markdown, title) {
-			var text = String(markdown || '');
-			var heading = text.match(/^(?:\uFEFF)?(?:[ \t]*\r?\n)* {0,3}#[ \t]+([^\r\n]*)(?:\r?\n|$)/);
-			if (!heading || !wbNormalizeLabel(title)) return text;
-			var label = heading[1].replace(/[ \t]+#+[ \t]*$/, '');
-			return wbNormalizeLabel(label) === wbNormalizeLabel(title) ? text.slice(heading[0].length).replace(/^[ \t]*\r?\n/, '') : text;
-		}
-		function wbSessionStatus(record) {
-			if (record && record.running === true) return { tone: 'blue', label: '写作中' };
-			if (record && record.pending > 0) return { tone: 'orange', label: record.pending + ' 篇草稿待审' };
-			if (record && record.confirmed > 0) return { tone: 'green', label: '已入库 ' + record.confirmed + ' 篇' };
-			return { tone: 'grey', label: record && record.running === false ? '已停止' : '状态未同步' };
-		}
-		function wbInstallMobile() {
-			var root = document.documentElement;
-			var previousFrame = null, previousColumns = '';
-			function viewport() {
-				if (!WB_MOBILE.matches) return;
-				var state = wbMobileViewport(true, window.innerHeight, window.visualViewport, root.dataset.dshKeyboard);
-				root.style.setProperty('--wb-kb', state.inset + 'px');
-				// The shared shell detects input/textarea; the harness uses contenteditable.
-				root.toggleAttribute('data-wb-keyboard', state.keyboard);
-				var vv = window.visualViewport, unzoomed = vv && vv.scale === 1;
-				root.style.setProperty('--wb-vv-top', (unzoomed ? vv.offsetTop : 0) + 'px');
-				root.style.setProperty('--wb-vv-h', (unzoomed ? vv.height : window.innerHeight) + 'px');
-			}
-			function changed() {
-				root.toggleAttribute('data-wb-mobile', WB_MOBILE.matches);
-				if (WB_MOBILE.matches) {
-					// Only this adapter knows the upstream frame structure. CSS handles later mounts.
-					var frame = document.querySelector('[class*="_frame"]');
-					if (frame && !previousFrame) { previousFrame = frame; previousColumns = frame.style.gridTemplateColumns; frame.style.removeProperty('grid-template-columns'); }
-					viewport();
-				} else {
-					if (previousFrame) previousFrame.style.gridTemplateColumns = previousColumns;
-					previousFrame = null;
-					delete root.dataset.wbScene;
-					root.removeAttribute('data-wb-keyboard');
-					if (root.dataset.wbFlow === '1') { delete root.dataset.wbFlow; delete root.dataset.dshChrome; }
-					root.style.removeProperty('--wb-kb');
-					root.style.removeProperty('--wb-vv-top');
-					root.style.removeProperty('--wb-vv-h');
-					wbNavTakeFrame();
-				}
-			}
-			changed(); WB_MOBILE.addEventListener('change', changed);
-			var vv = window.visualViewport;
-			if (vv) { vv.addEventListener('resize', viewport); vv.addEventListener('scroll', viewport); }
-			window.addEventListener('resize', viewport);
-			var keyboardObserver = new MutationObserver(viewport);
-			keyboardObserver.observe(root, {attributes:true, attributeFilter:['data-dsh-keyboard']});
-			return function () {
-				keyboardObserver.disconnect();
-				WB_MOBILE.removeEventListener('change', changed);
-				window.removeEventListener('resize', viewport);
-				if (vv) { vv.removeEventListener('resize', viewport); vv.removeEventListener('scroll', viewport); }
-				if (previousFrame) previousFrame.style.gridTemplateColumns = previousColumns;
-				root.removeAttribute('data-wb-mobile'); delete root.dataset.wbScene;
-				root.removeAttribute('data-wb-keyboard');
-				if (root.dataset.wbFlow === '1') { delete root.dataset.wbFlow; delete root.dataset.dshChrome; }
-			};
-		}
-		function useWbChatLayout(ref) {
-			React.useLayoutEffect(function(){
-				if (!WB_MOBILE.matches || !ref.current) return;
-				var main = ref.current.closest('[data-slot="main.conversation"]');
-				var scroll = main && main.querySelector('[data-conversation-scroll]');
-				var composer = main && main.querySelector('[data-composer-seat]');
-				if (!scroll || !composer) return;
-				var frame = 0, initialized = false, wasKeyboard = false, hadStyle = main.hasAttribute('style');
-				function layout(){
-					frame = 0;
-					if (!WB_MOBILE.matches) return;
-					var state = wbMobileViewport(true, window.innerHeight, window.visualViewport, document.documentElement.dataset.dshKeyboard);
-					var atBottom = scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop <= 4;
-					// The fixed composer is outside normal flow. Size the scrollport to its
-					// actual top, instead of adding keyboard-sized blank transcript padding.
-					var height = Math.max(0, composer.getBoundingClientRect().top - scroll.getBoundingClientRect().top);
-					main.style.setProperty('--wb-chat-scroll-h', height + 'px');
-					if (!initialized || atBottom || (state.keyboard && !wasKeyboard)) scroll.scrollTop = scroll.scrollHeight;
-					initialized = true; wasKeyboard = state.keyboard;
-				}
-				function schedule(){if (!frame) frame = requestAnimationFrame(layout);}
-				var resize = new ResizeObserver(schedule);
-				resize.observe(composer); resize.observe(ref.current); resize.observe(main);
-				var keyboard = new MutationObserver(schedule);
-				keyboard.observe(document.documentElement, {attributes:true, attributeFilter:['data-wb-keyboard','data-dsh-keyboard']});
-				var vv = window.visualViewport;
-				if (vv) {vv.addEventListener('resize',schedule);vv.addEventListener('scroll',schedule);}
-				layout();
-				return function(){
-					cancelAnimationFrame(frame); resize.disconnect(); keyboard.disconnect();
-					if (vv) {vv.removeEventListener('resize',schedule);vv.removeEventListener('scroll',schedule);}
-					main.style.removeProperty('--wb-chat-scroll-h');
-					if (!hadStyle && !main.style.length) main.removeAttribute('style');
-				};
-			},[]);
-		}
-		function useWbScene(mobile, scene) {
-			React.useEffect(function () {
-				if (!mobile) return;
-				var root = document.documentElement;
-				root.dataset.wbScene = scene;
-				if (scene !== 'compose') { root.dataset.dshChrome = 'flow'; root.dataset.wbFlow = '1'; }
-				else if (root.dataset.wbFlow === '1') { delete root.dataset.dshChrome; delete root.dataset.wbFlow; }
-				return function () {
-					if (root.dataset.wbScene === scene) delete root.dataset.wbScene;
-					if (root.dataset.wbFlow === '1') { delete root.dataset.dshChrome; delete root.dataset.wbFlow; }
-				};
-			}, [mobile, scene]);
-		}
-		function wbIcon(name) {
-			var paths = { down: 'M6 9l6 6 6-6', search: 'M21 21l-5-5M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0', menu: 'M4 6h16M4 12h16M4 18h10', back: 'M15 5l-7 7 7 7', close: 'M6 6l12 12M18 6L6 18', next: 'M9 6l6 6-6 6', plus: 'M12 5v14M5 12h14', star: 'M12 3l2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5z' };
-			return h('svg', {width:24,height:24,viewBox:'0 0 24 24',fill:'none',stroke:'currentColor',strokeWidth:2,strokeLinecap:'round',strokeLinejoin:'round','aria-hidden':true}, h('path',{d:paths[name] || paths.next}));
-		}
-		function MobileTopBar(p) {
-			return h('header',{className:'wb_mTop'},
-				h('button',{type:'button',className:'wb_mIcon','aria-label':p.back?'返回':'打开会话抽屉',onClick:p.back || function(){wbNavState.drawer=true;wbNavEmit();}},wbIcon(p.back?'back':'menu')),
-				h('div',{className:'wb_mHeading'},h('b',null,p.title),p.sub?h('small',null,p.sub):null),
-				p.more?h('button',{type:'button',className:'wb_mIcon','aria-label':'会话更多操作',onClick:p.more},'⋯'):null);
-		}
-		function MobileModal(p) {
-			var ref=React.useRef(null);
-			React.useEffect(function(){
-				var previous=document.activeElement, el=ref.current;
-				if(el) el.focus();
-				function key(e){
-					if(e.key==='Escape'){e.preventDefault();p.close();}
-					if(e.key==='Tab' && el){var items=Array.from(el.querySelectorAll('button:not(:disabled),input,textarea,[tabindex="0"]'));var first=items[0],last=items[items.length-1];if(e.shiftKey && (document.activeElement===first || document.activeElement===el)){e.preventDefault();last&&last.focus();}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first&&first.focus();}}
-				}
-				document.addEventListener('keydown',key);
-				return function(){document.removeEventListener('keydown',key);if(previous&&previous.isConnected)previous.focus({preventScroll:true});};
-			},[]);
-			return createPortal(h('div',{className:'wb_mScrim',onClick:function(e){if(e.target===e.currentTarget)p.close();}},
-				h('section',{ref:ref,tabIndex:-1,role:'dialog','aria-modal':true,'aria-label':p.title,className:p.full?'wb_mEditor':'wb_mSheet'},
-					!p.full?h('div',{className:'wb_mGrab'}):null,
-					h('div',{className:'wb_mSheetHead'},h('h2',null,p.title),h('button',{type:'button',className:'wb_mIcon','aria-label':'关闭',onClick:p.close},wbIcon('close'))),p.children)),document.body);
-		}
-		function MobileAssembly(p) {
-			var sheet=React.useState(false), editor=React.useState(''), addText=React.useState(''), fileError=React.useState('');
-			var close=function(){editor[1]('');};
-			var setClient=function(c){p.onClient({target:{value:customerId(c)}});};
-			function chip(label,on,click,key){return h('button',{type:'button',key:key||label,className:'wb_mChip','aria-pressed':on,onClick:click},on?'✓ '+label:label);}
-			function segment(items,value,set){return h('div',{className:'wb_mSegment'},items.map(function(item){return h('button',{type:'button',key:item[0],'aria-pressed':value===item[0],onClick:function(){set(item[0]);}},item[1]);}));}
-			var empty=p.clients.status==='ready'&&p.clients.customers.length===0;
-			var contextText=wbContextLabel([p.clientName,p.lineName,p.periodName]);
-			var topicRef=React.useRef(null);
-			React.useLayoutEffect(function(){
-				function grow(){var el=topicRef.current;if(!WB_MOBILE.matches||!el)return;el.style.height='72px';el.style.height=Math.max(72,el.scrollHeight+2)+'px';}
-				grow(); window.addEventListener('resize',grow);
-				return function(){window.removeEventListener('resize',grow);};
-			},[p.topic,p.mode]);
-			var layers=[['personal','个人层'],['middle','个人中间层'],['public','公共层'],['other','其他技能']];
-			function skillLayer(s){var raw=String(s.layer||'');return raw==='personal'||raw==='个人'?'personal':raw==='middle'||raw==='_middle'||raw.indexOf('中')>=0?'middle':raw==='public'||raw==='公共'?'public':'other';}
-			var weakQuestions = p.weakGaps && p.weakGaps.status === 'ready' ? (p.weakRows || p.weakGaps.questions || []) : [];
-			var weakPanel = p.weakGaps && p.weakGaps.status === 'loading'
-				? h('div',{className:'wb_mWeakEmpty'},'薄弱问句加载中…')
-				: p.weakGaps && p.weakGaps.status === 'error'
-					? h('div',{className:'wb_mWeakEmpty'},'薄弱问句暂时无法加载，请稍后刷新')
-					: weakQuestions.length === 0
-						? h('div',{className:'wb_mWeakEmpty'},'这一期没有可选的薄弱问句')
-						: h('div',{className:'wb_mWeakList','aria-label':'薄弱问句'},
-							weakQuestions.map(function(q){
-								var name=String(q.question||''); var on=(p.weakPicked||[]).indexOf(name)>=0;
-								var gap=function(label,value,key){
-									return h('span',{className:'wb_mWeakGap',key:key||label},
-										h('span',{className:'wb_mWeakGapLabel'},label),
-										h('span',{className:'wb_gapNum','data-sign':gapSign(value),title:gapTitle(label,value)},gapText(value)));
-								};
-								var platformGaps=Array.isArray(q.platforms)?q.platforms:[];
-								return h('div',{key:name,className:'wb_mWeakRow'+(on?' is-on':''),role:'checkbox','aria-checked':on?'true':'false',tabIndex:0,
-									onPointerDown:function(e){if(typeof p.rowDown==='function')p.rowDown(name,e);},
-									onPointerEnter:function(){if(typeof p.rowEnter==='function')p.rowEnter(name);},
-									onKeyDown:function(e){if(e.key===' '||e.key==='Enter'){e.preventDefault();if(typeof p.pickSet==='function')p.pickSet(name,!on);}}},
-									h('input',{type:'checkbox',checked:on,'aria-label':'选定 '+name,onChange:function(e){e.stopPropagation();if(typeof p.pickSet==='function')p.pickSet(name,e.target.checked);}}),
-									h('div',{className:'wb_mWeakDetails'},
-										h('div',{className:'wb_mWeakQuestion'},h('span',{className:'wb_mWeakQ'},name),h('span',{className:'wb_mWeakRoot'},q.root||'—')),
-										h('div',{className:'wb_mWeakGaps'},gap('综合',q.summary&&q.summary.gap,'summary'),platformGaps.map(function(item){return gap(item.name,item.gap,item.name);})))
-								);
-							}));
-			return h('div',{className:'wb_mAssembly'},h(MobileTopBar,{title:'新建任务'}),
-				h('div',{className:'wb_mForm'},
-					h('button',{type:'button',className:'wb_mContext',onClick:function(){sheet[1](true);}},h('span',{className:'wb_mAvatar'},(p.clientName||'客').slice(0,1)),h('span',{className:'wb_mGrow'},h('small',null,'写给'),h('b',null,contextText||(empty?'请选择客户':p.clients.status==='loading'?'客户加载中…':'请选择客户'))),wbIcon('next')),
-					empty?h('div',{className:'wb_mEmpty'},h('b',null,'还没有分配给你的客户'),h('p',null,'联系管理员')):null,
-					p.clients.status==='error'?h('div',{className:'wb_mEmpty',role:'status'},'客户暂时无法加载，请稍后刷新重试'):null,
-					h('h3',null,'主题'),segment([['weak','薄弱问句'],['free','自己输入']],p.mode,p.setMode),
-					p.mode==='weak'?h('div',{className:'wb_mWeakWrap'},h('div',{className:'wb_mWeakStat'},'已选定 '+String(p.selectedCount||0)+' 条 · 共 '+String(weakQuestions.length)+' 条'),weakPanel,h('div',{className:'wb_mWeakSource'},'数据来源：Support · 薄弱问句（全局标准 v4，和 Support 页面数字一致）')):h('textarea',{className:'wb_mTopic',ref:topicRef,'aria-label':'主题',placeholder:'想写什么选题，直接打。',value:p.topic,onChange:function(e){p.setTopic(e.target.value);},rows:2}),
-					h('h3',null,'怎么写'),segment([['copy','仿写'+(p.refCount?' '+p.refCount:'')],['skill','用模板'+(p.picked.length?' '+p.picked.length:'')]],p.refTab,p.setRefTab),
-					p.refTab==='copy'?h(React.Fragment,null,
-						h('div',{className:'wb_mReferences'},p.refs.urls.map(function(url,i){return h('div',{className:'wb_mReference',key:i},h('span',{className:'wb_mRefIcon'},'↗'),h('span',{className:'wb_mGrow'},url),h('button',{type:'button',className:'wb_mIcon','aria-label':'删除参考链接',onClick:function(){p.setRefText(p.refs.urls.filter(function(_,j){return j!==i;}).concat(p.refs.body?[p.refs.body]:[]).join('\n'));}},wbIcon('close')));}),
-						p.refs.body?h('div',{className:'wb_mReference'},h('span',{className:'wb_mRefIcon'},'▤'),h('span',{className:'wb_mGrow'},'粘贴的正文'),h('small',null,p.refs.body.length+' 字'),h('button',{type:'button',className:'wb_mIcon','aria-label':'删除参考正文',onClick:function(){p.setRefText(p.refs.urls.join('\n'));}},wbIcon('close'))):null,
-						h('button',{type:'button',className:'wb_mAdd',onClick:function(){addText[1]('');fileError[1]('');editor[1]('reference');}},wbIcon('plus'),'添加链接、正文或文件')),
-						h('div',{className:'wb_mChips wb_mStyles'},REF_STYLES.map(function(s){return chip(s,p.refStyle===s,function(){p.setRefStyle(s);});})))
-					:h('div',{className:'wb_mSkills'},p.skills.status==='loading'?h('p',null,'技能加载中…'):p.skills.status==='error'?h('p',null,'技能暂时无法加载，请稍后重试'):p.skills.skills.length===0?h('p',null,'还没有可用模板'):layers.map(function(layer){var list=p.skills.skills.filter(function(s){return skillLayer(s)===layer[0];});return list.length?h('section',{key:layer[0]},h('small',null,layer[1]),h('div',{className:'wb_mChips'},list.map(function(s){var on=p.picked.indexOf(s.name)>=0;return chip(s.name,on,function(){p.setPicked(on?p.picked.filter(function(n){return n!==s.name;}):p.picked.concat([s.name]));});}))):null;})),
-					h('button',{type:'button',className:'wb_mExtra',onClick:function(){editor[1]('base');}},h('b',null,'补充要求'),h('span',{className:'wb_mGrow'},p.base||'选填'),wbIcon('next'))),
-				h('div',{className:'wb_mAction wb_mAboveTabs'},p.sending?h('p',{role:'status'},p.sending):null,h('button',{type:'button',className:'wb_mPrimary wb_mStart',disabled:!p.clientName||!!p.sending,onClick:p.dispatch},wbIcon('star'),'开始生文')),
-				sheet[0]?h(MobileModal,{title:'写给谁',close:function(){sheet[1](false);}},
-					h('small',{className:'wb_mCaption'},'客户'),empty?h('div',{className:'wb_mEmpty'},'还没有分配给你的客户 · 联系管理员'):h('div',{role:'radiogroup','aria-label':'客户'},p.clients.customers.map(function(c){var on=customerId(c)===p.pick.key;var bits=[];if(typeof c.files==='number')bits.push('知识库 '+c.files+' 条');if(on&&p.articles.status==='ready')bits.push('文章库 '+p.articles.articles.length+' 篇');return h('button',{type:'button',role:'radio','aria-checked':on,key:customerId(c),className:'wb_mClient',onClick:function(){setClient(c);}},h('span',{className:'wb_mAvatar'},customerName(c).slice(0,1)),h('span',{className:'wb_mGrow'},h('b',null,customerName(c)),h('small',null,bits.join(' · ')||'\u00a0')),h('span',{className:'wb_mRadio','data-on':on?'1':'0'},on?'✓':''));})),
-					!empty?h(React.Fragment,null,h('small',{className:'wb_mCaption'},'产品线'),h('div',{className:'wb_mChips'},p.lines.length?p.lines.map(function(l){return chip(l.name||l.id,p.pick.line===String(l.id),function(){p.onLine({target:{value:String(l.id)}});},l.id);}):h('p',null,'暂无产品线')),h('small',{className:'wb_mCaption'},'期数'),h('div',{className:'wb_mChips'},p.periods.length?p.periods.map(function(v){return chip(v.name||v.id,p.pick.period===String(v.id),function(){p.setPick({key:p.pick.key,line:p.pick.line,period:String(v.id)});},v.id);}):h('p',null,'暂无期数'))):null,
-					h('button',{type:'button',className:'wb_mPrimary',disabled:!p.clientName,onClick:function(){sheet[1](false);}},'确定')):null,
-				editor[0]?h(MobileModal,{full:true,title:editor[0]==='base'?'补充要求':'添加参考',close:close},
-					h('textarea',{'aria-label':editor[0]==='base'?'补充要求':'参考链接或正文',placeholder:editor[0]==='base'?'还有什么写作要求？':'一行一个链接，或粘贴正文',value:editor[0]==='base'?p.base:addText[0],onChange:function(e){(editor[0]==='base'?p.setBase:addText[1])(e.target.value);}}),
-					editor[0]==='reference'?h('label',{className:'wb_mFile'},'选择文本文件（.txt / .md）',h('input',{type:'file',accept:'.txt,.md,text/plain,text/markdown',onChange:function(e){var f=e.target.files[0];if(!f)return;if(f.size>1024*1024){fileError[1]('请选择 1 MB 以内的文本文件');return;}f.text().then(function(text){addText[1](function(old){return [old,text].filter(Boolean).join('\n');});});}})):null,
-					fileError[0]?h('p',{role:'status'},fileError[0]):null,
-					h('button',{type:'button',className:'wb_mPrimary',onClick:function(){if(editor[0]==='reference')p.setRefText([p.refText,addText[0]].filter(Boolean).join('\n'));close();}},'完成')):null);
-		}
-
-
-		function MobileDrawer(p) {
-			var start=React.useRef(0), ref=React.useRef(null);
-			React.useEffect(function(){var previous=document.activeElement;ref.current&&ref.current.focus();function key(e){if(e.key==='Escape')p.close();if(e.key==='Tab'){var items=Array.from(ref.current.querySelectorAll('button,input'));var first=items[0],last=items[items.length-1];if(e.shiftKey&&(document.activeElement===first||document.activeElement===ref.current)){e.preventDefault();last.focus();}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first.focus();}}}document.addEventListener('keydown',key);return function(){document.removeEventListener('keydown',key);if(previous&&previous.isConnected)previous.focus({preventScroll:true});};},[]);
-			return createPortal(h('div',{className:'wb_mScrim',onClick:function(e){if(e.target===e.currentTarget)p.close();}},
-				h('aside',{className:'wb_mDrawer',ref:ref,tabIndex:-1,role:'dialog','aria-modal':true,'aria-label':'会话列表',onTouchStart:function(e){start.current=e.touches[0].clientX;},onTouchEnd:function(e){if(start.current-e.changedTouches[0].clientX>70)p.close();}},
-					h('div',{className:'wb_mDrawerHead'},h('b',null,'生文 Agent'),h('button',{type:'button',className:'wb_mIcon','aria-label':'关闭会话抽屉',onClick:p.close},wbIcon('close'))),
-					h('div',{className:'wb_mDrawerTools'},h('button',{type:'button',className:'wb_mPrimary',onClick:p.compose},wbIcon('plus'),'新建任务'),h('label',{className:'wb_mSearch'},wbIcon('search'),h('input',{type:'search','aria-label':'搜索会话',placeholder:'搜索会话',value:wbNavState.q,onChange:function(e){wbNavState.q=e.target.value;wbNavEmit();}}))),
-					h('div',{className:'wb_mTree'},p.names.map(function(name){var open=wbNavState.open[name]!==false;return h('section',{key:name},h('button',{type:'button',className:'wb_mGroup','aria-expanded':open,onClick:function(){wbNavState.open[name]=!open;wbNavEmit();}},h('span',{className:'wb_mAvatar'},name.slice(0,1)),h('b',null,name),h('small',null,p.groups[name].length),wbIcon(open?'down':'next')),open?p.groups[name].map(function(it){var status=wbSessionStatus(wbNavState.statuses&&wbNavState.statuses[it.id]);return h('button',{key:it.id,type:'button',className:'wb_mSession','aria-current':it.id===wbNavState.current,onClick:function(){p.openSession(it.id);}},h('span',{className:'wb_mStatus','data-tone':status.tone}),h('span',{className:'wb_mGrow'},h('b',null,it.title),h('small',null,[it.at?it.at.slice(5,10).replace('-','月')+'日':'',status.label].filter(Boolean).join(' · '))));}):null);}),p.names.length===0?h('p',{className:'wb_mEmpty'},wbNavState.q?'没有匹配的会话':'还没有会话，点上方新建任务'):null),
-					h('div',{className:'wb_mAccount'},h('span',{className:'wb_mAvatar'},p.me.label.slice(0,1)),h('div',null,h('b',null,p.me.label),p.me.sub?h('small',null,p.me.sub):null)))),document.body);
-		}
-		function MobileQuickPrompts(p) {
-			var mobile=useWbMobile();
-			if(!mobile || !p.inputActions) return null;
-			return h('div',{className:'wb_mQuick'},['再写 1 篇','换个语气'].map(function(text){return h('button',{type:'button',className:'wb_mChip',key:text,onClick:function(){p.inputActions.setDraft(text);var el=document.querySelector('[data-slot="conversation.composer.bar"] [contenteditable]');if(el)el.focus();}},text);}));
-		}
-		function wbMobileProgress(nodes, legacy, drafts, done) {
-			// Last successful todo_write is authoritative, including an empty list.
-			for (var i=nodes.length-1;i>=0;i--) {
-				var node=nodes[i];
-				if(node.kind==='tool-result'&&node.call&&node.call.name==='todo_write'&&node.isError!==true){
-					try { var todos=JSON.parse(node.call.argsRaw||'{}').todos;
-						if(Array.isArray(todos)) return todos.filter(function(t){return t.content;}).map(function(t){return [t.status==='completed'?'done':t.status==='in_progress'?'run':'wait',String(t.content)];});
-					} catch(e) { }
-					break;
-				}
-			}
-			var titles={};
-			nodes.forEach(function(node){if(node.kind==='tool-result'&&node.call&&/^(?:mcp__articles__|mcp__sora-articles__)write_article$/.test(node.call.name)&&node.isError!==true){try{var args=JSON.parse(node.call.argsRaw||'{}');var title=String(args.title||args.file||'').replace(/\.md$/i,'');if(title)titles[title]=true;}catch(e){}}});
-			var count=Object.keys(titles).length, confirmed=Object.keys(done||{}).filter(function(t){return titles[t]&&done[t];}).length;
-			var running=!!(legacy&&(legacy.partial||(legacy.runningCalls&&legacy.runningCalls.length)));
-			var rows=[[running?'run':count?'done':'wait',running?'写作中':count?'本会话已写 '+count+' 篇文章':'已停止，尚无文章产物']];
-			var pending=(drafts||[]).filter(function(d){return titles[d.title]&&!(done&&done[d.title]);}).length;
-			if(pending)rows.push(['wait',pending+' 篇草稿待审核']);
-			if(confirmed)rows.push(['done','已入库 '+confirmed+' 篇']);
-			return rows;
-		}
-		function MobileChatHeader(p) {
-			var chatRef=React.useRef(null);
-			useWbScene(true, 'chat');
-			useWbChatLayout(chatRef);
-			var menu=React.useState(false), preset=React.useState(false), rename=React.useState(false), newTitle=React.useState(""), renameError=React.useState("");
-			useWbPickTick();
-			var rows=wbMobileProgress(p.nodes||[],p.legacy,WB_PICK.drafts,WB_PICK.done);
-			var meta=p.meta||{}, binding=wbNavState.bindings[p.sessionId]||{};
-			var title=p.title||meta.topic||binding.topic||'会话';
-			var refCount=meta.refs?((meta.refs.urls||[]).length+(meta.refs.body?1:0)):0;
-			var sub=wbContextLabel([meta.client||binding.client,meta.line,meta.period,refCount?'仿写 '+refCount+' 篇':'']);
-			var completed=rows.filter(function(row){return row[0]==='done';}).length;
-			return h('div',{className:'wb_mChat',ref:chatRef},h(MobileTopBar,{title:title,sub:sub,back:function(){var layout=WbCtx&&WbCtx.get?WbCtx.get('layout'):null;if(layout)layout.selectPanel(WORKBENCH_KEY);},more:function(){menu[1](true);}}),
-				h('div',{className:'wb_mPinned'},rows.length?h('details',{className:'wb_mProgress'},h('summary',null,h('span',null,'任务进度'),h('small',null,completed+'/'+rows.length),wbIcon('down')),h('div',{className:'wb_mChecklist'},rows.map(function(row,i){return h('div',{className:'wb_trow',key:i},h('span',{className:'wb_ticon','data-s':row[0]},row[0]==='done'?'✓':row[0]==='run'?'◷':'○'),h('span',null,row[1]));}))):null,
-					h(ReviewTabBody,Object.assign({},p.reviewProps,{mobileInline:true}))),
-				menu[0]?h(MobileModal,{title:'会话操作',close:function(){menu[1](false);}},h('button',{type:'button',className:'wb_mMenuRow',onClick:function(){menu[1](false);newTitle[1](title);rename[1](true);}},'重命名'),h('button',{type:'button',className:'wb_mMenuRow',onClick:function(){menu[1](false);preset[1](true);}},'这次发起时的预设'),h('button',{type:'button',className:'wb_mMenuRow',onClick:function(){menu[1](false);wbNavState.drawer=true;wbNavEmit();}},'会话列表'),h('button',{type:'button',className:'wb_mMenuRow',onClick:function(){menu[1](false);preset[1]('desktop');}},'在电脑上打开')):null,
-				rename[0]?h(MobileModal,{title:'重命名',close:function(){rename[1](false);}},h('input',{className:'wb_mRename',value:newTitle[0],'aria-label':'会话名称',onChange:function(e){newTitle[1](e.target.value);}}),renameError[0]?h('p',{role:'status'},renameError[0]):null,h('button',{type:'button',className:'wb_mPrimary',disabled:!newTitle[0].trim(),onClick:async function(){try{var svc=WbCtx.get('sessions');var binding=svc.binding(p.sessionId);var result=await binding.session.rename(newTitle[0].trim());if(!result.ok)throw Error(result.error.message);rename[1](false);}catch(e){renameError[1]('重命名失败，请稍后重试');}}},'保存')):null,
-				preset[0]?h(MobileModal,{title:preset[0]==='desktop'?'在电脑上打开':'这次发起时的预设',close:function(){preset[1](false);}},h('div',{className:'wb_mPreset'},preset[0]==='desktop'?'在电脑上登录同一账号，从会话列表打开「'+title+'」。':[meta.client,meta.line,meta.period,meta.topic,meta.refs&&meta.refs.style,(meta.skills||[]).join('、'),meta.base].filter(Boolean).join('\n')||'此会话没有装配台预设')):null);
-		}
 
 		/* ==================================================================
 		 * dsh-workbench — browser half.
@@ -313,28 +17,6 @@ window.__ModuleLoader__.load({
 		 * 1. **没接的一律留空，不塞假数据。** 薄弱问句库、skill 列表现在都没接，
 		 *    就渲染原型里那块表格/那排标签的**壳**加一句空态说明，不放编造的行。
 		 *    假数据会让人误以为接了，然后照着假形状去写后端。
-		 * 2. **只落在 DSH 的扩展点上。** 新的 `main` 面板 + `sidebar.panellist`
-		 *    + Noah 同构 `shell.overlay` 左栏。root / conversation / composer 仍不碰原生行为。
-		 *    WB-SUP P1：正式绑定索引仍保留；左树用 overlay 呈现客户分组，
-		 *    仍禁止用脆弱的 hash 类名刮官方 DOM。
-		 *
-		 * 类名全是自己的 `wb_` 前缀：CSS 是手写的（本包没有 tsdown 构建，
-		 * 没有 class-name hashing 可依赖），手机适配的集中 suffix 选择器例外见 Upstream compatibility boundary。
-		 *
-		 * 令牌照搬 workbench/原型v2暂定版/styles.css:8-80。
-		 * ================================================================== */
-
-
-		/* ==================================================================
-		 * dsh-workbench — browser half.
-		 *
-		 * 装配台（原型的 Landing 页）：A1 给谁写 / A2 主题 / A3 工作区 /
-		 * A4 拖杆 / A5 怎么写 / A6 底座 / A7 放大编辑。
-		 *
-		 * 两条硬规矩
-		 * ----------
-		 * 1. **没有数据就留空，不塞假数据。** 薄弱问句和 skill 都由各自接口提供，
-		 *    请求失败时只显示可解释的空态，不放编造的行。
 		 * 2. **只落在 DSH 的扩展点上。** 新的 `main` 面板 + `sidebar.panellist`
 		 *    一行 + 一个会话域的接力挂件。root / conversation / composer /
 		 *    sidebar.workspaces 一个都不碰，标准流程永远一点即达。
@@ -353,48 +35,12 @@ window.__ModuleLoader__.load({
 		 *   面板与 R 区     面板接线 / 文章审核 tab / 机器检查占位
 		 * ================================================================== */
 
-		/* DSH is deliberately light-only.  Keep the host harness and any
-		 * persisted Appearance choice from reintroducing a dark skin. */
-		function forceLightTheme() {
-			if (typeof document === "undefined" || !document.documentElement) return;
-			var root = document.documentElement;
-			var observer = null;
-			var observerOptions = { attributes: true, attributeFilter: ["data-dsh-theme", "data-ds-dark-theme", "class", "style"] };
-			function normalize() {
-				if (observer) observer.disconnect();
-				var body = document.body;
-				if (root.getAttribute("data-dsh-theme") !== "light") root.setAttribute("data-dsh-theme", "light");
-				root.removeAttribute("data-ds-dark-theme");
-				root.classList.remove("dark");
-				if (root.style.getPropertyValue("color-scheme") !== "light" || root.style.getPropertyPriority("color-scheme") !== "important") root.style.setProperty("color-scheme", "light", "important");
-				if (body) {
-					if (body.hasAttribute("data-dsh-theme") && body.getAttribute("data-dsh-theme") !== "light") body.setAttribute("data-dsh-theme", "light");
-					body.removeAttribute("data-ds-dark-theme");
-					body.classList.remove("dark");
-					if (body.style.getPropertyValue("color-scheme") !== "light" || body.style.getPropertyPriority("color-scheme") !== "important") body.style.setProperty("color-scheme", "light", "important");
-				}
-				if (observer) {
-					observer.observe(root, observerOptions);
-					if (body) observer.observe(body, observerOptions);
-				}
-			}
-			normalize();
-			if (window.__DSH_FORCE_LIGHT_THEME__ || typeof MutationObserver !== "function") return;
-			window.__DSH_FORCE_LIGHT_THEME__ = true;
-			observer = new MutationObserver(normalize);
-			observer.observe(root, observerOptions);
-			if (document.body) observer.observe(document.body, observerOptions);
-			window.__DSH_FORCE_LIGHT_THEME_OBSERVER__ = observer;
-		}
-		forceLightTheme();
-
 		var CSS = [
-			"html,body{color-scheme:light!important;}",
-			"[data-theme-toggle],[data-theme-switch],[data-theme-picker],button[aria-label*=\"主题\"],button[title*=\"主题\"]{display:none!important;}",
 			/* ---- tokens (原型 styles.css:8-80) ------------------------------
 			 * On `body`, not on our own root: this is the product palette, and
-			 * the conversation skin needs it too. The light palette is fixed so
-			 * host Appearance changes cannot create a mixed skin. */
+			 * the conversation skin needs it too. Dark hangs off the attribute
+			 * DSH's own ThemePresenter writes, so it follows the user's
+			 * light/dark choice instead of inventing a second switch. */
 			"body{",
 			"  --wb-bg:#ffffff; --wb-side:#f6f7f9; --wb-elev:#ffffff; --wb-elev2:#eef1f5;",
 			"  --wb-line:#e2e5ea; --wb-line-soft:#edeff3;",
@@ -407,6 +53,14 @@ window.__ModuleLoader__.load({
 			"  --wb-pop:0 8px 24px rgba(16,24,40,.14);",
 			"  --wb-font:-apple-system,\"PingFang SC\",\"Hiragino Sans GB\",\"Microsoft YaHei\",sans-serif;",
 			"  --wb-mono:ui-monospace,SFMono-Regular,Menlo,monospace;",
+			"body[data-ds-dark-theme]{",
+			"  --wb-bg:#14161b; --wb-side:#171a20; --wb-elev:#1c2028; --wb-elev2:#232833;",
+			"  --wb-line:#2b3140; --wb-line-soft:#232836;",
+			"  --wb-text:#e7e9ef; --wb-strong:#ffffff; --wb-dim:#9aa2b4; --wb-dim2:#6b7385;",
+			"  --wb-accent:#4d7cfe; --wb-accent-bg:#141d2e; --wb-accent-line:#26364f;",
+			"  --wb-accent-glow:rgba(77,124,254,.15);",
+			"  --wb-ok:#3ecf8e; --wb-ok-bg:#12241d; --wb-warn:#f0b429; --wb-bad:#ff7b7b; --wb-bad-bg:#3a1f1f;",
+			"  --wb-shadow:none; --wb-pop:0 8px 24px rgba(0,0,0,.55);",
 			"}",
 
 			/* ---- C 区皮肤（会话页）------------------------------------------
@@ -435,6 +89,56 @@ window.__ModuleLoader__.load({
 			"  border-bottom:1px solid var(--wb-line-soft); background:var(--wb-bg);",
 			"}",
 			"[data-slot='conversation.composer.bar']{ --dsw-specific-input-major:var(--wb-elev); }",
+			/* 会话页美化（2026-10-13 晚 · 气泡轮）：预填简报气泡 / 过程折叠卡 / 工具与思考胶囊 / 表格修复。
+			 * 锚点全用官方 data-*：data-chat-anchor-key（条目）、data-turn-process（过程折叠总条）、
+			 * data-disclosure-row（过程内每行）、data-wb-prefold（我们打的预填标）。
+			 * wb 变量在会话页无效（不在 .wb_root 下），颜色写死，暗色单独一套。 */
+			/* —— 预填简报气泡 —— */
+			"[data-slot='main.conversation'] [data-wb-prefold]{background:#eef3ff; border:1px solid #d7e3ff; border-radius:14px; padding:6px 10px; max-width:640px; margin:2px 0 10px;}",
+			/* !important：chat.node 带内联 display:contents，样式表规则必须 !important 才压得过 */
+			"[data-slot='main.conversation'] [data-wb-prefold]:not([data-wb-open]) > :not(.wb_prefoldHead){display:none !important;}",
+			"[data-slot='main.conversation'] [data-wb-prefold]:not([data-wb-open]){max-height:37px; overflow:hidden;}",
+			".wb_root button.wb_prefoldHead, [data-slot='main.conversation'] .wb_prefoldHead{all:unset; box-sizing:border-box; display:flex; align-items:center; gap:8px; width:100%; padding:3px 6px; color:#3563e9; font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif; font-size:12.5px; line-height:1.5; cursor:pointer; user-select:none;}",
+			".wb_prefoldHead:hover{opacity:.85;}",
+			"[data-slot='main.conversation'] .wb_prefoldHead .wb_pfT{overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}",
+			"[data-slot='main.conversation'] .wb_prefoldHead .wb_pfTag{flex:none; background:#fff; border:1px solid #d7e3ff; border-radius:99px; padding:0 8px; font-size:11px; font-weight:600;}",
+			"[data-slot='main.conversation'] .wb_prefoldHead .wb_pfC{flex:none; margin-left:auto; font-size:11px;}",
+			"body[data-ds-dark-theme] [data-slot='main.conversation'] [data-wb-prefold]{background:#232a3d; border-color:#31406080;}",
+			"body[data-ds-dark-theme] [data-slot='main.conversation'] .wb_prefoldHead{color:#8ab0ff;}",
+			"body[data-ds-dark-theme] [data-slot='main.conversation'] .wb_prefoldHead .wb_pfTag{background:#1a2030; border-color:#31406080; color:#8ab0ff;}",
+			/* —— 过程折叠总条（官方 data-turn-process 按钮，整轮一条）—— */
+			"[data-slot='main.conversation'] button[data-turn-process]{all:unset; box-sizing:border-box; display:flex; align-items:center; gap:8px; width:100%; max-width:640px; margin:2px 0 10px; padding:9px 14px; background:#fff; border:1px solid #e7e9ee; border-radius:13px; cursor:pointer; color:#565c6b; font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif; font-size:13px; line-height:1.6; box-shadow:0 1px 2px rgba(16,24,40,.04);}",
+			"[data-slot='main.conversation'] button[data-turn-process]::before{content:'💡'; font-size:13px; line-height:1;}",
+			"[data-slot='main.conversation'] button[data-turn-process] svg{margin-left:auto; flex:none; color:#8b91a0;}",
+			"[data-slot='main.conversation'] button[data-turn-process]:hover{background:#fcfcfd;}",
+			"body[data-ds-dark-theme] [data-slot='main.conversation'] button[data-turn-process]{background:#1e222a; border-color:#2b3140; color:#9aa3b2; box-shadow:none;}",
+			"body[data-ds-dark-theme] [data-slot='main.conversation'] button[data-turn-process]:hover{background:#232833;}",
+			/* —— 过程内行胶囊（工具调用 / 思考 / 上下文注入，官方 data-disclosure-row）—— */
+			"[data-slot='main.conversation'] [data-disclosure-row]{background:#fafafc; border:1px solid #eceef2; border-radius:12px; padding:7px 12px; margin:0 0 6px; max-width:640px; box-shadow:0 1px 2px rgba(16,24,40,.03);}",
+			"[data-slot='main.conversation'] [data-disclosure-row] > span:nth-child(2){color:#8b91a0; flex:none;}",
+			"[data-slot='main.conversation'] [data-disclosure-row] > span:first-child{color:#8b91a0;}",
+			"[data-slot='main.conversation'] [data-disclosure-row].wb_thinkRow > span:first-child{color:#a08cff;}",
+			"body[data-ds-dark-theme] [data-slot='main.conversation'] [data-disclosure-row]{background:#1b1f27; border-color:#262c38; box-shadow:none;}",
+			"body[data-ds-dark-theme] [data-slot='main.conversation'] [data-disclosure-row] > span:first-child{color:#6b7686;}",
+			"body[data-ds-dark-theme] [data-slot='main.conversation'] [data-disclosure-row].wb_thinkRow > span:first-child{color:#a08cff;}",
+			/* —— 进行中（流式）：过程行全部隐藏，只留加载气泡；完成后官方折叠接管 —— */
+			"[data-slot='main.conversation'][data-wb-running] [data-disclosure-row],",
+			"[data-slot='main.conversation'][data-wb-running] button[data-turn-process],",
+			"[data-slot='main.conversation'][data-wb-running] [data-chat-flow-kind='reasoning']{display:none !important;}",
+			".wb_ldr{display:flex; align-items:center; gap:10px; background:#fff; border:1px solid #e7e9ee; border-radius:13px; padding:11px 16px; margin:8px 0; max-width:640px; color:#565c6b; font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif; font-size:13px; box-shadow:0 1px 2px rgba(16,24,40,.04);}",
+			".wb_ldrSpin{width:14px; height:14px; flex:none; border:2px solid #dbe2ef; border-top-color:#3b6df6; border-radius:50%; animation:wbSpin .8s linear infinite;}",
+			"@keyframes wbSpin{to{transform:rotate(360deg)}}",
+			"body[data-ds-dark-theme] .wb_ldr{background:#1e222a; border-color:#2b3140; color:#9aa3b2; box-shadow:none;}",
+			"body[data-ds-dark-theme] .wb_ldrSpin{border-color:#333a48; border-top-color:#7ea0ff;}",
+			/* —— 进行中思考淡化 —— */
+			"[data-slot='main.conversation'] [data-chat-flow-kind='reasoning']{opacity:.55;}",
+			/* —— 正文表格：完整显示 + 轻装饰。
+			 * auto 列宽（fixed 会把两列表的窄列撑到一半宽、长内容列被裁出容器）；
+			 * white-space:normal !important 破官方可能的 nowrap；断行兜底保证永不超宽。 */
+			"[data-slot='main.conversation'] table{table-layout:auto; width:100%; max-width:100%; border-collapse:collapse;}",
+			"[data-slot='main.conversation'] td, [data-slot='main.conversation'] th{white-space:normal !important; word-break:break-word; overflow-wrap:anywhere; vertical-align:top;}",
+			"[data-slot='main.conversation'] th{border-bottom:2px solid #cfdcff; background:#eef3ff; text-align:left;}",
+			"body[data-ds-dark-theme] [data-slot='main.conversation'] th{border-bottom-color:#2b3140; background:#232833;}",
 
 			/* ---- 工作台自己的壳 ---------------------------------------------- */
 			".wb_root{",
@@ -511,7 +215,7 @@ window.__ModuleLoader__.load({
 			"  border:none; outline:none; background:transparent; font:14px/1.7 var(--wb-font);",
 			"}",
 
-			/* A3 表格（结构照原型，行由 capture-words 数据驱动） */
+			/* A3 表格（结构照原型，行留空 —— 数据没接就不放行） */
 			".wb_tbl{width:100%; border-collapse:collapse; table-layout:fixed;}",
 			".wb_tbl th{",
 			"  position:sticky; top:0; z-index:1; text-align:left; font-size:11px; font-weight:500;",
@@ -594,9 +298,6 @@ window.__ModuleLoader__.load({
 			".wb_tblGap tbody tr{cursor:pointer;}",
 			".wb_tblGap tbody tr:hover{background:var(--wb-side);}",
 			".wb_gapQ{line-height:1.6; color:var(--wb-text);}",
-			".wb_tickMeta{display:block; color:var(--wb-dim2); font-size:10px; line-height:1.3; user-select:text; -webkit-user-select:text;}",
-			".wb_source{padding:7px 14px 3px; color:var(--wb-dim2); font-size:10.5px;}",
-			".wb_tickError{color:var(--wb-bad,#d9483b); font-size:10.5px;}",
 			".wb_gapMeta .wb_warn{color:var(--wb-bad,#d9483b);}",
 			".wb_gapEmpty{padding:14px; color:var(--wb-dim); font-size:12px;}",
 			/* 放大看（⤢）：全屏浮层，表格铺开。 */
@@ -714,7 +415,6 @@ window.__ModuleLoader__.load({
 			".wb_task{padding:8px 20px 6px;border-bottom:1px solid var(--wb-line-soft);display:flex;flex-direction:column;gap:2px;background:var(--wb-bg);}",
 			".wb_taskRow{display:flex;align-items:baseline;gap:10px;min-width:0;}",
 			".wb_taskRow2{display:flex;gap:12px;font-size:12px;color:var(--wb-dim);min-width:0;overflow:hidden;}",
-			".wb_reviewOpen{margin-left:8px;font-size:12px;padding:2px 10px;cursor:pointer;}",
 			".wb_taskHead{display:inline-flex;gap:6px;align-items:baseline;min-width:0;}",
 			".wb_taskClient{font-weight:600;font-size:13.5px;color:var(--wb-strong);}",
 			".wb_taskDim{color:var(--wb-dim2);font-size:12px;}",
@@ -864,6 +564,32 @@ window.__ModuleLoader__.load({
 			"}",
 			".wb_chipBtn:hover{border-color:var(--wb-accent-line); color:var(--wb-accent);}",
 			".wb_chipBtn[data-on='1']{background:var(--wb-accent-bg); border-color:var(--wb-accent-line); color:var(--wb-accent); font-weight:600;}",
+			/* 技能加购（点几下 = 写几篇，2026-10-13 定）：角标 + 弹动 + 飞入 + 输入区标签行。 */
+			".wb_chipBtn{position:relative;}",
+			".wb_skBadge{",
+			"  position:absolute; top:-7px; right:-6px; min-width:16px; height:16px; padding:0 4px;",
+			"  border-radius:8px; background:var(--wb-accent); color:#fff; font-size:10px; line-height:16px;",
+			"  font-weight:600; text-align:center; box-shadow:0 1px 3px rgba(0,0,0,.28); cursor:pointer;",
+			"}",
+			".wb_skBadge:hover{filter:brightness(.88);}",
+			".wb_bump{animation:wb_bump .32s ease;}",
+			"@keyframes wb_bump{0%{transform:scale(1);}35%{transform:scale(1.14);}100%{transform:scale(1);}}",
+			".wb_fly{",
+			"  position:fixed; width:10px; height:10px; border-radius:50%; background:var(--wb-accent);",
+			"  pointer-events:none; z-index:9999; box-shadow:0 2px 6px rgba(0,0,0,.3);",
+			"}",
+			/* 标签（发送行）：与 wb_chip 同款小圆角；数量用角标挂在右下角。 */
+			".wb_skTags{display:inline-flex; align-items:center; gap:14px;}",
+			".wb_skTag{",
+			"  position:relative; display:inline-flex; align-items:center; gap:6px;",
+			"  padding:2px 7px; border:1px solid var(--wb-accent-line); border-radius:6px;",
+			"  background:var(--wb-accent-bg); color:var(--wb-accent) !important;",
+			"  font-family:var(--wb-font) !important; font-size:11.5px !important;",  /* 三个 !：.wb_root button{font:inherit; color:inherit} 是简写+特异性(0,1,1)，会盖掉 font-size/family/color */
+			"  white-space:nowrap; cursor:pointer;",
+			"}",
+			".wb_skTag:hover{filter:brightness(.95);}",
+			".wb_skTag .wb_skBadge{top:auto; bottom:-7px; right:-7px;}",
+			"@media (prefers-reduced-motion: reduce){ .wb_bump{animation:none;} }",
 
 			/* A6 底座 + A7 放大 */
 			".wb_base{flex:0 0 auto; position:relative; display:flex; flex-direction:column; gap:6px;}",
@@ -926,199 +652,6 @@ window.__ModuleLoader__.load({
 			".wb_bad{color:var(--wb-bad);}",
 		].join("\n");
 
-		/* Mobile CSS: tokens/components adapted from screens/ds.css. */
-		CSS += `
-/* Derived from mobile-redesign/screens/ds.css. Runtime colors come from PR-1 tokens.css. */
-html[data-wb-mobile] body{--wb-bg:var(--dsh-bg,#f5f3ee);--wb-text:var(--dsh-ink,#0e1430);--wb-accent:var(--dsh-blue,#002fa7);--wb-accent-ink:var(--dsh-blue-ink,var(--wb-accent));--wb-line:var(--dsh-line,#e9e6e0);--wb-dim:var(--dsh-ink-2,#4a5170);--wb-dim2:var(--dsh-ink-3,#8b90a6);--wb-elev:var(--dsh-card,#fff);--wb-side:var(--wb-bg);--wb-content:100%;color:var(--wb-text)}
-html[data-wb-mobile] :is(.wb_mAssembly,.wb_mScrim,.wb_mDrawer,.wb_mChat,.wb_mReview){box-sizing:border-box;font:16px/24px var(--wb-font);color:var(--wb-text)}
-html[data-wb-mobile] :is(.wb_mAssembly,.wb_mScrim,.wb_mDrawer,.wb_mChat,.wb_mReview) *{box-sizing:border-box}
-html[data-wb-mobile] :is(.wb_mAssembly,.wb_mScrim,.wb_mDrawer,.wb_mChat,.wb_mReview) :is(button,input,textarea){font:inherit;color:inherit}
-html[data-wb-mobile] button{cursor:pointer}
-html[data-wb-mobile] .wb_mAssembly{height:100%;display:flex;flex-direction:column;background:var(--wb-bg);overflow:hidden}
-html[data-wb-mobile] .wb_mTop{flex:none;height:52px;display:flex;align-items:center;gap:4px;padding:0 8px 0 4px;background:var(--wb-bg)}
-html[data-wb-mobile] .wb_mHeading{flex:1;min-width:0;display:flex;flex-direction:column}
-html[data-wb-mobile] .wb_mHeading b{font-size:20px;line-height:28px;font-weight:750;white-space:nowrap;text-overflow:ellipsis;overflow:hidden}
-html[data-wb-mobile] .wb_mHeading small{font-size:13px;line-height:16px;white-space:nowrap;text-overflow:ellipsis;overflow:hidden;color:var(--wb-dim2)}
-html[data-wb-mobile] .wb_mIcon{border:0;background:transparent;flex:0 0 44px;width:44px;height:44px;display:grid;place-items:center;padding:0;border-radius:12px;font-size:24px!important}
-html[data-wb-mobile] .wb_mForm{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;padding:16px 16px 96px}
-html[data-wb-mobile] .wb_mForm h3{font-size:17px;line-height:24px;margin:24px 4px 10px;font-weight:700}
-html[data-wb-mobile] .wb_mContext{display:flex;align-items:center;gap:12px;width:100%;text-align:left;border:0;background:var(--dsh-card,#fff);border-radius:var(--dsh-r-m,14px);padding:16px;box-shadow:var(--dsh-shadow-1,0 1px 2px #0e14300f)}
-html[data-wb-mobile] .wb_mGrow{flex:1;min-width:0}
-html[data-wb-mobile] .wb_mContext b{font-weight:650;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;overflow-wrap:anywhere;line-height:24px}
-html[data-wb-mobile] :is(.wb_mContext,.wb_mClient) small{display:block;font-size:13px;line-height:18px;color:var(--wb-dim2)}
-html[data-wb-mobile] .wb_mContext>svg{color:var(--wb-dim2);flex:none}
-html[data-wb-mobile] .wb_mAvatar{width:40px;height:40px;border-radius:12px;background:var(--wb-accent);color:var(--dsh-on-accent,#fff);display:grid;place-items:center;font-size:17px;font-weight:750;flex:none}
-html[data-wb-mobile] .wb_mSegment{display:flex;padding:2px;gap:2px;border-radius:12px;background:var(--dsh-sunken,#efece6);margin-bottom:12px}
-html[data-wb-mobile] .wb_mSegment button{flex:1;position:relative;min-width:0;height:44px;min-height:44px;border:0;border-radius:9px;background:transparent;font-size:15px;font-weight:600;color:var(--wb-dim)}
-html[data-wb-mobile] .wb_mSegment button::after{content:'';position:absolute;inset:-4px 0}
-html[data-wb-mobile] .wb_mSegment button[aria-pressed=true]{background:var(--dsh-card,#fff);color:var(--wb-text);box-shadow:var(--wb-soft-shadow,0 1px 2px #0e14300f)}
-html[data-wb-mobile] .wb_mTopic{display:block;width:100%;resize:none;min-height:72px;max-height:40vh;overflow-y:auto;font-size:16px!important;border:1px solid var(--wb-line);border-radius:var(--dsh-r-m,14px);padding:12px 16px;background:var(--dsh-card,#fff);outline-color:var(--wb-accent-ink)}
-html[data-wb-mobile] .wb_mEmpty{padding:16px;border-radius:14px;background:var(--dsh-card,#fff);color:var(--wb-dim);margin-top:12px}
-html[data-wb-mobile] .wb_mEmpty p{margin:0;font-size:15px;line-height:24px}
-html[data-wb-mobile] .wb_mLink{border:0;background:transparent;color:var(--wb-accent-ink)!important;min-height:44px;padding:8px 0;font-weight:600!important}
-html[data-wb-mobile] .wb_mReferences{border-radius:14px;background:var(--dsh-card,#fff);box-shadow:var(--wb-soft-shadow,0 1px 2px #0e14300f);overflow:hidden}
-html[data-wb-mobile] .wb_mReference{display:flex;align-items:center;gap:10px;padding:8px 4px 8px 16px;min-height:64px;border-bottom:1px solid var(--wb-line)}
-html[data-wb-mobile] .wb_mReference .wb_mGrow{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
-html[data-wb-mobile] .wb_mReference small{font-size:13px;color:var(--wb-dim2);white-space:nowrap}
-html[data-wb-mobile] .wb_mRefIcon{display:grid;place-items:center;flex:none;width:36px;height:36px;border-radius:10px;background:var(--dsh-blue-50,#eef2fd);color:var(--wb-accent-ink)}
-html[data-wb-mobile] .wb_mAdd{display:flex;align-items:center;gap:12px;border:0;background:transparent;min-height:56px;padding:12px 16px;width:100%;text-align:left;color:var(--wb-accent-ink)!important;font-weight:600!important}
-html[data-wb-mobile] .wb_mChips{display:flex;flex-wrap:wrap;gap:8px;padding:2px 0}
-html[data-wb-mobile] .wb_mStyles{margin-top:12px}
-/* Mobile weak-question cards keep the full touch target and selection semantics. */
-html[data-wb-mobile] .wb_mWeakWrap{display:flex;flex-direction:column;gap:8px;margin:0 0 12px}
-html[data-wb-mobile] .wb_mWeakStat{font-size:14px;line-height:22px;color:var(--wb-dim2);font-weight:600}
-html[data-wb-mobile] .wb_mWeakList{display:flex;flex-direction:column;gap:8px;max-height:42dvh;overflow:auto;overscroll-behavior:contain}
-html[data-wb-mobile] .wb_mWeakRow{flex:0 0 auto;display:grid;grid-template-columns:44px minmax(0,1fr);align-items:start;gap:8px;min-height:56px;padding:8px 10px;border:1px solid var(--wb-line);border-radius:var(--dsh-r-s,10px);background:var(--dsh-card,#fff);text-align:left;touch-action:pan-y;user-select:none;cursor:pointer}
-html[data-wb-mobile] .wb_mWeakRow.is-on{border-color:var(--wb-accent-ink);background:var(--dsh-blue-50,#eef2fd)}
-html[data-wb-mobile] .wb_mWeakRow input{width:24px;height:24px;margin:2px 0 0;accent-color:var(--wb-accent);}
-html[data-wb-mobile] .wb_mWeakDetails{min-width:0;display:flex;flex-direction:column;gap:4px}
-html[data-wb-mobile] .wb_mWeakQuestion{display:flex;align-items:baseline;gap:8px;min-width:0}
-html[data-wb-mobile] .wb_mWeakQ{font-size:16px;line-height:24px;overflow-wrap:anywhere}
-html[data-wb-mobile] .wb_mWeakRoot{flex:none;font-size:13px;line-height:20px;color:var(--wb-dim2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:8em}
-html[data-wb-mobile] .wb_mWeakGaps{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}
-html[data-wb-mobile] .wb_mWeakGap{display:inline-flex;align-items:center;gap:3px;min-height:22px;padding:1px 5px;border-radius:6px;background:var(--wb-side);font-size:12px;line-height:18px;white-space:nowrap;text-decoration:none!important}
-html[data-wb-mobile] .wb_mWeakGapLabel{color:var(--wb-dim2)}
-html[data-wb-mobile] .wb_mWeakSource{color:var(--wb-dim2);font-size:11px;line-height:18px;overflow-wrap:anywhere}
-html[data-wb-mobile] .wb_mWeakEmpty{padding:16px;border:1px dashed var(--wb-line);border-radius:var(--dsh-r-s,10px);color:var(--wb-dim2);font-size:15px}
-/* Gap chips are inline-flex controls; keep inherited link styles from drawing marks between them. */
-html[data-wb-mobile] .wb_mWeakWrap,html[data-wb-mobile] .wb_mWeakList,html[data-wb-mobile] .wb_mWeakRow,html[data-wb-mobile] .wb_mWeakDetails,html[data-wb-mobile] .wb_mWeakQuestion,html[data-wb-mobile] .wb_mWeakQ,html[data-wb-mobile] .wb_mWeakRoot,html[data-wb-mobile] .wb_mWeakGaps,html[data-wb-mobile] .wb_mWeakSource,html[data-wb-mobile] .wb_mWeakEmpty{ text-decoration:none!important }
-html[data-wb-mobile] .wb_mWeakGap{ text-decoration:none!important }
-html[data-wb-mobile] .wb_mWeakGapLabel,html[data-wb-mobile] .wb_mWeakGap .wb_gapNum{ text-decoration:none!important }
-html[data-wb-mobile] .wb_mChip{position:relative;min-height:44px;max-width:100%;padding:7px 14px;border:1px solid var(--wb-line);border-radius:999px;background:var(--dsh-card,#fff);font-size:15px!important;overflow-wrap:anywhere}
-html[data-wb-mobile] .wb_mChip::after{content:'';position:absolute;inset:-2px 0}
-html[data-wb-mobile] .wb_mChip[aria-pressed=true]{border-color:var(--wb-accent-ink);background:var(--dsh-blue-50,#eef2fd);color:var(--wb-accent-ink)}
-html[data-wb-mobile] .wb_mStyles .wb_mChip[aria-pressed=true]{border-color:var(--wb-text);background:var(--wb-text);color:var(--dsh-on-accent,#fff)}
-html[data-wb-mobile] .wb_mSkills section{margin:16px 0}
-html[data-wb-mobile] .wb_mSkills small{display:block;margin:8px 0;color:var(--wb-dim2);font-size:13px}
-html[data-wb-mobile] .wb_mExtra{display:flex;align-items:center;gap:10px;width:100%;text-align:left;background:var(--dsh-card,#fff);border:0;border-radius:14px;padding:12px 16px;margin-top:24px;min-height:56px}
-html[data-wb-mobile] .wb_mExtra span{overflow:hidden;white-space:nowrap;text-overflow:ellipsis;color:var(--wb-dim2);font-size:14px}
-html[data-wb-mobile] .wb_mAction{position:fixed;left:0;right:0;bottom:var(--wb-kb,0px);padding:12px 16px calc(12px + env(safe-area-inset-bottom));border-top:1px solid var(--wb-line);background:var(--dsh-tabbar-bg,rgba(255,255,255,.96));backdrop-filter:blur(20px);z-index:1100}
-html[data-wb-mobile] .wb_mAboveTabs{bottom:calc(var(--dsh-tabbar-h,52px) + env(safe-area-inset-bottom) + var(--wb-notice-h,0px));padding-bottom:12px}
-html[data-wb-mobile] .wb_mAction p{margin:0 0 8px;font-size:13px}
-html[data-wb-mobile] .wb_mPrimary{display:flex;align-items:center;justify-content:center;gap:8px;height:52px;min-height:52px;width:100%;border:0;border-radius:16px;background:var(--wb-accent);color:var(--dsh-on-accent,#fff)!important;font-size:17px!important;font-weight:700!important}
-html[data-wb-mobile] .wb_mPrimary:disabled{background:var(--dsh-ink-4,#b9bccb);cursor:default}
-html[data-wb-mobile] .wb_mScrim{position:fixed;inset:0;background:var(--dsh-scrim,rgba(14,20,48,.45));z-index:16000;display:flex;align-items:flex-end}
-html[data-wb-mobile] .wb_mSheet{background:var(--dsh-card,#fff);border-radius:28px 28px 0 0;padding:8px 20px calc(16px + env(safe-area-inset-bottom));width:100%;max-height:calc(var(--wb-vv-h,100dvh) - 20px);overflow:auto;overscroll-behavior:contain;outline:none}
-html[data-wb-mobile] .wb_mGrab{width:36px;height:5px;border-radius:3px;background:var(--dsh-ink-4,#b9bccb);margin:0 auto 12px}
-html[data-wb-mobile] .wb_mSheetHead{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
-html[data-wb-mobile] .wb_mSheetHead h2{font-size:20px;font-weight:800;margin:0}
-html[data-wb-mobile] .wb_mMenuRow{display:flex;align-items:center;width:100%;min-height:52px;text-align:left;padding:12px 0;margin:0;border:0;border-radius:0;background:transparent}
-html[data-wb-mobile] .wb_mMenuRow+.wb_mMenuRow{border-top:1px solid var(--dsh-line-2,#f1efea)}
-html[data-wb-mobile] .wb_mCaption{display:block;color:var(--wb-dim2);font-size:13px;margin:20px 0 10px}
-html[data-wb-mobile] .wb_mClient{display:flex;width:100%;align-items:center;text-align:left;gap:12px;padding:8px 0;border:0;border-bottom:1px solid var(--dsh-line-2,#f1efea);background:var(--dsh-card,#fff);min-height:60px}
-html[data-wb-mobile] .wb_mClient b{display:block;line-height:24px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-html[data-wb-mobile] .wb_mClient small{min-height:18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-html[data-wb-mobile] .wb_mClient>.wb_mRadio{display:grid;place-items:center;flex:none;width:26px;height:26px;border-radius:50%!important;corner-shape:round;border:2px solid var(--dsh-ink-4,#b9bccb)}
-html[data-wb-mobile] .wb_mRadio[data-on='1']{background:var(--wb-accent);border-color:var(--wb-accent);color:var(--dsh-on-accent,#fff)}
-html[data-wb-mobile] .wb_mSheet>.wb_mPrimary{margin-top:24px}
-html[data-wb-mobile] .wb_mEditor{position:absolute;top:var(--wb-vv-top,0px);left:0;right:0;height:var(--wb-vv-h,100dvh);background:var(--dsh-card,#fff);padding:8px 16px calc(16px + env(safe-area-inset-bottom));display:flex;flex-direction:column;gap:12px}
-html[data-wb-mobile] .wb_mEditor textarea{flex:1;min-height:80px;resize:none;border:1px solid var(--wb-line);padding:16px;border-radius:14px;outline-color:var(--wb-accent-ink)}
-html[data-wb-mobile] .wb_mFile{font-size:14px;display:flex;flex-direction:column;gap:8px}
-html[data-wb-mobile] .wb_mFile input{max-width:100%}
-html[data-wb-mobile] .wb_mDrawer{position:fixed;left:0;top:0;bottom:0;width:min(328px,calc(100vw - 32px));padding-top:env(safe-area-inset-top);background:var(--wb-bg);border-radius:0 24px 24px 0;box-shadow:12px 0 40px var(--wb-drawer-shadow,#0e143033);display:flex;flex-direction:column;overflow:hidden;outline:none}
-html[data-wb-mobile] .wb_mDrawerHead{display:flex;align-items:center;padding:4px 8px 4px 20px;height:52px;flex:none}
-html[data-wb-mobile] .wb_mDrawerHead b{flex:1;font-size:20px}
-html[data-wb-mobile] .wb_mDrawerTools{padding:4px 16px 0}
-html[data-wb-mobile] .wb_mSearch{position:relative;display:flex;align-items:center;margin-top:16px;color:var(--dsh-ink-3,#8b90a6)}
-html[data-wb-mobile] .wb_mSearch>svg{position:absolute;left:12px;pointer-events:none}
-html[data-wb-mobile] .wb_mSearch input{box-sizing:border-box;width:100%;height:44px!important;min-height:44px;font-size:16px!important;background:var(--dsh-card,#fff);border:1px solid var(--wb-line);border-radius:var(--dsh-r-s,10px);padding:0 12px 0 44px;margin:0}
-html[data-wb-mobile] .wb_mTree{padding:16px 8px;overflow:auto;flex:1;min-height:0;overscroll-behavior:contain}
-html[data-wb-mobile] .wb_mGroup{display:flex;align-items:center;gap:8px;width:100%;min-height:48px;padding:8px;border:0;background:none;text-align:left}
-html[data-wb-mobile] .wb_mGroup b{flex:1;min-width:0;font-size:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-html[data-wb-mobile] .wb_mGroup small{flex:none;font-size:13px;color:var(--dsh-ink-3,#8b90a6)}
-html[data-wb-mobile] .wb_mGroup>svg{flex:none;width:24px;height:24px;color:var(--dsh-ink-3,#8b90a6)}
-html[data-wb-mobile] .wb_mGroup .wb_mAvatar{width:28px;height:28px;font-size:13px;border-radius:8px}
-html[data-wb-mobile] .wb_mSession{display:flex;align-items:flex-start;gap:12px;width:100%;min-height:64px;padding:10px 12px;text-align:left;border:0;border-radius:14px;background:none}
-html[data-wb-mobile] .wb_mSession[aria-current=true]{background:var(--dsh-card,#fff);box-shadow:var(--wb-soft-shadow,0 1px 2px #0e14300f)}
-html[data-wb-mobile] .wb_mSession[aria-current=true] b{color:var(--wb-accent-ink);font-weight:700}
-html[data-wb-mobile] .wb_mSession b{display:block;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-size:16px;line-height:22px;font-weight:500}
-html[data-wb-mobile] .wb_mSession small{display:block;margin-top:2px;font-size:14px;line-height:20px;color:var(--wb-dim2)}
-html[data-wb-mobile] .wb_mStatus{width:8px;height:8px;border-radius:50%;corner-shape:round;background:var(--dsh-ink-4,#b9bccb);margin-top:8px;flex:none}
-html[data-wb-mobile] .wb_mStatus[data-tone=blue]{background:var(--wb-accent)}
-html[data-wb-mobile] .wb_mStatus[data-tone=orange]{background:var(--dsh-orange,#ff6a1f)}
-html[data-wb-mobile] .wb_mStatus[data-tone=green]{background:var(--dsh-green,#14a05a)}
-html[data-wb-mobile] .wb_mAccount{display:flex;align-items:center;gap:12px;padding:16px 20px calc(16px + env(safe-area-inset-bottom));border-top:1px solid var(--wb-line);flex:none}
-html[data-wb-mobile] .wb_mAccount small{display:block;color:var(--wb-dim2);font-size:13px;overflow-wrap:anywhere}
-html[data-wb-mobile] .wb_mAccount .wb_mAvatar{border-radius:50%;corner-shape:round;background:var(--dsh-blue-50,#eef2fd);color:var(--wb-accent-ink)}
-html[data-wb-mobile] .wb_mChat .wb_mTop{background:var(--dsh-card,#fff);border-bottom:1px solid var(--wb-line)}
-html[data-wb-mobile] .wb_mChat .wb_mHeading b{font-size:17px;line-height:22px}
-html[data-wb-mobile] .wb_mPinned{position:relative;display:flex;align-items:center;gap:8px;height:56px;padding:4px 16px;background:var(--dsh-card,#fff);border-bottom:1px solid var(--wb-line)}
-html[data-wb-mobile] .wb_mPinned:empty{display:none}
-html[data-wb-mobile] .wb_mProgress{flex:1;min-width:0;margin:0;padding:0;font-size:16px;line-height:24px}
-html[data-wb-mobile] .wb_mProgress summary{display:flex;align-items:center;gap:4px;list-style:none;font-weight:700;cursor:pointer;min-height:48px;white-space:nowrap}
-html[data-wb-mobile] .wb_mProgress summary::-webkit-details-marker{display:none}
-html[data-wb-mobile] .wb_mProgress summary::marker{content:''}
-html[data-wb-mobile] .wb_mProgress summary small{font-size:13px;color:var(--dsh-ink-3,#8b90a6)}
-html[data-wb-mobile] .wb_mProgress summary svg{flex:none;width:24px;height:24px}
-html[data-wb-mobile] .wb_mProgress[open] summary svg{transform:rotate(180deg)}
-html[data-wb-mobile] .wb_mChecklist{position:absolute;top:100%;left:16px;right:16px;z-index:1200;max-height:calc(var(--wb-vv-h,100dvh) * .4);overflow:auto;overscroll-behavior:contain;padding:16px;border-radius:var(--dsh-r-m,14px);background:var(--dsh-card,#fff);box-shadow:var(--dsh-shadow-2,0 8px 24px #0e14301a)}
-html[data-wb-mobile] .wb_mProgress .wb_trow{padding:3px 0;font-size:16px;gap:10px}
-html[data-wb-mobile] .wb_mProgress .wb_ticon{width:22px;height:22px;flex:none;border-radius:50%;corner-shape:round;font-size:18px;display:grid;place-items:center}
-html[data-wb-mobile] .wb_mProgress .wb_ticon[data-s=done]{background:var(--dsh-green,#14a05a);color:var(--dsh-on-accent,#fff)}
-html[data-wb-mobile] .wb_mPinned .wb_mPending{display:flex;align-items:center;justify-content:center;gap:4px;min-width:0;max-width:60%;min-height:48px;margin:0 0 0 auto;padding:0 8px;border:0;border-radius:var(--dsh-r-s,10px);background:var(--dsh-orange-50,#fff1e6);color:var(--dsh-orange-700,#d9480f)}
-html[data-wb-mobile] .wb_mPending small{font-size:13px;line-height:18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-html[data-wb-mobile] .wb_mPending b{font-size:16px;white-space:nowrap}
-html[data-wb-mobile] .wb_mPending svg{flex:none;width:24px;height:24px}
-html[data-wb-mobile]:is([data-wb-keyboard],[data-dsh-keyboard='open']) .wb_mPinned{display:none}
-html[data-wb-mobile] .wb_mReview{position:fixed;inset:0;z-index:15000;background:var(--wb-bg);display:flex;flex-direction:column}
-html[data-wb-mobile] .wb_mReviewList{overflow:auto;min-height:0;flex:1;padding:16px 16px 108px}
-html[data-wb-mobile] .wb_mArticle{background:var(--dsh-card,#fff);overflow:auto;min-height:0;flex:1;padding:20px 20px 110px;font-size:17px;line-height:30px;overflow-wrap:anywhere}
-html[data-wb-mobile] .wb_mArticle h1{font-size:24px;line-height:34px;margin:0 0 20px}
-html[data-wb-mobile] .wb_mReviewItem{display:block;width:100%;padding:16px;margin-bottom:12px;min-height:72px;border:0;border-radius:14px;background:var(--dsh-card,#fff);text-align:left}
-html[data-wb-mobile] .wb_mReviewItem b{display:block;line-height:24px}
-html[data-wb-mobile] .wb_mReviewItem small{color:var(--wb-dim2);font-size:14px}
-html[data-wb-mobile] .wb_mPreset{white-space:pre-wrap;overflow-wrap:anywhere}
-/* Upstream compatibility boundary. All hashed-class suffix selectors live here;
-   public data-slot contracts are preferred. Never match a concrete build hash.
-   Keep grid children in their columns: display:none on a column shifts auto-placement. */
-html[data-wb-mobile] [class*='_frame'],html[data-wb-mobile] [class*='frame']{grid-template-columns:0 minmax(0,1fr) 0!important;width:100vw;max-width:100vw;min-width:0}
-html[data-wb-mobile] [class*='_sidebarCol'],html[data-wb-mobile] [class*='_rightbarCol'],html[data-wb-mobile] [class*='sidebarCol'],html[data-wb-mobile] [class*='rightbarCol']{width:0!important;min-width:0!important;max-width:0!important;flex:0 0 0!important;overflow:hidden!important;visibility:hidden}
-html[data-wb-mobile] [class*='_centerCol'],html[data-wb-mobile] [class*='centerCol']{width:100%!important;min-width:0;max-width:100vw}
-html[data-wb-mobile] .wb_mAssembly{width:100%;min-width:0;max-width:100vw}
-html[data-wb-mobile] [data-slot='main.conversation']{--dsh-content-font-size:16px;--dsh-chat-content-width:100%;--dsh-composer-side-clearance:0px;background:var(--dsh-card,#fff);min-width:0}
-html[data-wb-mobile][data-wb-scene='chat'] [data-slot='main.conversation']{position:fixed;top:var(--wb-vv-top,0px);left:0;right:0;height:var(--wb-vv-h,100dvh)}
-html[data-wb-mobile] [data-slot='conversation.session.header']{flex:none;min-width:0;border-bottom:0}
-html[data-wb-mobile] [class*='_composerSeat']{position:fixed!important;left:0;right:0;bottom:calc(var(--wb-kb,0px) + var(--wb-notice-h,0px))!important;box-sizing:border-box;width:100%;z-index:1100!important;background:var(--dsh-card,#fff)!important;padding:10px 12px calc(10px + env(safe-area-inset-bottom));border-top:1px solid var(--wb-line)}
-html[data-wb-mobile] [class*='_composerStack']{width:100%;max-width:none}
-html[data-wb-mobile] [data-slot='conversation.composer.bar']{padding:0;--dsw-specific-input-major:var(--wb-bg)}
-html[data-wb-mobile] [data-slot='conversation.composer.bar'] [contenteditable]{font-size:16px!important;line-height:24px;min-height:24px;max-height:120px;padding:0}
-html[data-wb-mobile] [data-slot='conversation.composer.bar'] button{min-height:44px;min-width:44px}
-html[data-wb-mobile] [data-slot='conversation.input.model'],html[data-wb-mobile] [data-composer-stats],html[data-wb-mobile] .wb_pick{display:none!important}
-html[data-wb-mobile] [data-conversation-scroll]{flex:none!important;height:var(--wb-chat-scroll-h,100%);padding-bottom:0!important;min-width:0}
-html[data-wb-mobile] [data-slot='conversation.view']{min-width:0;overflow-wrap:anywhere}
-html[data-wb-mobile] [data-slot='conversation.chat.node']{font-size:16px;line-height:26px;min-width:0;max-width:100%}
-html[data-wb-mobile] [class*='_userRow']{justify-content:flex-end}
-html[data-wb-mobile] [class*='_userStack']{max-width:88%;border-radius:20px 20px 6px 20px;background:var(--wb-accent);color:var(--dsh-on-accent,#fff);padding:10px 14px}
-html[data-wb-mobile] [class*='_userStack'] *{color:inherit;background:transparent}
-html[data-wb-mobile] [data-slot='conversation.chat.node'] pre{overflow:auto;max-width:100%}
-html[data-wb-mobile] .wb_grip{display:none}
-html[data-wb-mobile]:has(.impersonation-banner){--wb-notice-h:36px}
-html[data-wb-mobile] .wb_mRename{width:100%;min-height:48px;border:1px solid var(--wb-line);border-radius:12px;padding:10px}
-html[data-wb-mobile] .wb_mQuick{display:flex;gap:8px;margin:0 0 10px;font:14px/20px var(--wb-font)}
-html[data-wb-mobile][data-wb-keyboard] .wb_mQuick{display:none}
-html[data-wb-mobile][data-wb-keyboard] [class*='_composerSeat']{bottom:var(--wb-kb,0px)!important}
-html[data-wb-mobile] [data-slot='conversation.input.dock'] div:has(>button[class*='_header']){display:none}
-html[data-wb-mobile] [data-slot='conversation.composer.dock']{display:none!important}
-html[data-wb-mobile] [data-slot='conversation.composer.bar']>[class*='_root']{padding:0}
-html[data-wb-mobile] [data-slot='conversation.composer.bar'] [class*='_card']{display:grid;grid-template-columns:44px minmax(0,1fr) 44px;gap:8px;padding:0;background:var(--dsh-card,#fff);box-shadow:none;max-width:none;align-items:end}
-html[data-wb-mobile] [data-slot='conversation.composer.bar'] [class*='_scroll']{box-sizing:border-box;grid-column:2;grid-row:1;padding:10px 14px;background:var(--wb-bg);border-radius:22px;max-height:144px;min-height:44px}
-html[data-wb-mobile] [data-slot='conversation.composer.bar'] [class*='_row']{display:contents}
-html[data-wb-mobile] [data-slot='conversation.composer.bar'] [class*='_tools']{grid-column:1;grid-row:1;padding:0}
-html[data-wb-mobile] [data-slot='conversation.composer.bar'] [class*='_trailing']{grid-column:3;grid-row:1;padding:0}
-html[data-wb-mobile] [data-slot='conversation.composer.bar'] [class*='_trailing']>span,html[data-wb-mobile] [data-slot='conversation.composer.bar'] [class*='_modes'],html[data-wb-mobile] [data-slot='conversation.composer.bar'] button[aria-label='指令']{display:none}
-html[data-wb-mobile] [data-slot='conversation.composer.bar'] [class*='_primary']{width:44px;height:44px;border-radius:50%;background:var(--wb-accent);color:var(--dsh-on-accent,#fff)}
-html[data-wb-mobile] [data-slot='conversation.composer.bar'] [class*='_primary']:disabled{background:var(--dsh-ink-4,#b9bccb)}
-html[data-wb-mobile] [data-slot='conversation.composer.bar'] [class*='_placeholder']{inset:0;font-size:0;line-height:24px;white-space:nowrap;text-overflow:ellipsis;overflow:hidden}
-html[data-wb-mobile] [data-slot='conversation.composer.bar'] [class*='_placeholder']::after{content:'继续追问，或让它改写…';font-size:16px}
-html[data-wb-mobile] [class*='_userStack'] [class*='_bubble']{padding:0}
-
-html[data-wb-mobile] .wb_mPinned .wb_mPending[data-ready='1']{background:var(--dsh-green-50,#e6f6ee);color:var(--dsh-green,#14a05a)}
-html[data-wb-mobile] [data-slot='conversation.composer.bar'] button[aria-label='添加附件']{display:grid!important;place-items:center;border-radius:50%;background:var(--wb-bg)}
-html[data-wb-mobile] [data-slot='conversation.composer.bar'] button[aria-label='添加附件'] svg{display:none}
-html[data-wb-mobile] [data-slot='conversation.composer.bar'] button[aria-label='添加附件']::after{content:'＋';font-size:24px}
-html[data-wb-mobile] [data-slot='conversation.chat.node'] div[class*='_markdown']{font-size:16px;line-height:26px}
-html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
-`;
 		/* The official client-package CSS pattern: one tag, keyed by
 		 * data-plugin-css, injected from apply() — HMR removes
 		 * <style data-plugin=...> tags on a reload, so a top-level injection
@@ -1140,8 +673,6 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 		var WORKBENCH_KEY = "workbench";
 
 		/* ---- 工作台后端 API（路径收口，别再散写魔法串）---------------- */
-		/* 文章库写入工具名：正式站 MCP 服务名是 articles，旧部署是 sora-articles —— 两种都算本会话的产物。 */
-		var WB_WRITE_TOOL_RE = /^mcp__(?:articles|sora-articles)__write_article$/;
 		var WB_API = {
 			clients: "/api/workbench/clients",
 			skills: "/api/workbench/skills",
@@ -1150,21 +681,13 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			assignGroup: "/api/workbench/assign-client-group",
 			taskMeta: "/api/workbench/task-meta",
 			taskStatus: "/api/workbench/task-status",
-			sessionClient: "/api/workbench/session-client",
 			drafts: "/api/workbench/drafts",
 			draft: "/api/workbench/draft",
 			confirmDraft: "/api/workbench/confirm-draft",
 			check: "/api/workbench/check",
-			/* 薄弱问句（Support · capture-words v4）：同源、按 ACL 过滤。 */
-			captureWordsClients: "/api/v1/capture-words/clients",
-			captureWords: "/api/v1/capture-words",
-			captureWordsTicks: "/api/v1/capture-words/ticks",
-			captureWordsTicksBulk: "/api/v1/capture-words/ticks/bulk",
-			/* 语义别名，方便表格逻辑和宿主调试时按旧分区名查路由。 */
-			weakDir: "/api/v1/capture-words/clients",
-			weakGaps: "/api/v1/capture-words",
-			weakTicks: "/api/v1/capture-words/ticks",
-			weakTicksBulk: "/api/v1/capture-words/ticks/bulk",
+			/* 薄弱问句（2026-10-10）：宿主带密钥调外部接口，这里只拿结果。 */
+			weakDir: "/api/workbench/weak-dir",
+			weakGaps: "/api/workbench/weak-gaps",
 			/* 会话创建（2026-10-12）：绕开 Session Intent 向导页。 */
 			sessionCreate: "/api/workbench/session-create",
 		};
@@ -1178,6 +701,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			metaFor: "wb-meta-for-",              // 前缀 + sessionId
 			navW: "wb-nav-w",                     // 自绘侧栏宽度
 			rightbarW: "wb-rightbar-w",           // 右栏宽度
+			weakPicked: "wb-weak-picked",         // 薄弱问句已选清单（换客户/换筛选/刷新都不丢）
 			modelLast: "wb-model-last",           // 上次用的模型（装配台下拉的默认值）
 			modelPending: "wb-model-pending",     // 装配台 → PromptRelay：本次任务选的模型
 			effortLast: "wb-effort-last",         // 上次的思考强度（装配台下拉的默认值）
@@ -1230,113 +754,50 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 		 * 客户下拉就空了 —— 整个装配台等于不能用。所以这里失败自动重试，
 		 * 最后一次失败才报错（报错文案里给「重试」按钮）。 */
 		var CLIENTS_PATH = WB_API.clients;
-		var wbWorkspaceInfo = null;
-		var wbWorkspaceFetch = null;
-		var WB_WORKSPACE_ERROR = "个人工作区暂不可用，请稍后重试";
-		var WB_SESSION_GUARD = Symbol.for("dsh-workbench.personal-session-guard");
 		var CLIENTS_RETRY_DELAYS = [1200, 3000];
-
-		function wbCacheWorkspace(body) {
-			var info = body && body.workspace;
-			var personal = info && info.personal;
-			wbWorkspaceInfo = personal && typeof personal.id === "string" && personal.id !== ""
-				&& typeof personal.path === "string" && personal.path !== "" && Array.isArray(info.legacySharedIds)
-				&& info.legacySharedIds.indexOf(personal.id) === -1 ? info : null;
-			return body;
-		}
-
-		function wbFetchClients() {
-			return fetch(CLIENTS_PATH, { headers: { accept: "application/json" } })
-				.then(readWorkbenchList).then(wbCacheWorkspace);
-		}
-
-		async function wbRequireWorkspace() {
-			if (wbWorkspaceInfo) return wbWorkspaceInfo;
-			if (!wbWorkspaceFetch) {
-				wbWorkspaceFetch = (async function () {
-					// A missing field can mean the previous impl was still loaded. Retry once.
-					for (var attempt = 0; attempt < 2; attempt++) {
-						try { await wbFetchClients(); } catch (error) { /* retry / fail closed */ }
-						if (wbWorkspaceInfo) return wbWorkspaceInfo;
-					}
-					throw new Error(WB_WORKSPACE_ERROR);
-				})();
-			}
-			try { return await wbWorkspaceFetch; }
-			finally { wbWorkspaceFetch = null; }
-		}
-
-		function wbInstallSessionGuard(ctx) {
-			var workspace, original, descriptor, wrapped;
-			var guard = {}, attempted = false;
-			var active = true;
-			try {
-				workspace = ctx.get("uiWorkspace");
-				original = workspace && workspace.startSession;
-				if (typeof original !== "function") throw new Error("uiWorkspace.startSession 不可用");
-				if (original[WB_SESSION_GUARD]) return function () {};
-				descriptor = Object.getOwnPropertyDescriptor(workspace, "startSession");
-				wrapped = function () {
-					var receiver = this, args = Array.prototype.slice.call(arguments);
-					function start(info) {
-						if (!active) return;
-						if (args[0] == null || info.legacySharedIds.indexOf(args[0]) !== -1) args[0] = info.personal.id;
-						return original.apply(receiver, args);
-					}
-					if (wbWorkspaceInfo) return start(wbWorkspaceInfo);
-					return wbRequireWorkspace().then(start).catch(function () {
-						if (active) window.alert(WB_WORKSPACE_ERROR);
-					});
-				};
-				wrapped[WB_SESSION_GUARD] = guard;
-				attempted = true;
-				workspace.startSession = wrapped;
-				if (workspace.startSession[WB_SESSION_GUARD] !== guard) throw new Error("startSession 不可写或被代理");
-			} catch (error) {
-				if (attempted) {
-					try {
-						if (descriptor) Object.defineProperty(workspace, "startSession", descriptor);
-						else delete workspace.startSession;
-					} catch (restoreError) { /* frozen/proxied service: best effort */ }
-				}
-				console.warn("[dsh-workbench] 无法安装新会话工作区保护：", error);
-				return function () { active = false; };
-			}
-			return function () {
-				active = false;
-				try {
-					if (workspace.startSession[WB_SESSION_GUARD] !== guard) return;
-					if (descriptor) Object.defineProperty(workspace, "startSession", descriptor);
-					else delete workspace.startSession;
-				} catch (error) { console.warn("[dsh-workbench] 无法恢复新会话入口：", error); }
-			};
-		}
 
 		function useClients() {
 			var state = React.useState({ status: "loading", customers: [], error: "", detail: "", uid: "" });
 			var setValue = state[1];
+			/* 手动重试：改这个数就重新跑一次 effect。 */
+			var retryS = React.useState(0);
+			var retry = retryS[0], setRetry = retryS[1];
 			React.useEffect(function () {
 				var alive = true;
-				wbFetchClients()
-					.then(function (body) {
-						if (!alive) return;
-						if (body && body.ok === true) {
-							setValue({ status: "ready", customers: body.customers || [], error: "", detail: "", uid: body.uid || "" });
-						} else {
-							setValue({
-								status: "error", customers: [],
-								error: (body && body.error) || "unknown",
-								detail: (body && body.detail) || "",
-								uid: (body && body.uid) || "",
-							});
-						}
-					})
-					.catch(function (error) {
-						if (!alive) return;
-						setValue({ status: "error", customers: [], error: "unreachable", detail: String(error && error.message ? error.message : error), uid: "" });
-					});
+				setValue({ status: "loading", customers: [], error: "", detail: "", uid: "" });
+				function attempt(index) {
+					if (!alive) return;
+					fetch(CLIENTS_PATH, { headers: { accept: "application/json" } })
+						.then(readJson)
+						.then(function (body) {
+							if (!alive) return;
+							if (body && body.ok === true) {
+								setValue({ status: "ready", customers: body.customers || [], error: "", detail: "", uid: body.uid || "" });
+								return;
+							}
+							var error = (body && body.error) || "unknown";
+							var detail = (body && body.detail) || "";
+							/* 只有"宿主说它连不上知识库"才值得重试；形状不认识之类重试也没用。 */
+							if ((error === "mcp-error" || error === "unreachable") && index < CLIENTS_RETRY_DELAYS.length) {
+								setTimeout(function () { attempt(index + 1); }, CLIENTS_RETRY_DELAYS[index]);
+								return;
+							}
+							setValue({ status: "error", customers: [], error: error, detail: detail, uid: "" });
+						})
+						.catch(function (e) {
+							if (!alive) return;
+							var detail = String(e && e.message ? e.message : e);
+							if (index < CLIENTS_RETRY_DELAYS.length) {
+								setTimeout(function () { attempt(index + 1); }, CLIENTS_RETRY_DELAYS[index]);
+								return;
+							}
+							setValue({ status: "error", customers: [], error: "unreachable", detail: detail, uid: "" });
+						});
+				}
+				attempt(0);
 				return function () { alive = false; };
-			}, []);
+			}, [retry]);
+			state[0].retry = function () { setRetry(retry + 1); };
 			return state[0];
 		}
 
@@ -1350,29 +811,6 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			return response.json().catch(function () {
 				return { ok: false, error: "route-missing", detail: "HTTP " + response.status + " · 不是 JSON" };
 			});
-		}
-
-		function readWorkbenchList(response) {
-			if (response.status === 403 || response.status === 404) return { ok: true, index: {}, map: {}, customers: [] };
-			return readJson(response);
-		}
-
-		/* Supplement server ACLs with the authoritative customer list, never stored display names. */
-		function wbAuthorizedRecords(records, customers) {
-			var keys = new Set(), names = new Set();
-			(customers || []).forEach(function (c) {
-				keys.add(customerId(c));
-				names.add(customerName(c).replace(/[/\\]/g, ""));
-			});
-			var visible = Object.create(null);
-			Object.keys(records || {}).forEach(function (id) {
-				var rec = records[id];
-				if (!rec || typeof rec !== "object") return;
-				var key = String(rec.client_key || "");
-				if (key !== "" ? !keys.has(key) : rec.client && !names.has(String(rec.client).replace(/[/\\]/g, ""))) return;
-				visible[id] = rec;
-			});
-			return visible;
 		}
 
 		/* 技能目录：dsh-skill-remote 注册的 provider，宿主用 ctx.skills.list() 读。 */
@@ -1419,98 +857,20 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			return state[0];
 		}
 
-		/* ---- 薄弱问句：capture-words v4 目录与问句 ---------------------- */
-		function captureError(response, fallback) {
-			var status = Number(response && response.status) || 0;
-			return response.json().catch(function () { return {}; }).then(function (body) {
-				body = body && typeof body === "object" ? body : {};
-				var error = body.error || fallback || "unknown";
-				if (status === 401 || status === 403) error = "not-allowed";
-				else if (status === 404) error = "no-data";
-				return {
-					ok: false,
-					error: error,
-					detail: body.detail || (status ? "HTTP " + status : ""),
-				};
-			});
-		}
-
-		function readCaptureJson(response) {
-			if (!response.ok) return captureError(response, "route-missing");
-			return response.json().catch(function () {
-				return { ok: false, error: "route-missing", detail: "HTTP " + response.status + " · 不是 JSON" };
-			});
-		}
-
-		function mapCaptureWordDir(body) {
-			var customers = [];
-			var unmapped = [];
-			var list = body && Array.isArray(body.customers) ? body.customers : [];
-			for (var index = 0; index < list.length; index++) {
-				var item = list[index] && typeof list[index] === "object" ? list[index] : {};
-				var clientKey = String(item.clientKey || "");
-				var name = String(item.name || clientKey);
-				var mapped = item.mapped === true;
-				var rawLines = Array.isArray(item.lines) ? item.lines : [];
-				var lines = rawLines.map(function (line) {
-					line = line && typeof line === "object" ? line : {};
-					return {
-						name: String(line.name || line.enterprise_id || ""),
-						id: String(line.enterprise_id || ""),
-						enterprise_id: String(line.enterprise_id || ""),
-						is_default: line.is_default === true,
-						collectedAt: "",
-						inWindow: mapped,
-					};
-				});
-				if (!mapped) { unmapped.push(name); continue; }
-				customers.push({
-					id: clientKey || name,
-					clientKey: clientKey,
-					name: name,
-					collectedAt: "",
-					inWindow: mapped,
-					lines: lines,
-				});
-			}
-			return { customers: customers, unmapped: unmapped };
-		}
-
-		function mapCaptureQuestions(body) {
-			return (body && Array.isArray(body.questions) ? body.questions : []).map(function (question) {
-				return Object.assign({}, question, { qid: question && question.qid });
-			});
-		}
-
-		function weakPickedFromTicks(ticks, questions) {
-			var byQid = {};
-			var current = Array.isArray(questions) ? questions : [];
-			for (var questionIndex = 0; questionIndex < current.length; questionIndex++) {
-				var question = current[questionIndex];
-				if (question && question.qid !== undefined && question.qid !== null) byQid[String(question.qid)] = question.question;
-			}
-			var out = [];
-			var saved = Array.isArray(ticks) ? ticks : [];
-			for (var tickIndex = 0; tickIndex < saved.length; tickIndex++) {
-				var tick = saved[tickIndex] || {};
-				var text = byQid[String(tick.qid)] || String(tick.question || "");
-				if (text !== "" && out.indexOf(text) < 0) out.push(text);
-			}
-			return out;
-		}
-
+		/* ---- 薄弱问句：可查客户目录（知识库客户 → 万湖 ID + 采集日）------
+		 * 打开装配台查一次，本次会话内复用；目录本身在宿主侧缓存 180 秒。
+		 * 对不上的客户（没配映射、或不在 45 天窗口内）照样返回，前端自己置灰。 */
 		function useWeakDir() {
 			var state = React.useState({ status: "loading", customers: [], unmapped: [], error: "", detail: "" });
 			var setValue = state[1];
 			React.useEffect(function () {
 				var alive = true;
-				fetch(WB_API.weakDir, { credentials: "same-origin", headers: { accept: "application/json" } })
-					.then(readCaptureJson)
+				fetch(WB_API.weakDir, { headers: { accept: "application/json" } })
+					.then(readJson)
 					.then(function (body) {
 						if (!alive) return;
 						if (body && body.ok === true) {
-							var mapped = mapCaptureWordDir(body);
-							setValue({ status: "ready", customers: mapped.customers, unmapped: mapped.unmapped, error: "", detail: "" });
+							setValue({ status: "ready", customers: body.customers || [], unmapped: body.unmapped || [], error: "", detail: "" });
 						} else {
 							setValue({ status: "error", customers: [], unmapped: [], error: (body && body.error) || "unknown", detail: (body && body.detail) || "" });
 						}
@@ -1523,141 +883,50 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			return state[0];
 		}
 
-		/* ---- 薄弱问句：某个客户/业务线全部问句 -------------------------- */
-		function useWeakGaps(clientKey, enterprise, enabled) {
-			var state = React.useState({ status: "idle", collectedAt: "", computedAt: "", taskId: "", excluded: null, questions: [], error: "", detail: "" });
+		/* ---- 薄弱问句：某个客户本期全部问句 ----------------------------
+		 * 只在「薄弱问句」模式下、且这个客户真的可查时才请求。
+		 * `error === "no-data"` 是正常业务态（这个客户最近没采集），不是故障。 */
+		function useWeakGaps(clientId, enabled) {
+			var state = React.useState({ status: "idle", collectedAt: "", taskId: "", excluded: null, questions: [], error: "", detail: "" });
 			var setValue = state[1];
 			var tickS = React.useState(0);
 			var tick = tickS[0], setTick = tickS[1];
+			/* 「刷新」按下后这一次请求带 fresh=1，绕过宿主 5 分钟缓存，直接从数据服务取。 */
+			var freshRef = React.useRef(false);
 			React.useEffect(function () {
-				var blank = { status: "idle", collectedAt: "", computedAt: "", taskId: "", excluded: null, questions: [], error: "", detail: "" };
-				if (!enabled || clientKey === "") { setValue(blank); return undefined; }
+				var blank = { status: "idle", collectedAt: "", taskId: "", excluded: null, questions: [], error: "", detail: "" };
+				if (!enabled || clientId === "") { setValue(blank); return undefined; }
 				var alive = true;
-				var query = WB_API.weakGaps + "?client=" + encodeURIComponent(clientKey) + "&enterprise=" + encodeURIComponent(enterprise || "");
-				setValue({ status: "loading", collectedAt: "", computedAt: "", taskId: "", excluded: null, questions: [], error: "", detail: "" });
-				fetch(query, { credentials: "same-origin", headers: { accept: "application/json" } })
-					.then(readCaptureJson)
+				var query = WB_API.weakGaps + "?client_id=" + encodeURIComponent(clientId) + (freshRef.current ? "&fresh=1" : "");
+				freshRef.current = false;
+				setValue({ status: "loading", collectedAt: "", taskId: "", excluded: null, questions: [], error: "", detail: "" });
+				fetch(query, { headers: { accept: "application/json" } })
+					.then(readJson)
 					.then(function (body) {
 						if (!alive) return;
 						if (body && body.ok === true) {
 							setValue({
 								status: "ready",
 								collectedAt: body.collectedAt || "",
-								computedAt: body.computedAt || "",
 								taskId: body.taskId || "",
-								excluded: body.excluded === null ? null : (typeof body.excluded === "number" ? body.excluded : null),
-								questions: mapCaptureQuestions(body),
+								excluded: (typeof body.excluded === "number" ? body.excluded : null),
+								questions: body.questions || [],
 								error: "", detail: "",
 							});
 						} else {
 							setValue({
-								status: "error", collectedAt: "", computedAt: "", taskId: "", excluded: null, questions: [],
+								status: "error", collectedAt: "", taskId: "", excluded: null, questions: [],
 								error: (body && body.error) || "unknown", detail: (body && body.detail) || "",
 							});
 						}
 					})
 					.catch(function (e) {
-						if (alive) setValue({ status: "error", collectedAt: "", computedAt: "", taskId: "", excluded: null, questions: [], error: "unreachable", detail: String(e && e.message ? e.message : e) });
+						if (alive) setValue({ status: "error", collectedAt: "", taskId: "", excluded: null, questions: [], error: "unreachable", detail: String(e && e.message ? e.message : e) });
 					});
 				return function () { alive = false; };
-			}, [clientKey, enterprise, enabled, tick]);
-			state[0].refresh = function () { setTick(tick + 1); };
+			}, [clientId, enabled, tick]);
+			state[0].refresh = function () { freshRef.current = true; setTick(tick + 1); };
 			return state[0];
-		}
-
-		function weakTicksFetch(clientKey, enterprise) {
-			var query = WB_API.weakTicks + "?client=" + encodeURIComponent(clientKey) + "&enterprise=" + encodeURIComponent(enterprise || "");
-			return fetch(query, { credentials: "same-origin", headers: { accept: "application/json" } }).then(readCaptureJson);
-		}
-		function weakTickPutRequest(clientKey, enterprise, item, ticked) {
-			return {
-				url: WB_API.weakTicks,
-				options: {
-					method: "PUT", credentials: "same-origin",
-					headers: { accept: "application/json", "Content-Type": "application/json", "X-Requested-With": "XMLHttpRequest" },
-					body: JSON.stringify({ client: clientKey, enterprise: enterprise || "", qid: item.qid, question: item.question, ticked: ticked === true }),
-				},
-			};
-		}
-		function weakTickBulkRequest(clientKey, enterprise, items, ticked) {
-			return {
-				url: WB_API.weakTicksBulk,
-				options: {
-					method: "POST", credentials: "same-origin",
-					headers: { accept: "application/json", "Content-Type": "application/json", "X-Requested-With": "XMLHttpRequest" },
-					body: JSON.stringify({ client: clientKey, enterprise: enterprise || "", items: items.slice(0, 500), ticked: ticked === true }),
-				},
-			};
-		}
-
-		function useWeakTicks(clientKey, enterprise, enabled) {
-			var initial = { status: "idle", ticks: [], error: "", detail: "" };
-			var state = React.useState(initial);
-			var value = state[0], setValue = state[1];
-			React.useEffect(function () {
-				var alive = true;
-				var blank = { status: "idle", ticks: [], error: "", detail: "" };
-				if (!enabled || clientKey === "") { setValue(blank); return undefined; }
-				function load() {
-					weakTicksFetch(clientKey, enterprise).then(function (body) {
-						if (!alive) return;
-						if (body && body.ok !== false) setValue({ status: "ready", ticks: Array.isArray(body.ticks) ? body.ticks : [], error: "", detail: "" });
-						else setValue({ status: "error", ticks: [], error: (body && body.error) || "unknown", detail: (body && body.detail) || "" });
-					}).catch(function (e) {
-						if (alive) setValue({ status: "error", ticks: [], error: "unreachable", detail: String(e && e.message ? e.message : e) });
-					});
-				}
-				load();
-				var timer = setInterval(function () {
-					if (typeof document === "undefined" || document.visibilityState === "visible" || document.visibilityState === undefined) load();
-				}, 30000);
-				var onVisibility = function () { if (typeof document === "undefined" || document.visibilityState === "visible") load(); };
-				if (typeof document !== "undefined") document.addEventListener("visibilitychange", onVisibility);
-				return function () {
-					alive = false;
-					clearInterval(timer);
-					if (typeof document !== "undefined") document.removeEventListener("visibilitychange", onVisibility);
-				};
-			}, [clientKey, enterprise, enabled]);
-
-			function optimisticTicks(previous, items, ticked) {
-				var next = previous.slice();
-				for (var i = 0; i < items.length; i++) {
-					var item = items[i] || {};
-					var at = -1;
-					for (var j = 0; j < next.length; j++) {
-						var sameQid = item.qid !== undefined && item.qid !== null && item.qid !== ""
-							&& next[j].qid !== undefined && next[j].qid !== null && next[j].qid !== ""
-							&& String(next[j].qid) === String(item.qid);
-						if (sameQid || (!sameQid && next[j].question === item.question)) { at = j; break; }
-					}
-					if (ticked && at < 0) next.push({ qid: item.qid, question: item.question, by: "", byName: "", at: "" });
-					else if (!ticked && at >= 0) next.splice(at, 1);
-				}
-				return next;
-			}
-
-			function writeItems(items, ticked, bulk) {
-				if (!enabled || clientKey === "" || items.length === 0) return;
-				var before = value.ticks.slice();
-				setValue({ status: value.status === "idle" ? "loading" : value.status, ticks: optimisticTicks(before, items, ticked), error: "", detail: "" });
-				var descriptor = bulk
-					? weakTickBulkRequest(clientKey, enterprise, items, ticked)
-					: weakTickPutRequest(clientKey, enterprise, items[0], ticked);
-				var request = fetch(descriptor.url, descriptor.options);
-				request.then(readCaptureJson).then(function (body) {
-					if (body && body.ok !== false) setValue({ status: "ready", ticks: Array.isArray(body.ticks) ? body.ticks : [], error: "", detail: "" });
-					else { setValue({ status: "error", ticks: before, error: (body && body.error) || "unknown", detail: (body && body.detail) || "" }); }
-				}).catch(function (e) {
-					setValue({ status: "error", ticks: before, error: "unreachable", detail: String(e && e.message ? e.message : e) });
-				});
-			}
-			value.refresh = function () { weakTicksFetch(clientKey, enterprise).then(function (body) {
-				if (body && body.ok !== false) setValue({ status: "ready", ticks: Array.isArray(body.ticks) ? body.ticks : [], error: "", detail: "" });
-			}); };
-			value.put = function (item, ticked) { writeItems([item], ticked, false); };
-			value.bulk = function (items, ticked) { writeItems(items.slice(0, 500), ticked, true); };
-			return value;
 		}
 
 		/** 薄弱问句那两条路由的人话报错。 */
@@ -1706,17 +975,6 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			var beijing = new Date(d.getTime() + 8 * 3600 * 1000);
 			return beijing.toISOString().slice(0, 10);
 		}
-		function tickStamp(iso) {
-			if (!iso) return "";
-			var d = new Date(iso);
-			if (isNaN(d.getTime())) return String(iso);
-			var beijing = new Date(d.getTime() + 8 * 3600 * 1000);
-			var month = String(beijing.getUTCMonth() + 1).padStart(2, "0");
-			var day = String(beijing.getUTCDate()).padStart(2, "0");
-			var hour = String(beijing.getUTCHours()).padStart(2, "0");
-			var minute = String(beijing.getUTCMinutes()).padStart(2, "0");
-			return month + "/" + day + " " + hour + ":" + minute;
-		}
 
 		function clientsErrorText(error, detail) {
 			if (error === "mcp-missing") return detail || "没找到知识库 MCP 的客户列表工具。";
@@ -1736,6 +994,180 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			return "读技能目录失败：" + (detail || error);
 		}
 
+		/* 技能显示名（2026-10-12）：装配台 chips/回读显示中文，调用与预填仍用英文 name。
+		 * 先简单映射，统一规范时再换成 frontmatter 下发。
+		 * 兼容加购的「名字×N」后缀：×N 拆出来原样保留，只翻译名字部分。 */
+		var SKILL_DISPLAY = {
+			"sora-ranking": "老榜单",
+			"sora-review": "测评排行",
+			"sora-selection": "选型决策",
+			"sora-single-brand": "品牌词论证",
+			"sora-star-ranking": "星级榜单",
+			"sora-deep-mimic": "深度仿写",
+			"sora-trust": "信任构建",
+			"sora-primer": "纯科普",
+		};
+		function skillDisplay(name) {
+			var s = String(name);
+			var i = s.indexOf("×");
+			if (i >= 0) return skillDisplay(s.slice(0, i)) + s.slice(i);
+			return SKILL_DISPLAY[s] || s;
+		}
+		/* 技能特性一句话（供装配稿「类型特性」用）：取 description 第一段，
+		 * 「。当用户…」之后是触发词，对任务没用，截掉；再兜底截 90 字。
+		 * 目录从参数传入 —— 本函数在模块层，拿不到组件内的 skills。 */
+		function skillDesc(name, catalog) {
+			var list = catalog || [];
+			for (var i = 0; i < list.length; i++) {
+				if (String(list[i].name) === String(name)) {
+					var d = String(list[i].description || "");
+					var cut = d.indexOf("。当");
+					if (cut > 0) d = d.slice(0, cut + 1);
+					if (d.length > 90) d = d.slice(0, 90);
+					return d;
+				}
+			}
+			return "";
+		}
+
+		/* ---- 会话页美化（2026-10-13）----------------------------------------
+		 * 只依赖官方 data-* 属性锚点（哈希类名无关），3s 一轮幂等处理：
+		 *  1) 装配台预填长消息 → 折叠成一行简报卡，点击展开全文；
+		 *  2) 工具调用行的工具名 → 说人话（mcp__sora-knowledge__read_kb_file → 知识库 · 读文件）。
+		 * React 重渲染会还原文本/删掉卡片，tick 重扫幂等补回。
+		 * 已完成轮次的过程折叠是官方自带的（store 无记录=收起），我们不碰。 */
+		var WB_TOOL_LABELS = [   /* 长名在前，防止短名替换吃掉长名前缀 */
+			["mcp__sora-knowledge__list_kb_files", "知识库 · 列文件清单"],
+			["mcp__sora-knowledge__read_kb_file", "知识库 · 读文件"],
+			["mcp__sora-articles__write_article", "文章库 · 写入草稿"],
+			["mcp__sora-articles__list_articles", "文章库 · 列文章"],
+			["mcp__sora-articles__confirm", "文章库 · 确认入库"],
+			["mcp__sora-articles__get", "文章库 · 读文章"],
+			["mcp__sora-knowledge__read_kb", "知识库 · 整库读取"],
+			["get_skill", "读取技能规则"],
+		];
+		function wbPrefoldSummary(t) {
+			var bits = ["装配台简报"];
+			var client = (t.match(/客户：([^\s——，。]+)/) || [])[1];
+			var q = (t.match(/共\s*(\d+)\s*条/) || [])[1];
+			var arts = 0, mm = t.match(/写\s*(\d+)\s*篇/g) || [];
+			for (var k = 0; k < mm.length; k++) arts += parseInt(mm[k].replace(/\D/g, ""), 10) || 0;
+			if (client) bits.push(client);
+			if (q) bits.push(q + " 条问句");
+			if (arts) bits.push("共 " + arts + " 篇");
+			bits.push("点击查看全文");
+			return bits.join(" · ");
+		}
+		function wbConvTick() {
+			var root = document.querySelector("[data-slot='main.conversation']");
+			if (!root) return;
+			/* 容器里每个消息条目都带 data-chat-anchor-key（官方 ChatView 写死），用它定位。
+			 * 倒序找「最内层」的预填条目（外层容器的 textContent 也以预填开头，
+			 * 但折叠必须作用在气泡本尊上才收得住）；内部已折叠的外层直接跳过。 */
+			var items = root.querySelectorAll("[data-chat-anchor-key]");
+			for (var i = items.length - 1; i >= 0; i--) {
+				(function (el) {
+					var t = (el.textContent || "").trim();
+					var fresh = !el.getAttribute("data-wb-prefold");
+					if (fresh) {
+						if (el.querySelector("[data-wb-prefold]")) return;
+						if (t.indexOf("【装配台预填") !== 0) return;
+					}
+					/* 官方把一条消息拆成多个平级块：锚点块（带标题行）只是第一块，
+					 * 其余块是它的兄弟。收起时把「锚点之后、下一条消息之前」的兄弟一并藏掉，
+					 * 展开时恢复。每轮 tick 都补（React 重渲染会丢我们的标记）。 */
+					var open = el.getAttribute("data-wb-open") ? true : false;
+					var sibs = el.parentElement ? el.parentElement.children : [];
+					var sidx = Array.prototype.indexOf.call(sibs, el);
+					if (sidx > -1) {
+						for (var y = sidx + 1; y < sibs.length; y++) {
+							var yb = sibs[y];
+							if (yb.getAttribute && yb.getAttribute("data-chat-anchor-key")) break;
+							if (open) yb.removeAttribute("data-wb-pref-tail");
+							else yb.setAttribute("data-wb-pref-tail", "1");
+						}
+					}
+					if (!fresh) return;
+					el.setAttribute("data-wb-prefold", "1");
+					var head = document.createElement("button");
+					head.type = "button";
+					head.className = "wb_prefoldHead";
+					var txt = document.createElement("span"); txt.className = "wb_pfT";
+					var tag = document.createElement("span"); tag.className = "wb_pfTag"; tag.textContent = "已注入";
+					var chev = document.createElement("span"); chev.className = "wb_pfC";
+					function sync() {
+						txt.textContent = wbPrefoldSummary(t);
+						chev.textContent = el.getAttribute("data-wb-open") ? "▴" : "▾";
+					}
+					head.addEventListener("click", function () {
+						if (el.getAttribute("data-wb-open")) el.removeAttribute("data-wb-open");
+						else el.setAttribute("data-wb-open", "1");
+						sync();
+					});
+					sync();
+					head.appendChild(txt); head.appendChild(tag); head.appendChild(chev);
+					el.insertBefore(head, el.firstChild);
+				})(items[i]);
+			}
+			/* 过程行打标：思考行图标紫色、其余灰（官方 disclosure-row 的第 2 个子 span 是标题） */
+			var prows = root.querySelectorAll("[data-disclosure-row]");
+			for (var p = 0; p < prows.length; p++) {
+				if (prows[p].getAttribute("data-wb-tagged")) continue;
+				var ttl = prows[p].children[1];
+				if (!ttl) continue;
+				var tx = (ttl.textContent || "").trim();
+				if (tx === "思考") prows[p].classList.add("wb_thinkRow");
+				prows[p].setAttribute("data-wb-tagged", "1");
+			}
+			/* —— 游戏加载画面模式：进行中只显示氛围气泡，真实过程藏起来 ——
+			 * 进行中判据：页面有「停止生成」按钮（跑的时候有、跑完消失）。
+			 * 完成后移除标记，官方折叠自动接管（已完成轮次收成「N 次工具调用」）。 */
+			var running = false;
+			var btns = root.ownerDocument.querySelectorAll("button");
+			for (var b = 0; b < btns.length; b++) {
+				var btx = btns[b].textContent || "";
+				if (btx.indexOf("停止生成") !== -1) { running = true; break; }
+			}
+			if (running) root.setAttribute("data-wb-running", "1");
+			else root.removeAttribute("data-wb-running");
+			var ldr = root.querySelector(":scope > .wb_ldr");
+			if (running && !ldr) {
+				ldr = document.createElement("div");
+				ldr.className = "wb_ldr";
+				var sp = document.createElement("span"); sp.className = "wb_ldrSpin";
+				var lb = document.createElement("span"); lb.className = "wb_ldrT";
+				ldr.appendChild(sp); ldr.appendChild(lb);
+				var phrases = ["正在查资料", "正在做选题", "正在搭文章骨架", "正在码字", "正在核对事实", "正在打磨标题"];
+				var pi = Math.floor(Math.random() * phrases.length);
+				lb.textContent = "Agent " + phrases[pi];
+				ldr._wbLi = setInterval(function () {
+					pi = (pi + 1) % phrases.length;
+					var tgt = ldr.querySelector(".wb_ldrT");
+					if (tgt) tgt.textContent = "Agent " + phrases[pi];
+				}, 2200);
+				root.appendChild(ldr);
+			} else if (!running && ldr) {
+				if (ldr._wbLi) clearInterval(ldr._wbLi);
+				if (ldr.parentNode) ldr.parentNode.removeChild(ldr);
+			}
+			/* 工具名说人话：全容器扫文本节点（跳过预填条目，避免把它的通配串换掉） */
+			var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
+			var tn;
+			while ((tn = walker.nextNode())) {
+				var d = tn.data;
+				if (d.indexOf("mcp__sora-") === -1 && d.indexOf("get_skill") === -1) continue;
+				var skip = false, anc = tn.parentElement;
+				while (anc && anc !== root) {
+					if (anc.getAttribute && anc.getAttribute("data-wb-prefold")) { skip = true; break; }
+					anc = anc.parentElement;
+				}
+				if (skip) continue;
+				var out = d;
+				for (var L = 0; L < WB_TOOL_LABELS.length; L++) out = out.split(WB_TOOL_LABELS[L][0]).join(WB_TOOL_LABELS[L][1]);
+				if (out !== d) tn.data = out;
+			}
+		}
+
 		/* 宿主那半边负责归一化，但线上可能同时跑着两个版本的宿主代码
 		 * （改宿主代码要重启才生效，客户端却立刻热重载）。所以这里对两种形状
 		 * 都容错：归一化后的 {id,name,meta} 和原始的生产形状 {client_key,
@@ -1749,68 +1181,6 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			if (typeof c.chars === "number") bits.push(Math.round(c.chars / 1000) + "k 字");
 			return bits.join(" · ");
 		}
-
-		function buildTaskMetaPayload(opts) {
-			opts = opts || {};
-			return {
-				client_key: String(opts.client_key || ""),
-				client: String(opts.client || ""),
-				line: String(opts.line || ""),
-				period: String(opts.period || ""),
-				mode: opts.mode,
-				topic: opts.topic,
-				refs: opts.refs,
-				skills: opts.skills,
-				base: opts.base,
-			};
-		}
-
-		function bindSessionClient(sessionId, bind) {
-			if (!sessionId || !bind) return;
-			fetch("/api/workbench/session-client", {
-				method: "POST",
-				headers: { "content-type": "application/json", accept: "application/json" },
-				body: JSON.stringify({
-					session_id: sessionId,
-					client_key: bind.client_key || "",
-					client: bind.client || "",
-					meta_id: bind.meta_id || "",
-					topic: bind.topic || "",
-				}),
-			})
-				.then(function (r) { return r.json().catch(function () { return {}; }); })
-				.then(function (body) {
-					if (!body || body.ok !== true) {
-						console.warn("[dsh-workbench] session-client 绑定未成功：", body && (body.error || body.detail) || "unknown");
-						return;
-					}
-					/* Noah 兼容登记：保留 topic，旧壳/左树也能读到。 */
-					fetch(WB_API.assignGroup, {
-						method: "POST", headers: { "content-type": "application/json", accept: "application/json" },
-						body: JSON.stringify({ session: sessionId, client: bind.client || "", client_key: bind.client_key || "", topic: bind.topic || "", meta_id: bind.meta_id || "" }),
-					}).catch(function () { });
-					try { window.dispatchEvent(new Event("wb-session-bound")); } catch (e) { /* */ }
-				})
-				.catch(function (e) {
-					console.warn("[dsh-workbench] session-client 绑定失败（会话暂进未归类）：", String(e && e.message ? e.message : e));
-				});
-		}
-
-		function openSessionBestEffort(ctx, sessionId) {
-			if (!sessionId) return false;
-			var workspace = ctx && typeof ctx.get === "function" ? ctx.get("uiWorkspace") : null;
-			if (workspace) {
-				var methods = ["openSession", "selectSession", "focusSession", "activateSession"];
-				for (var i = 0; i < methods.length; i++) {
-					if (typeof workspace[methods[i]] === "function") {
-						try { workspace[methods[i]](sessionId); return true; } catch (e) { /* try next */ }
-					}
-				}
-			}
-			console.warn("[dsh-workbench] 无法打开会话 " + sessionId + "：宿主未暴露 openSession/selectSession");
-			return false;
-		}
-
 
 		function Empty(props) {
 			return h("div", { className: "wb_empty" },
@@ -1855,7 +1225,6 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			var consumeRef = React.useRef(null);
 			consumeRef.current = function () {
 				if (pendingPrompt === null) return;
-				if (props.sessionId !== pendingPrompt.sessionId) return;
 				if (actions === undefined || actions === null) {
 					/* 真有提示词要发却拿不到 inputActions —— 说出来，别静默吞掉。 */
 					console.warn("[dsh-workbench] 接力挂件拿不到 inputActions，提示词没发出去");
@@ -1865,49 +1234,73 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					/* 非空白会话：不是目标，跳过 —— 提示词留给空白目标会话。 */
 					return;
 				}
-				var text = pendingPrompt.text;
+				var text = pendingPrompt;
 				pendingPrompt = null;
+				/* 模型偏好（装配台选的）：先绑给这个会话再发第一条消息 ——
+				 * Host 在下一次提示词组装时对选择做快照，绑完再发才能用上。
+				 * 绑失败不挡发送：console 说话，照常按默认模型发。 */
 				/* 把任务参数编号绑定到这个会话 —— C1 任务条按 sessionId 取。
 				 * （多设备/刷新后不跨会话残留。） */
 				try {
-					var pendingId = sessionStorage.getItem("wb-pending-meta")
-						|| sessionStorage.getItem("wb-task-meta-id") || "";
+					var pendingId = sessionStorage.getItem(WB_KEY.pendingMeta) || "";
 					if (pendingId !== "" && typeof props.sessionId === "string" && props.sessionId !== "") {
-						sessionStorage.setItem("wb-meta-for-" + props.sessionId, pendingId);
-						sessionStorage.removeItem("wb-pending-meta");
+						sessionStorage.setItem(WB_KEY.metaFor + props.sessionId, pendingId);
+						sessionStorage.removeItem(WB_KEY.pendingMeta);
 					}
-					/* WB-SUP P1：session id 已知时立刻写 session↔client 索引。
-					 * 失败只打 log，不挡发消息 —— 会话暂时进「未归类」。 */
-					var bindRaw = sessionStorage.getItem("wb-pending-bind") || "";
-					if (bindRaw !== "" && typeof props.sessionId === "string" && props.sessionId !== "") {
-						var bind = null;
-						try { bind = JSON.parse(bindRaw); } catch (e2) { bind = null; }
-						sessionStorage.removeItem("wb-pending-bind");
-						if (bind && typeof bind === "object") {
-							if (!bind.meta_id && pendingId) bind.meta_id = pendingId;
-							bindSessionClient(props.sessionId, bind);
-						}
-					} else if (bindRaw !== "" && !(typeof props.sessionId === "string" && props.sessionId !== "")) {
-						console.warn("[dsh-workbench] 起会话后暂无 session id，绑定推迟；会话可能暂进未归类");
+					/* 自绘侧栏分组登记：会话 → 客户（+主题），宿主存映射表 */
+					var pendingClient = sessionStorage.getItem(WB_KEY.pendingClient) || "";
+					var pendingTopic = sessionStorage.getItem(WB_KEY.pendingTopic) || "";
+					if (pendingClient !== "" && typeof props.sessionId === "string" && props.sessionId !== "") {
+						sessionStorage.removeItem(WB_KEY.pendingClient);
+						sessionStorage.removeItem(WB_KEY.pendingTopic);
+						fetch(WB_API.assignGroup, {
+							method: "POST",
+							headers: { "content-type": "application/json" },
+							body: JSON.stringify({ session: props.sessionId, client: pendingClient, topic: pendingTopic }),
+						}).then(function (r) { return r.json(); })
+							.then(function (b) { if (!b || b.ok !== true) console.warn("[dsh-workbench] 分组登记失败：", b && b.error, b && b.detail); })
+							.catch(function (e) { console.warn("[dsh-workbench] 分组登记失败：", String(e)); });
 					}
 				} catch (error) { /* 无 sessionStorage 就没有任务条，不影响发消息 */ }
+				/* 模型偏好（装配台选的）：先绑给这个会话再发第一条消息 ——
+				 * Host 在下一次提示词组装时对选择做快照，绑完再发才能用上。
+				 * 绑失败不挡发送：console 说话，照常按默认模型发。 */
 				var pendingModel = null;
 				try {
-					var modelRaw = sessionStorage.getItem(WB_KEY.modelPending) || "";
-					if (modelRaw !== "") { sessionStorage.removeItem(WB_KEY.modelPending); pendingModel = JSON.parse(modelRaw); }
-				} catch (error) { pendingModel = null; }
-				function submitDraft() { actions.setDraft(text); actions.submit(); }
-				var sessions = props.wbCtx && typeof props.wbCtx.get === "function" ? props.wbCtx.get("sessions") : null;
-				if (pendingModel && sessions && typeof sessions.selectModel === "function" && props.sessionId) {
-					var req = { sessionId: props.sessionId, provider: String(pendingModel.provider || ""), model: String(pendingModel.model || "") };
-					if (pendingModel.effort) req.reasoningEffort = String(pendingModel.effort);
-					Promise.resolve(sessions.selectModel(req)).then(submitDraft, submitDraft);
-				} else submitDraft();
+					var mpRaw = sessionStorage.getItem(WB_KEY.modelPending);
+					if (mpRaw !== null && mpRaw !== "") {
+						sessionStorage.removeItem(WB_KEY.modelPending);
+						pendingModel = JSON.parse(mpRaw);
+					}
+				} catch (error) { /* 没有偏好就发默认 */ }
+				function submitDraft() {
+					actions.setDraft(text);
+					actions.submit();
+				}
+				var canBind = pendingModel !== null && pendingModel !== undefined
+					&& typeof props.sessionId === "string" && props.sessionId !== ""
+					&& props.wbCtx && props.wbCtx.sessions && typeof props.wbCtx.sessions.selectModel === "function";
+				if (canBind) {
+					var selReq = {
+						sessionId: props.sessionId,
+						provider: String(pendingModel.provider || ""),
+						model: String(pendingModel.model || ""),
+					};
+					if (pendingModel.effort !== undefined && pendingModel.effort !== null && pendingModel.effort !== "") {
+						selReq.reasoningEffort = String(pendingModel.effort);
+					}
+					props.wbCtx.sessions.selectModel(selReq).then(submitDraft, function (error) {
+						console.warn("[dsh-workbench] 模型没绑上，用默认发：", String(error));
+						submitDraft();
+					});
+					return;
+				}
+				submitDraft();
 			};
 
 			React.useEffect(function () {
 				consumeRef.current();
-			}, [actions, isEmpty, props.sessionId]);
+			}, [actions, isEmpty]);
 
 			/* dispatch() 设好 pendingPrompt 后派发的事件：让"当前已挂着的
 			 * 空白会话"（deps 都没变的那种）也能立刻消费，不等下一次渲染。 */
@@ -1916,20 +1309,6 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				window.addEventListener("wb-prompt-set", onSet);
 				return function () { window.removeEventListener("wb-prompt-set", onSet); };
 			}, []);
-
-			/* session id 晚到：pending-bind 还在就补绑一次（不挡消息）。 */
-			React.useEffect(function () {
-				if (typeof props.sessionId !== "string" || props.sessionId === "") return;
-				if (pendingPrompt !== null && props.sessionId !== pendingPrompt.sessionId) return;
-				var bindRaw = "";
-				try { bindRaw = sessionStorage.getItem("wb-pending-bind") || ""; } catch (e) { return; }
-				if (bindRaw === "") return;
-				var bind = null;
-				try { bind = JSON.parse(bindRaw); } catch (e2) { return; }
-				if (!bind || typeof bind !== "object") return;
-				try { sessionStorage.removeItem("wb-pending-bind"); } catch (e3) { /* */ }
-				bindSessionClient(props.sessionId, bind);
-			}, [props.sessionId]);
 			return null;
 		}
 
@@ -1942,7 +1321,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			 * body 下没有这层，浮层定位稳定。左=草稿列表，右=正文 + 确认入库。 */
 			var WbCtx = null; /* apply 时赋值：TaskBar 自动弹侧栏用 */
 
-			function wbOpenReview(client, onChanged, clientKey, sessionId, metaId) {
+			function wbOpenReview(client, onChanged) {
 				var old = document.getElementById("wb-review-overlay");
 				if (old) old.remove();
 				var wrap = document.createElement("div");
@@ -1970,12 +1349,6 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				document.body.appendChild(wrap);
 
 				var mainTitle = null, mainText = null, mainFoot = null, msgEl = null, currentTitle = "";
-				var resolvedSessionId = typeof sessionId === "string" ? sessionId : "";
-				var resolvedClientKey = String(clientKey || "");
-				var resolvedMetaId = String(metaId || "");
-				var bound = resolvedSessionId && wbNavState.bindings ? wbNavState.bindings[resolvedSessionId] : null;
-				if (bound && !resolvedClientKey) resolvedClientKey = String(bound.client_key || "");
-				if (bound && !resolvedMetaId) resolvedMetaId = String(bound.meta_id || "");
 				function ensureMain() {
 					if (mainTitle) return;
 					mainTitle = document.createElement("div"); mainTitle.className = "wb_reviewMainTitle";
@@ -2020,13 +1393,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					if (!title) return;
 					fetch(WB_API.confirmDraft, {
 						method: "POST", headers: { "content-type": "application/json", accept: "application/json" },
-						body: JSON.stringify({
-							client: client,
-							client_key: resolvedClientKey,
-							title: title,
-							session_id: resolvedSessionId,
-							meta_id: resolvedMetaId,
-						}),
+						body: JSON.stringify({ client: client, title: title }),
 					})
 						.then(function (r) { return r.json().then(function (b) { return { code: r.status, body: b }; }); })
 						.then(function (res) {
@@ -2048,7 +1415,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			 * "会话→客户"来自我们自己的映射表；新客户在装配台勾选即出现，
 			 * 不需要预先建任何组。绝不改动官方组件内部（历史教训：一改就崩）。 */
 			var WB_NAV_W = 330;
-			var wbNavState = { sessions: null, map: {}, q: "", open: {}, current: "", navW: 330, drawer: false, bindings: {}, customers: [], clientsReady: false };
+			var wbNavState = { sessions: null, map: {}, q: "", open: {}, current: "", navW: 330 };
 			try {
 				var savedW = parseInt(localStorage.getItem(WB_KEY.navW) || "0", 10);
 				if (savedW >= 200 && savedW <= 480) wbNavState.navW = savedW;
@@ -2058,13 +1425,6 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				try {
 					var fr = document.querySelector('[class*="frame"]');
 					if (fr === null || fr.style.gridTemplateColumns === "") return;
-					/* On phones the official shell columns stay mounted for the drawer,
-					 * but they must not reserve any width. The desktop nav width is
-					 * restored only when the media query is false. */
-					if (WB_MOBILE.matches) {
-						fr.style.gridTemplateColumns = "0px minmax(0, 1fr) 0px";
-						return;
-					}
 					var cols = fr.style.gridTemplateColumns.split(/\s+/);
 					var want = wbNavState.navW + "px";
 					if (cols[0] !== want) { cols[0] = want; fr.style.gridTemplateColumns = cols.join(" "); }
@@ -2074,30 +1434,12 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			var wbFrameMo = null;
 			function wbNavEmit() { wbNavSubs.forEach(function (f) { try { f(); } catch (e) { } }); }
 			function wbNavRefresh() {
-				/* 组装清单优先读正式 P1 session-client 索引，再合并 Noah 的
-				 * client-map（topic/旧会话兼容）。客户显示名来自 list_clients。
-				 * 单个兼容路由尚未热上的过渡期不应遮住正式索引。 */
-				function readNav(url) {
-					return (url === CLIENTS_PATH ? wbFetchClients()
-						: fetch(url, { headers: { accept: "application/json" } }).then(readWorkbenchList)).catch(function () { return {}; });
-				}
-				Promise.all([
-					readNav(WB_API.sessionClient),
-					readNav(WB_API.clientMap),
-					readNav(WB_API.clients),
-				]).then(function (rows) {
-					var bindingBody = rows[0] || {};
-					var mapBody = rows[1] || {};
-					var clientBody = rows[2] || {};
-					if (bindingBody.ok === true) wbNavState.bindings = bindingBody.index || {};
-					if (mapBody.ok === true) wbNavState.map = mapBody.map || {};
-					if (clientBody.ok === true) { wbNavState.customers = clientBody.customers || []; wbNavState.clientsReady = true; }
-					if (wbNavState.clientsReady) {
-						wbNavState.bindings = wbAuthorizedRecords(wbNavState.bindings, wbNavState.customers);
-						wbNavState.map = wbAuthorizedRecords(wbNavState.map, wbNavState.customers);
-					}
-					wbNavEmit();
-				}).catch(function () { });
+				/* 清单=登记表本身（装配台发起的每个会话都在）：id→{client,topic,at}。
+				 * 点开会话走官方 ctx.sessions.open；登记即出现，新客户零成本。 */
+				fetch(WB_API.clientMap, { headers: { accept: "application/json" } })
+					.then(function (r) { return r.json(); })
+					.then(function (b) { if (b && b.ok === true) { wbNavState.map = b.map || {}; wbNavEmit(); } })
+					.catch(function () { });
 			}
 			var wbNavCtx = null;
 			var wbNavHideDone = false;
@@ -2269,11 +1611,6 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 						if (l && typeof l.selectPanel === "function") l.selectPanel(WORKBENCH_KEY);
 					} catch (e) { console.warn("[dsh-workbench] 打开新建任务失败：", String(e)); }
 				}
-				var mobile = useWbMobile();
-				if (mobile) {
-					var me = { label: "生文 Agent", sub: "" };
-					return wbNavState.drawer ? h(MobileDrawer, { groups: groups, names: names, me: me, compose: goCompose, openSession: openSession, close: function () { wbNavState.drawer = false; wbNavEmit(); } }) : null;
-				}
 				return h("div", { className: "wb_nv", style: { width: String(wbNavState.navW) + "px" } },
 					h("div", { className: "wb_nvBrand" }, h("span", { className: "wb_nvBrandT" }, "生文 Agent")),
 					h("div", {
@@ -2398,12 +1735,10 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			 * 已入库段落绿底锁定 / 正文渲染 / 底部 hint+确认(勾选数)+全部确认。
 			 * 客户来源：openTab params 优先，否则从当前会话解析。 */
 			function ReviewTabBody(props) {
-				var mobile = useWbMobile();
 				var sessionId = props.sessionId;
 				var useChat = props.useChat;
-				var initialBinding = sessionId && wbNavState.bindings ? wbNavState.bindings[sessionId] : null;
-				var st = React.useState({ client: "", client_key: initialBinding && initialBinding.client_key || "", drafts: null, sel: "", body: "", msg: "", done: {}, editing: false, editText: "", saving: false });
-				var client = st[0].client, clientKey = st[0].client_key, drafts = st[0].drafts, sel = st[0].sel, bodyText = st[0].body, msg = st[0].msg, doneMap = st[0].done;
+				var st = React.useState({ client: "", drafts: null, sel: "", body: "", msg: "", done: {}, editing: false, editText: "", saving: false });
+				var client = st[0].client, drafts = st[0].drafts, sel = st[0].sel, bodyText = st[0].body, msg = st[0].msg, doneMap = st[0].done;
 				var setL = st[1];
 				useWbPickTick();   // 勾选集合在输入框挑篇条里维护 —— 订阅它，选中变化时这里跟着重渲
 				var checked = WB_PICK.sel;
@@ -2412,12 +1747,10 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				}).length;
 
 				/* 客户解析：params → 当前会话首条 user 消息的任务编号 → meta.client */
-				var clientFromParams = null, clientKeyFromParams = null;
+				var clientFromParams = null;
 				try {
 					var info = typeof props.useTabInfo === "function" ? props.useTabInfo() : null;
-					var navParams = info && info.navigation && info.navigation.params ? info.navigation.params : null;
-					clientFromParams = navParams ? (navParams.client || null) : null;
-					clientKeyFromParams = navParams ? (navParams.client_key || null) : null;
+					clientFromParams = info && info.navigation && info.navigation.params ? (info.navigation.params.client || null) : null;
 				} catch (e) { }
 				var chatSnap = null;
 				if (!clientFromParams && typeof useChat === "function" && sessionId) {
@@ -2438,7 +1771,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					for (var wsi = 0; wsi < legacyNodes.length; wsi++) {
 						var wsn = legacyNodes[wsi];
 						if (wsn && wsn.kind === "tool-result" && wsn.call
-							&& WB_WRITE_TOOL_RE.test(String(wsn.call.name || "")) && wsn.isError !== true) {
+							&& wsn.call.name === "mcp__sora-articles__write_article" && wsn.isError !== true) {
 							try {
 								var wargs = JSON.parse(wsn.call.argsRaw || "{}");
 								var wtitle = String(wargs.title || wargs.file || "").replace(/\.md$/i, "");
@@ -2464,31 +1797,17 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					}
 				}
 				React.useEffect(function () {
+					if (clientFromParams) { setL(function (p) { return Object.assign({}, p, { client: clientFromParams }); }); return; }
+					if (metaId === "") { setL(function (p) { return Object.assign({}, p, { client: "" }); }); return; }
 					var alive = true;
-					function applyClient(disp, key) {
-						if (!alive) return;
-						setL(function (p) { return Object.assign({}, p, { client: disp || p.client || "", client_key: key || p.client_key || "" }); });
-					}
-					function fallbackMeta() {
-						if (clientFromParams || clientKeyFromParams) { applyClient(clientFromParams || "", clientKeyFromParams || ""); return; }
-						if (metaId === "") { applyClient("", ""); return; }
-						fetch(WB_API.taskMeta + "?id=" + encodeURIComponent(metaId), { headers: { accept: "application/json" } })
-							.then(function (r) { return r.json(); })
-							.then(function (body) { if (body) applyClient(typeof body.client === "string" ? body.client : "", typeof body.client_key === "string" ? body.client_key : ""); })
-							.catch(function () { });
-					}
-					if (typeof sessionId === "string" && sessionId !== "") {
-						fetch(WB_API.sessionClient + "?session=" + encodeURIComponent(sessionId), { headers: { accept: "application/json" } })
-							.then(function (r) { return r.json(); })
-							.then(function (body) {
-								var binding = body && body.binding ? body.binding : null;
-								if (binding && binding.client_key) applyClient(binding.client || clientFromParams || "", binding.client_key);
-								else fallbackMeta();
-							})
-							.catch(function () { fallbackMeta(); });
-					} else fallbackMeta();
+					fetch(WB_API.taskMeta + "?id=" + encodeURIComponent(metaId), { headers: { accept: "application/json" } })
+						.then(function (r) { return r.json(); })
+						.then(function (body) {
+							if (alive && body && typeof body.client === "string") setL(function (p) { return Object.assign({}, p, { client: body.client }); });
+						})
+						.catch(function () { });
 					return function () { alive = false; };
-				}, [clientFromParams, clientKeyFromParams, metaId, sessionId]);
+				}, [clientFromParams, metaId]);
 
 				/* 本任务发起时刻：草稿列表只显示该时刻之后落盘的（C1 口径 ——
 				 * 否则同客户的旧会话草稿会混进来）。时刻拿不到就退回全列。 */
@@ -2728,13 +2047,6 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 						.catch(function () { });
 					return function () { alive = false; };
 				}, [metaId]);
-				/* 「文章审核」按钮 / 手动刷新：任务条派发 wb:review-refresh，这里重拉草稿列表 */
-				var rvTickS = React.useState(0); var rvTick = rvTickS[0];
-				React.useEffect(function () {
-					var on = function () { rvTickS[1](function (n) { return n + 1; }); };
-					window.addEventListener("wb:review-refresh", on);
-					return function () { window.removeEventListener("wb:review-refresh", on); };
-				}, []);
 				React.useEffect(function () {
 					if (!client) { setL(function (p) { return Object.assign({}, p, { drafts: null, sel: "", body: "", checked: {}, done: {} }); }); return; }
 					var alive = true;
@@ -2760,7 +2072,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 						})
 						.catch(function () { });
 					return function () { alive = false; };
-				}, [client, at, writeCount, rvTick]);   /* at / writeCount / 手动刷新 回来要重拉重过滤 */
+				}, [client, at, writeCount]);   /* at / writeCount 回来要重拉重过滤 */
 
 				/* 检查结果持久化恢复：本组件 state 归属正确，客户一定就从 sessionStorage 捞 */
 				React.useEffect(function () {
@@ -2875,13 +2187,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				function confirmOne(title) {
 					return fetch(WB_API.confirmDraft, {
 						method: "POST", headers: { "content-type": "application/json", accept: "application/json" },
-						body: JSON.stringify({
-							client: client,
-							client_key: clientKey || "",
-							title: title,
-							session_id: typeof sessionId === "string" ? sessionId : "",
-							meta_id: metaId || "",
-						}),
+						body: JSON.stringify({ client: client, title: title }),
 					})
 						.then(function (r) { return r.json().then(function (b) { return { code: r.status, body: b }; }); })
 						.then(function (res) {
@@ -2927,18 +2233,6 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				var doneCount = drafts ? drafts.filter(function (d) { return doneMap[d.title] === true; }).length : 0;
 				var pending = drafts ? drafts.filter(function (d) { return doneMap[d.title] !== true; }) : [];
 
-				if (mobile && !props.mobileInline) {
-					return h(MobileChatHeader, { title: "会话", sessionId: sessionId, meta: st[0].meta || { client: client }, nodes: Array.isArray(legacyNodes) ? legacyNodes : [], legacy: chatSnap && chatSnap.legacy, reviewProps: props });
-				}
-				if (mobile && props.mobileInline) {
-					return h("div", { className: "wb_mReview" },
-						h(MobileTopBar, { title: client || "文章审核", back: function () {} }),
-						h("div", { className: "wb_mReviewList" },
-							pending.map(function (d) { return h("button", { type: "button", key: d.title, className: "wb_mReviewItem", onClick: function () { openDraft(d.title); } }, h("b", null, d.title), h("small", null, doneMap[d.title] ? "已入库" : "待审核")); }),
-							pending.length === 0 ? h("p", { className: "wb_mEmpty" }, drafts === null ? "草稿列表加载中…" : "草稿区是空的") : null),
-						sel ? h("article", { className: "wb_mArticle" }, h("h1", null, sel), h("div", { dangerouslySetInnerHTML: { __html: wbMdToHtml(bodyText) } })) : null,
-						pending.length ? h("div", { className: "wb_mAction" }, h("button", { type: "button", className: "wb_mPrimary", disabled: checkedCount === 0, onClick: function () { confirmTargets(pending.filter(function (d) { return WB_PICK.sel[d.title]; }).map(function (d) { return d.title; }), "入库"); } }, "确认入库（" + checkedCount + " 篇）")) : null);
-				}
 				if (!client) return h("div", { className: "wb_rvEmpty" }, "没有正在进行的任务 —— 从装配台发起后，这里会自动打开");
 				var toggleRv = function () { setL(function (p) { return Object.assign({}, p, { rvOpen: !rvOpen }); }); };
 				return h("div", { className: "wb_rv" },
@@ -3343,7 +2637,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				for (var wi = 0; wi < list.length; wi++) {
 					var tn = list[wi];
 					if (tn && tn.kind === "tool-result" && tn.call
-						&& WB_WRITE_TOOL_RE.test(String(tn.call.name || "")) && tn.isError !== true) {
+						&& tn.call.name === "mcp__sora-articles__write_article" && tn.isError !== true) {
 						writeDone += 1;
 						try {
 							var targs = JSON.parse(tn.call.argsRaw || "{}");
@@ -3408,19 +2702,10 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					presetRow("类型", typeText || meta.mode),
 					presetRow("要求", meta.base || "（没写补充要求）"),
 					presetRow("主题", meta.topic),
-					(meta.skills || []).length > 0 ? presetRow("技能", meta.skills.join("、")) : null);
+					(meta.skills || []).length > 0 ? presetRow("技能", meta.skills.map(skillDisplay).join("、")) : null);
 				var colR = h("div", { className: "wb_col wb_colDiv" },
 					h("div", { className: "wb_colTitle" },
 						"任务进程",
-						h("button", {
-							type: "button", className: "wb_mini wb_reviewOpen", title: "在右侧打开「文章审核」并刷新草稿列表",
-							onClick: function () {
-								var ctrl = WbCtx && WbCtx.sidebarRight;
-								try { if (ctrl && typeof ctrl.openTab === "function") ctrl.openTab("wb-review", { params: { client: meta.client, meta: metaId } }); }
-								catch (e) { console.warn("[dsh-workbench] 打开审核侧栏失败：", String(e)); }
-								setTimeout(function () { window.dispatchEvent(new CustomEvent("wb:review-refresh")); }, 50);
-							},
-						}, "文章审核 ›"),
 						h("span", { className: "wb_tstat" }, (function () {
 							var done = 0;
 							for (var k = 0; k < taskRows.length; k++) if (taskRows[k][0] === "done") done++;
@@ -3483,16 +2768,10 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			var wanted = {};
 			for (var index = 0; index < pickedNames.length; index++) wanted[pickedNames[index]] = true;
 			var bits = [];
-			var found = {};
 			for (var q = 0; q < questions.length && bits.length < 20; q++) {
 				var question = questions[q];
 				if (wanted[question.question] !== true) continue;
 				bits.push(question.question);
-				found[question.question] = true;
-			}
-			for (var pickedIndex = 0; pickedIndex < pickedNames.length && bits.length < 20; pickedIndex++) {
-				var saved = pickedNames[pickedIndex];
-				if (saved !== "" && found[saved] !== true) { bits.push(saved); found[saved] = true; }
 			}
 			return bits.map(function (name, i) { return (i + 1) + ". " + name; }).join("\n");
 		}
@@ -3551,7 +2830,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 		/** 薄弱问句那一格的渲染。rows 由 WorkbenchPage 算好传进来（工作条的「显示 N 条」和它共用一份）。 */
 		function renderWeakPane(args) {
 			var gaps = args.gaps;
-			if (args.entry === null || args.entry.inWindow === false) {
+			if (args.entry === null) {
 				var sub;
 				if (args.dirStatus === "loading") sub = "问一次数据服务的客户目录。";
 				else if (args.dirStatus === "error") sub = "刚才没问到客户目录（服务可能短暂不可用）—— 点工作条上的 ⟳ 重试。";
@@ -3581,7 +2860,9 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 						type: "checkbox", checked: allOn, "aria-label": "全选",
 						onChange: function () {
 							var names = rows.map(function (row) { return row.question; });
-							args.bulkSet(names, !allOn);
+							args.setWeakPicked(allOn
+								? pickedNames.filter(function (item) { return names.indexOf(item) < 0; })
+								: pickedNames.concat(names.filter(function (item) { return pickedNames.indexOf(item) < 0; })));
 							args.setChipOff(false);
 						},
 					})),
@@ -3599,15 +2880,6 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				/* 行：点哪都勾；按住往下拖，划过的行跟着第一行同一个动作（原型同款）。 */
 				body = rows.map(function (question) {
 					var on = pickedNames.indexOf(question.question) >= 0;
-					var tick = null;
-					for (var ti = 0; ti < (args.ticks || []).length; ti++) {
-						var candidate = args.ticks[ti];
-						if ((question.qid !== undefined && String(candidate.qid) === String(question.qid)) || candidate.question === question.question) { tick = candidate; break; }
-					}
-					var tickWho = tick ? String(tick.byName || tick.by || "") : "";
-					var tickMeta = tick && (tickWho !== "" || tick.at)
-						? (tickWho || "已选") + (tick.at ? " · " + tickStamp(tick.at) : "")
-						: "";
 					return h("tr", {
 						key: question.question,
 						className: on ? "on" : undefined,
@@ -3623,9 +2895,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 							},
 						})),
 						h("td", { className: "wb_gapRoot" }, question.root || "—"),
-						h("td", null, h("div", { className: "wb_gapQ" },
-							question.question,
-							tickMeta === "" ? null : h("span", { className: "wb_tickMeta", title: tick.at || "" }, tickMeta))),
+						h("td", null, h("div", { className: "wb_gapQ" }, question.question)),
 						h("td", null,
 							h("span", { className: "wb_gapNum", "data-sign": gapSign(question.summary.gap), title: gapTitle("综合", question.summary.gap) }, gapText(question.summary.gap))),
 						shownPlatforms.map(function (name) {
@@ -3637,15 +2907,12 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			}
 
 			return h("div", null,
-				h("div", { className: "wb_source" }, "数据来源：Support · 薄弱问句（全局标准 v4，和 Support 页面数字一致）"),
 				h("table", { className: "wb_tbl wb_tblGap", "data-drag": args.dragging ? "1" : "0" },
 					h("thead", null, head),
 					h("tbody", null, body)));
 		}
 
 		function WorkbenchPage(props) {
-			var mobile = useWbMobile();
-			useWbScene(mobile, "compose");
 			var ctx = props.ctx;
 			var clients = useClients();
 			/* 薄弱问句：目录一次，问句按客户 */
@@ -3670,20 +2937,120 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			var refText = refTextS[0], setRefText = refTextS[1];
 			var refStyleS = React.useState(REF_STYLES[0]);
 			var refStyle = refStyleS[0], setRefStyle = refStyleS[1];
-			var pickedS = React.useState([]);
-			var picked = pickedS[0], setPicked = pickedS[1];
-			/* 已选的薄弱问句按当前客户/业务线同步到 Support 的共享 ticks。 */
-			var weakPickedS = React.useState([]);
+			/* 技能加购（2026-10-13 定）：点圆片一下 = 这类 +1 篇，角标 ×N；
+			 * 点角标 / 输入区标签减 1，减到 0 = 取消选中；发送成功后清零。
+			 * 装配稿里每个技能一句「写 N 篇」；补充要求另有说法时以补充要求为准。 */
+			var countsS = React.useState({});
+			var counts = countsS[0], setCounts = countsS[1];
+			function pickedEntries() {
+				var out = [];
+				var list = (skills && skills.skills) ? skills.skills : [];
+				for (var i = 0; i < list.length; i++) {
+					var c = counts[list[i].name] || 0;
+					if (c > 0) out.push({ name: list[i].name, count: c });
+				}
+				return out;
+			}
+			function pickedTotal() {
+				var t = 0, list = pickedEntries();
+				for (var i = 0; i < list.length; i++) t += list[i].count;
+				return t;
+			}
+			function pickedLabel() {
+				var list = pickedEntries();
+				if (list.length === 0) return "";
+				var labels = [], total = 0;
+				for (var i = 0; i < list.length; i++) {
+					labels.push(skillDisplay(list[i].name) + "×" + list[i].count);
+					total += list[i].count;
+				}
+				return labels.join("、") + (total > 1 ? "（共 " + total + " 篇）" : "");
+			}
+			function addOne(name, el) {
+				setCounts(function (c) {
+					var next = {}, k;
+					for (k in c) next[k] = c[k];
+					next[name] = (c[name] || 0) + 1;
+					return next;
+				});
+				/* 反馈动画：圆片弹动 + 小圆点飞进下方输入区（购物车加购的感知）。
+				 * 系统开了「减弱动态效果」就只改数字，不飞不弹。 */
+				try {
+					var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+					if (el && !reduce && typeof el.classList !== "undefined") {
+						el.classList.remove("wb_bump");
+						void el.offsetWidth;                        /* 强制重排，让动画能重新触发 */
+						el.classList.add("wb_bump");
+					}
+					if (!reduce) flyToken(el);
+				} catch (error) { /* 动画失败不影响功能 */ }
+			}
+			function minusOne(name) {
+				setCounts(function (c) {
+					var next = {}, k, n = (c[name] || 0) - 1;
+					for (k in c) { if (k !== name) next[k] = c[k]; }
+					if (n > 0) next[name] = n;
+					return next;
+				});
+			}
+			function flyToken(fromEl) {
+				try {
+					if (!fromEl || typeof fromEl.animate !== "function") return;
+					var target = document.querySelector(".wb_asm .wb_input");
+					if (target === null) return;
+					var from = fromEl.getBoundingClientRect();
+					var to = target.getBoundingClientRect();
+					var dot = document.createElement("span");
+					dot.className = "wb_fly";
+					dot.style.left = (from.left + from.width / 2 - 5) + "px";
+					dot.style.top = (from.top + from.height / 2 - 5) + "px";
+					document.body.appendChild(dot);
+					var dx = (to.left + to.width / 2) - (from.left + from.width / 2);
+					var dy = (to.top + 12) - (from.top + from.height / 2);
+					var anim = dot.animate([
+						{ transform: "translate(0px,0px) scale(1)", opacity: "1" },
+						{ transform: "translate(" + (dx * 0.5) + "px," + (dy * 0.5 - 26) + "px) scale(0.9)", opacity: "1", offset: 0.55 },
+						{ transform: "translate(" + dx + "px," + dy + "px) scale(0.45)", opacity: "0" },
+					], { duration: 460, easing: "cubic-bezier(.3,.7,.4,1)" });
+					anim.onfinish = function () { dot.remove(); };
+					anim.oncancel = function () { dot.remove(); };
+				} catch (error) { /* 动画失败不影响功能 */ }
+			}
+			/* 已选的薄弱问句（按问句原文记），**按客户分开存**（2026-10-10 定）。
+			 * 任务永远只发给单个客户，跨客户攒勾选只会制造「这 N 条是谁的」糊涂账 ——
+			 * 换客户 = 自动切到那个客户自己的清单；刷新页面不丢。和 `counts`（模板加购）别混。 */
+			var weakPickedS = React.useState(function () {
+				try {
+					var list = JSON.parse(sessionStorage.getItem(WB_KEY.weakPicked + ":" + pick.key) || "[]");
+					return Array.isArray(list) ? list : [];
+				} catch (error) { return []; }
+			});
 			var weakPicked = weakPickedS[0], setWeakPicked = weakPickedS[1];
+			/* 换客户：当前清单归还给旧客户，装载新客户的清单。 */
+			var weakPickClientRef = React.useRef(pick.key);
+			React.useEffect(function () {
+				if (weakPickClientRef.current === pick.key) return undefined;
+				var prevClient = weakPickClientRef.current;
+				weakPickClientRef.current = pick.key;
+				try {
+					sessionStorage.setItem(WB_KEY.weakPicked + ":" + prevClient, JSON.stringify(weakPicked));
+					var list = JSON.parse(sessionStorage.getItem(WB_KEY.weakPicked + ":" + pick.key) || "[]");
+					setWeakPicked(Array.isArray(list) ? list : []);
+				} catch (error) { /* 隐身模式就算了 */ }
+				return undefined;
+			}, [pick.key]);
+			React.useEffect(function () {
+				try { sessionStorage.setItem(WB_KEY.weakPicked + ":" + weakPickClientRef.current, JSON.stringify(weakPicked)); } catch (error) { /* 隐身模式就算了 */ }
+			}, [weakPicked]);
 
 			var zoomS = React.useState(false);
 			var zoom = zoomS[0], setZoom = zoomS[1];
 			/* 本次任务的模型（装配台下拉）：默认 = 宿主 agent-default-model；
 			 * 选了 yishan 里的模型就经 PromptRelay 绑给新会话（Key 在服务端）。 */
-			var modelInitial = "__default__";
-			try { modelInitial = sessionStorage.getItem(WB_KEY.modelLast) || "__default__"; }
-			catch (error) { /* storage unavailable */ }
-			var modelS = React.useState(modelInitial);
+			var modelS = React.useState(function () {
+				try { return sessionStorage.getItem(WB_KEY.modelLast) || "__default__"; }
+				catch (error) { return "__default__"; }
+			});
 			var selModel = modelS[0], setSelModel = modelS[1];
 			var modelOpenS = React.useState(false);
 			var modelOpen = modelOpenS[0], setModelOpen = modelOpenS[1];
@@ -3693,10 +3060,10 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				try { localStorage.setItem(WB_KEY.modelLast, v); } catch (error) { /* 隐身模式就算了 */ }
 			}
 			/* 思考强度：默认 = 跟随模型；选了就随模型一起绑给会话。 */
-			var effortInitial = "__default__";
-			try { effortInitial = localStorage.getItem(WB_KEY.effortLast) || "__default__"; }
-			catch (error) { /* storage unavailable */ }
-			var effortS = React.useState(effortInitial);
+			var effortS = React.useState(function () {
+				try { return localStorage.getItem(WB_KEY.effortLast) || "__default__"; }
+				catch (error) { return "__default__"; }
+			});
 			var selEffort = effortS[0], setSelEffort = effortS[1];
 			var effortOpenS = React.useState(false);
 			var effortOpen = effortOpenS[0], setEffortOpen = effortOpenS[1];
@@ -3774,40 +3141,14 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			var weakLine = null;
 			if (weakEntry !== null) {
 				if (weakLines.length === 0) weakLine = weakEntry;
-				else if (weakLines.length === 1) weakLine = weakLines[0];
 				else {
-					var selectedLineName = "";
-					for (var selectedLineIndex = 0; selectedLineIndex < lines.length; selectedLineIndex++) {
-						if (String(lines[selectedLineIndex].id || "") === String(pick.line)) {
-							selectedLineName = String(lines[selectedLineIndex].name || "");
-							break;
-						}
-					}
 					for (var wl = 0; wl < weakLines.length; wl++) {
-						if (String(weakLines[wl].id || "") === String(pick.line)
-							|| (selectedLineName !== "" && String(weakLines[wl].name || "") === selectedLineName)
-							|| (selectedLineName === "" && weakLines[wl].is_default === true)) {
-							weakLine = weakLines[wl];
-							break;
-						}
+						if (String(weakLines[wl].name) === String(pick.line)) { weakLine = weakLines[wl]; break; }
 					}
 				}
 			}
-			var weakClientKey = weakEntry === null ? "" : String(weakEntry.clientKey || weakEntry.id || "");
-			var weakClientId = (weakLine === null || weakLine === weakEntry) ? "" : String(weakLine.id || "");
-			var weakEnabled = mode === "weak" && weakClientKey !== "" && weakEntry !== null && weakEntry.inWindow !== false
-				&& (weakLines.length === 0 || weakLine !== null);
-			var weakGaps = useWeakGaps(weakClientKey, weakClientId, weakEnabled);
-			var weakTicks = useWeakTicks(weakClientKey, weakClientId, weakEnabled);
-			var weakSelectionTouched = React.useRef(false);
-			React.useEffect(function () {
-				weakSelectionTouched.current = false;
-				setWeakPicked(weakPickedFromTicks(weakTicks.ticks, weakGaps.questions));
-			}, [weakClientKey, weakClientId, weakGaps.questions]);
-			React.useEffect(function () {
-				if (weakSelectionTouched.current) return;
-				setWeakPicked(weakPickedFromTicks(weakTicks.ticks, weakGaps.questions));
-			}, [weakTicks.ticks]);
+			var weakClientId = weakLine === null ? "" : String(weakLine.id || "");
+			var weakGaps = useWeakGaps(weakClientId, mode === "weak" && weakClientId !== "");
 			/* 这一期出现过哪些词根（给下拉用）。 */
 			var weakRoots = [];
 			for (var wr = 0; wr < weakGaps.questions.length; wr++) {
@@ -3874,7 +3215,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				var who = "客户：" + (clientName || "（没选客户）");
 				if (lineName !== "") who += " · 业务线：" + lineName;
 				if (periodName !== "") who += " · 期数：" + periodName;
-				step(who + " —— 请调用知识库工具（sora-knowledge）读全知识库再动笔：先 list_kb_files 列文件清单，再逐个 read_kb_file 读完每一份；不要用 read_kb 一把全读（大客户的返回会被截断，截掉的后半段你拿不到），也不要去读「完整内容已存到某文件」之类的提示路径 —— 那些路径你够不着。");
+				step(who + " —— 先读全知识库再动笔：用 list_kb_files 列出文件清单，逐个 read_kb_file 读取全文；read_kb 的整库读取在内容较大时会截断，不使用。工具返回中若出现「完整内容已存到某文件」类的本地路径提示，该路径不在可读范围内，以 read_kb_file 读到的内容为准。");
 
 				if (mode === "weak") {
 					/* 勾了就把勾中的带进任务；没勾就说清楚没勾 —— 不编主题。
@@ -3898,97 +3239,122 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					step("怎么写：仿写，" + refStyle + "。参考材料 —— " + bits.join("；"));
 				}
 
-				if (picked.length > 0) {
-					picked.forEach(function (name) {
-						step("技能：" + name + " —— 请通过技能工具（skill provider）调用这个 skill，按它的规则写。");
+				if (pickedEntries().length > 0) {
+					pickedEntries().forEach(function (s) {
+						step("技能：" + s.name + " —— 请通过技能工具（skill provider）调用这个 skill，按它的规则写，写 " + s.count + " 篇。");
 					});
+					step("以上技能的篇数以装配台点选为准；补充要求里明确说了不同的篇数时，以补充要求为准。");
+					/* 选题分配（2026-10-13 定）：多问句 × 多类型时，AI 先拆解合并语义、
+					 * 匹配类型，产出分配表再写作；用户在补充要求里有明确安排时以其为准。 */
+					if (pickedTotal() > 1 || weakPicked.length > 1) {
+						var catalog = (skills && skills.skills) ? skills.skills : [];
+						step("已选文章类型的特性（匹配依据）：" + pickedEntries().map(function (s) {
+							var d = skillDesc(s.name, catalog);
+							return s.name + "（" + skillDisplay(s.name) + "）" + (d === "" ? "" : "：" + d);
+						}).join("；"));
+						step("选题分配（动笔前的第一步）：把上面主题里列出的全部问句/主题按意图归类合并成语义组，为每个语义组匹配最合适的文章类型，先产出分配表再写作。分配表一行一篇：「第 N 篇｜文章类型｜覆盖的问句｜一句话理由」。规则：全部问句都必须被覆盖，语义相同或相近的问句合并成一篇；各类型的篇数按上面点选的数量执行；补充要求里另有安排时，以补充要求为准。分配表完成后直接按表写作，无需停下确认。");
+					}
 				}
 
 				if (base.trim() !== "") step("补充要求：" + base.trim());
 
-				lines.splice(0, 0, "工具分工（请严格照此使用，不要猜）：客户知识库、文章的读写都走 MCP 工具（mcp__sora-knowledge__*、mcp__sora-articles__*）；只有下面列出的 sora-* 写作技能才走技能工具（skill），其他名字不是技能。新文章用文章库的 write_article 写入，必须带 draft:true（进草稿区等人工确认，不要直接入库；除非用户明确说「直接入库」）。技能正文（get_skill 返回的内容）已包含全部规则和提示词，够你写作使用 —— 不要尝试用 skill 工具读技能的子文件/附属文件（如 xxx/prompts/xxx.md 这种带路径的名字），也不要用其他方式抓取它们。");
+				lines.splice(0, 0, "工具分工：客户知识库、文章的读写都走 MCP 工具（mcp__sora-knowledge__*、mcp__sora-articles__*）；只有下面列出的 sora-* 写作技能走技能工具（skill），其他名字不是技能。新文章用文章库的 write_article 写入，必须带 draft:true，进入草稿区等待人工确认，仅当用户明确说「直接入库」时例外。技能正文（get_skill 返回的内容）已包含该技能的完整规则与提示词，写作以其为准；技能的子文件与附属文件（如 xxx/prompts/xxx.md 这种带路径的名字）不在调用范围内，无需读取。工具返回过大被转存为本地文件时，用文件读取工具直接读取该路径；网页获取仅适用于公网 http/https 地址，本机地址与 file: 协议不在其适用范围。");
 				/* lines 里各条已自带序号（step 加的），这里直接拼，别再加一遍（9-23 实测出现 1.1.）。 */
 				return "【装配台预填 · 初始上下文】\n" + lines.join("\n");
 			}
 
 			async function dispatch() {
 				if (clientName === "") return;
-				var personal, workspace;
-				setSending("正在准备个人工作区…");
-				try {
-					personal = (await wbRequireWorkspace()).personal;
-					workspace = ctx && typeof ctx.get === "function" ? ctx.get("uiWorkspace") : null;
-					if (!workspace || (typeof workspace.openWorkspace !== "function" && typeof workspace.openSession !== "function")) throw new Error(WB_WORKSPACE_ERROR);
-				} catch (error) {
-					setSending(WB_WORKSPACE_ERROR);
-					return;
-				}
 				/* C1 数据源：先把装配参数登记到宿主（POST task-meta）拿编号，
 				 * 编号追加在预填消息尾部 + 记进 sessionStorage —— 会话页顶部
 				 * 的任务条凭编号读回参数。登记失败不挡发送（任务条显示兜底）。 */
 				var metaId = "";
 				setSending("正在登记任务参数…");
 				try {
-					var resp = await fetch("/api/workbench/task-meta", {
+					var resp = await fetch(WB_API.taskMeta, {
 						method: "POST",
 						headers: { "content-type": "application/json", accept: "application/json" },
-						body: JSON.stringify(buildTaskMetaPayload({
-							client_key: pick.key,
-							client: clientName,
-							line: lineName, period: periodName,
+						body: JSON.stringify({
+							client: clientName, line: lineName, period: periodName,
 							mode: mode, topic: topic,
 							refs: { urls: refs.urls, body: refs.body, style: refStyle },
-							skills: picked, base: base,
-						})),
+							skills: pickedEntries().map(function (s) { return s.name + "×" + s.count; }), base: base,
+						}),
 					});
 					var body = await resp.json();
 					if (body && body.ok === true && typeof body.id === "string") metaId = body.id;
 				} catch (error) { /* 登记失败照常发送，任务条走兜底 */ }
-				var text = composePrompt() + (metaId === "" ? "" : "\n\n[任务编号：" + metaId + "]");
+				/* 装配稿生成包保护：出错显示在发送行，不再无声卡死（2026-10-13） */
+				var text = "";
 				try {
-					try {
-						if (selModel !== "__default__" || selEffort !== "__default__") {
-							var mp = String(selModel).split("::");
-							sessionStorage.setItem(WB_KEY.modelPending, JSON.stringify({ provider: selModel === "__default__" ? "deepseek-official" : mp[0], model: selModel === "__default__" ? "deepseek-flash" : mp[1], effort: selEffort === "__default__" ? "" : selEffort }));
-						}
-					} catch (error) { /* storage unavailable */ }
-					var rememberPending = function (sessionId) {
-						pendingPrompt = { text: text, sessionId: sessionId };
-						try {
-							if (metaId !== "") {
-								sessionStorage.setItem("wb-task-meta-id", metaId);
-								sessionStorage.setItem("wb-pending-meta", metaId);
-							}
-							/* 新会话强制绑客户：等 PromptRelay 拿到 session id 再 POST 索引 */
-							sessionStorage.setItem("wb-pending-bind", JSON.stringify({
-								client_key: pick.key,
-								client: clientName,
-								topic: topic,
-								meta_id: metaId,
-							}));
-						} catch (error) { /* 隐身模式就算了 */ }
-					};
-					if (typeof workspace.openWorkspace === "function") {
-						await workspace.openWorkspace(personal.id, rememberPending);
-					} else {
-						/* Deploy-line hosts may expose only the new session-create route.
-						 * The host has already scoped that route to personal.id. */
-						var createResponse = await fetch(WB_API.sessionCreate, { method: "POST", headers: { accept: "application/json" } });
-						var createBody = await createResponse.json();
-						var createdId = createBody && createBody.ok === true ? String(createBody.sessionId || "") : "";
-						if (!createdId) throw new Error(WB_WORKSPACE_ERROR);
-						workspace.openSession(createdId);
-						rememberPending(createdId);
-					}
-					setSending("");
+					text = composePrompt() + (metaId === "" ? "" : "\n\n[任务编号：" + metaId + "]");
 				} catch (error) {
-					pendingPrompt = null;
-					setSending("起会话失败：" + String(error && error.message ? error.message : error));
+					setSending("装配稿生成失败：" + String(error && error.message ? error.message : error));
 					return;
 				}
-				/* 通知接力挂件：万一当前挂着的会话就是空白目标
-				 * （effect 的 deps 都没变），靠这个事件立刻消费。 */
-				try { window.dispatchEvent(new Event("wb-prompt-set")); } catch (error) { /* 老浏览器就算了 */ }
+				if (metaId !== "") {
+					try {
+						sessionStorage.setItem(WB_KEY.taskMetaId, metaId);
+						sessionStorage.setItem(WB_KEY.pendingMeta, metaId);         // PromptRelay 绑定任务条用
+					} catch (error) { /* 隐身模式就算了 */ }
+				}
+				try {
+					sessionStorage.setItem(WB_KEY.pendingClient, clientName);       // 自绘侧栏分组登记用
+					/* 主题标签：有主题用主题；薄弱问句模式没填主题就标模式名 */
+					var topicLabel = (topic && topic.trim() !== "") ? topic.trim()
+						: (mode === "weak" ? "薄弱问句" : "");
+					sessionStorage.setItem(WB_KEY.pendingTopic, topicLabel);
+				} catch (error) { /* 隐身模式就算了 */ }
+				var workspace = ctx !== undefined && ctx !== null && typeof ctx.get === "function" ? ctx.get("uiWorkspace") : undefined;
+				if (workspace === undefined || workspace === null || typeof workspace.startSession !== "function") {
+					setSending("起不了会话：宿主没有 uiWorkspace");
+					return;
+				}
+				/* 客户分组（2026-09-26 定稿方向）：工作区概念砍掉，所有会话都在同一个
+				 * 大工作区；「客户」只是前端展示层的分组（自绘侧栏按客户渲染树）。
+				 * 这里保持无参 startSession —— 不按工作区起会话。 */
+				pendingPrompt = text;
+				/* 模型/思考强度随任务走（PromptRelay 消费）：都没选就什么都不写 = 用宿主默认。 */
+				try {
+					if (selModel !== "__default__" || selEffort !== "__default__") {
+						var mp = String(selModel).split("::");
+						var mProv = mp[0], mModel = mp[1];
+						if (selModel === "__default__") {
+							/* 模型没选、只调了思考：绑到宿主默认模型（agent-default-model） */
+							mProv = "deepseek-official"; mModel = "deepseek-flash";
+						}
+						sessionStorage.setItem(WB_KEY.modelPending, JSON.stringify({
+							provider: mProv,
+							model: mModel,
+							effort: selEffort !== "__default__" ? selEffort : "",
+						}));
+					}
+				} catch (error) { /* 隐身模式就算了，照常用默认模型 */ }
+				setSending("");
+				/* 直接造一个真实（普通）会话并打开 —— 不再走 startSession()：
+				 * 它现在落到「探索未至之境」向导页，那里没有我们的挂载点，
+				 * 提示词永远没人消费（2026-10-12 用户报障）。创建失败退回老路径。 */
+				var fallbackStart = function () {
+					try { workspace.startSession(); setCounts({}); } catch (error) {
+						pendingPrompt = null;
+						setSending("起会话失败：" + String(error && error.message ? error.message : error));
+					}
+				};
+				fetch(WB_API.sessionCreate, { method: "POST" })
+					.then(function (r) { return r.json(); })
+					.then(function (b) {
+						if (!b || b.ok !== true || !b.sessionId) { fallbackStart(); return; }
+						try {
+							workspace.openSession(b.sessionId);
+							setCounts({});   /* 任务开跑，装配台的加购清零（起会话失败则保留可重试） */
+							/* 会话页渲染是异步的：relay 挂载后 effect 自动消费；
+							 * 1.2s 后再敲一次事件兜底渲染竞态。 */
+							setTimeout(function () {
+								try { window.dispatchEvent(new Event("wb-prompt-set")); } catch (e) { /* 老浏览器就算了 */ }
+							}, 1200);
+						} catch (error) { fallbackStart(); }
+					})
+					.catch(fallbackStart);
 			}
 
 			/* A4：拖杆改工作区高度。指针捕获，鼠标移出窗口也不会卡住。 */
@@ -4039,65 +3405,21 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				: [];
 
 			/* 薄弱问句勾选：点行、拖行、勾方块、全选，都走这一个入口。 */
-			function weakTickItem(name) {
-				for (var ti = 0; ti < weakGaps.questions.length; ti++) {
-					var question = weakGaps.questions[ti];
-					if (question.question === name) return { qid: question.qid, question: question.question };
-				}
-				return { qid: "", question: name };
-			}
-			function weakPickedUpdate(names, on) {
-				weakSelectionTouched.current = true;
+			function weakPickSet(name, on) {
 				setWeakPicked(function (prev) {
-					var next = prev.slice();
-					for (var ni = 0; ni < names.length; ni++) {
-						var name = names[ni];
-						var at = next.indexOf(name);
-						if (on && at < 0) next.push(name);
-						if (!on && at >= 0) next.splice(at, 1);
-					}
-					return next;
+					var has = prev.indexOf(name) >= 0;
+					if (on && !has) return prev.concat([name]);
+					if (!on && has) return prev.filter(function (item) { return item !== name; });
+					return prev;
 				});
 			}
-			function weakPickSet(name, on, write) {
-				weakPickedUpdate([name], on);
-				if (write !== false && weakTicks && typeof weakTicks.put === "function") weakTicks.put(weakTickItem(name), on);
-			}
-			function weakBulkSet(names, on) {
-				var unique = [];
-				for (var i = 0; i < names.length; i++) if (unique.indexOf(names[i]) < 0) unique.push(names[i]);
-				weakPickedUpdate(unique, on);
-				if (weakTicks && typeof weakTicks.bulk === "function") weakTicks.bulk(unique.map(weakTickItem), on);
-			}
-			function weakPickItems(names, on) {
-				var unique = [];
-				for (var i = 0; i < names.length; i++) if (unique.indexOf(names[i]) < 0) unique.push(names[i]);
-				weakPickedUpdate(unique, on);
-				if (weakTicks && typeof weakTicks.bulk === "function") weakTicks.bulk(unique.map(weakTickItem), on);
-			}
-			var weakDragCommit = React.useRef(null);
-			weakDragCommit.current = weakPickItems;
 			var weakDragS = React.useState(false);
 			var weakDragging = weakDragS[0], setWeakDragging = weakDragS[1];
 			var weakDragTo = React.useRef(null);
-			var weakDragItems = React.useRef([]);
 			React.useEffect(function () {
-				function up() {
-					var names = weakDragItems.current.slice();
-					var on = weakDragTo.current;
-					weakDragItems.current = [];
-					weakDragTo.current = null;
-					setWeakDragging(false);
-					if (on !== null && names.length > 0 && typeof weakDragCommit.current === "function") weakDragCommit.current(names, on);
-				}
+				function up() { weakDragTo.current = null; setWeakDragging(false); }
 				document.addEventListener("mouseup", up);
-				document.addEventListener("pointerup", up);
-				document.addEventListener("pointercancel", up);
-				return function () {
-					document.removeEventListener("mouseup", up);
-					document.removeEventListener("pointerup", up);
-					document.removeEventListener("pointercancel", up);
-				};
+				return function () { document.removeEventListener("mouseup", up); };
 			}, []);
 			/* 按住往下拖 = 连着勾一串（原型同款）；按下 preventDefault 防止拖出选字。 */
 			function weakRowDown(name, e) {
@@ -4106,35 +3428,34 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				e.preventDefault();
 				var on = weakPicked.indexOf(name) < 0;
 				weakDragTo.current = on;
-				weakDragItems.current = [name];
-				weakPickSet(name, on, false);
+				weakPickSet(name, on);
 				setWeakDragging(true);
 				setChipOff(false);
 			}
 			function weakRowEnter(name) {
 				if (weakDragTo.current === null) return;
-				if (weakDragItems.current.indexOf(name) >= 0) return;
-				weakDragItems.current.push(name);
-				weakPickSet(name, weakDragTo.current, false);
+				weakPickSet(name, weakDragTo.current);
 			}
 			/* 「选前10」：一键选定当前排序下最薄的前 10 条；再点一次撤销这 10 条，防误触。 */
 			function pickTop10() {
-				var names = weakRows.slice(0, 10).map(function (row) { return row.question; });
-				var allIn = names.length > 0 && names.every(function (n) { return weakPicked.indexOf(n) >= 0; });
-				weakBulkSet(names, !allIn);
+				setWeakPicked(function (prev) {
+					var names = weakRows.slice(0, 10).map(function (row) { return row.question; });
+					var allIn = names.length > 0 && names.every(function (n) { return prev.indexOf(n) >= 0; });
+					if (allIn) return prev.filter(function (item) { return names.indexOf(item) < 0; });
+					return prev.concat(names.filter(function (n) { return prev.indexOf(n) < 0; }));
+				});
 				setChipOff(false);
 			}
 
 			/* 工作条：日期 · 平台多选 · 词根 · 勾差额前20 · 统计 · ⟳/⤢。放大时同一份搬进浮层。 */
 			var weakBar = h("span", { className: "wb_filters" },
-					mode !== "weak"
-						? h("span", { className: "wb_weakDate" }, "直接输入选题")
-						: [
-							h("span", { key: "meta", className: "wb_weakDate" },
-							weakGaps.status !== "ready" ? "最新采集 —"
-								: "采集 " + (collectedDay(weakGaps.collectedAt) || "日期未知")
-									+ (weakGaps.computedAt ? " · 计算 " + collectedDay(weakGaps.computedAt) : "")
-									+ " · " + String(weakGaps.questions.length) + " 条"),
+				mode !== "weak"
+					? h("span", { className: "wb_weakDate" }, "直接输入选题")
+					: [
+						h("span", { key: "meta", className: "wb_weakDate" },
+							(weakLine === null || !weakLine.collectedAt) ? "最新采集 —"
+								: "最新采集 " + collectedDay(weakLine.collectedAt)
+									+ (weakGaps.status === "ready" ? " · " + String(weakGaps.questions.length) + " 条" : "")),
 						h("span", { key: "plat", className: "wb_fsel" },
 							h("button", {
 								type: "button",
@@ -4181,7 +3502,6 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 								})) : null),
 						h("button", { key: "top", type: "button", className: "wb_miniBtn", title: "一键选定当前排序下最薄的前 10 条；再点一次撤销", onClick: pickTop10 }, "选前10"),
 						h("span", { key: "stat", className: "wb_weakStat" }, "显示 " + String(weakRows.length) + " 条 · 已选定 " + String(weakPicked.length) + " 条"),
-						weakTicks.error ? h("span", { key: "tick-error", className: "wb_tickError", title: weakTicks.detail || "" }, "同步未完成：" + weakErrorText(weakTicks.error, weakTicks.detail)) : null,
 						weakGaps.status === "ready" ? h("span", { key: "icons", className: "wb_weakIcons" },
 							h("button", {
 								type: "button", className: "wb_iconBtn", title: "重新取一次数据",
@@ -4215,10 +3535,9 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 						setSort: setSort,
 						weakPicked: weakPicked,
 						pickSet: weakPickSet,
-						bulkSet: weakBulkSet,
-						ticks: weakTicks.ticks,
 						rowDown: weakRowDown,
 						rowEnter: weakRowEnter,
+						setWeakPicked: setWeakPicked,
 						setChipOff: setChipOff,
 						dragging: weakDragging,
 					})
@@ -4255,18 +3574,6 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				+ (refCount === 0 ? "" : "，照着 " + refCount + " 篇仿写");
 
 			var refSummary = refCount === 0 ? "" : refCount + " 篇参考 · " + refStyle;
-
-			if (mobile) return h(MobileAssembly, {
-				clients: clients, clientName: clientName, lineName: lineName, periodName: periodName,
-				pick: pick, setPick: setPick, lines: lines, periods: periods, articles: articles,
-				onClient: onClient, onLine: onLine, mode: mode, setMode: setMode, topic: topic, setTopic: setTopic,
-				refTab: refTab, setRefTab: setRefTab, refs: refs, refText: refText, setRefText: setRefText,
-				refCount: refCount, refStyle: refStyle, setRefStyle: setRefStyle, skills: skills, picked: picked,
-				setPicked: setPicked, base: base, setBase: setBase, sending: sending, dispatch: dispatch,
-				weakGaps: weakGaps, weakPicked: weakPicked, weakRows: weakRows, pickSet: weakPickSet,
-				bulkSet: weakBulkSet, rowDown: weakRowDown, rowEnter: weakRowEnter,
-				selectedCount: weakPicked.length,
-			});
 
 			return h("div", { className: "wb_root" },
 				h("div", { className: "wb_asm" },
@@ -4360,7 +3667,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 								h("button", {
 									type: "button", className: "wb_refTab", "data-on": refTab === "skill" ? "1" : "0",
 									onClick: function (e) { e.stopPropagation(); setRefTab("skill"); setRefOpen(true); },
-								}, "用模板" + (picked.length === 0 ? "" : " " + picked.length))),
+								}, "用模板" + (pickedTotal() === 0 ? "" : " " + pickedTotal()))),
 							h("span", { className: "wb_refSum" }, refSummary)),
 						refOpen ? h("div", { className: "wb_refBd" },
 							refTab === "copy"
@@ -4410,10 +3717,10 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 											: skills.skills.length === 0
 												? h("div", { className: "wb_skEmpty" }, "技能服务是空的 —— 一个 skill 都没注册")
 										: (function () {
-											/* 技能三层（2026-09-23，配合 skill-remote 分层）：个人层 → 个人中间层 → 公共层，
+											/* 技能三层（2026-09-23，配合 skill-remote 分层）：个人层 → 中间层 → 公共层，
 											 没带层的归「其他」。顺序按使用频率排：自己的最常用，放最前。 */
 											var LAYER_ORDER = ["personal", "middle", "public"];
-											var LAYER_LABELS = { "personal": "个人层", "middle": "个人中间层", "public": "公共层" };
+											var LAYER_LABELS = { "personal": "个人层", "middle": "中间层", "public": "公共层" };
 											function normalizeLayer(raw) {
 												if (raw === "personal" || raw === "个人") return "personal";
 												if (raw === "middle" || raw === "_middle" || raw.indexOf("中") >= 0) return "middle";
@@ -4434,18 +3741,21 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 																(LAYER_LABELS[key] || "其他技能") + " · " + buckets[key].length + " 个"),
 															h("div", { style: { display: "flex", flexWrap: "wrap", gap: "6px" } },
 																buckets[key].map(function (skill) {
-																	var on = picked.indexOf(skill.name) >= 0;
+																	var n = counts[skill.name] || 0;
 																	return h("button", {
 																		type: "button", key: skill.name,
-																		className: "wb_chipBtn", "data-on": on ? "1" : "0",
-																		title: skill.description + (skill.whenToUse === "" ? "" : "\n" + skill.whenToUse),
-																		onClick: function () {
-																			setPicked(on
-																				? picked.filter(function (n) { return n !== skill.name; })
-																				: picked.concat([skill.name]));
+																		className: "wb_chipBtn", "data-on": n > 0 ? "1" : "0",
+																		title: skill.description + (skill.whenToUse === "" ? "" : "\n" + skill.whenToUse)
+																			+ "\n点一下加 1 篇；点角标减 1 篇。",
+																		onClick: function (e) {
+																			addOne(skill.name, e.currentTarget);
 																			setChipOff(false);
 																		},
-																	}, (on ? "✓ " : "") + skill.name);
+																	}, skillDisplay(skill.name),
+																		n > 0 ? h("span", {
+																			className: "wb_skBadge", title: "点一下减 1 篇",
+																			onClick: function (e) { e.stopPropagation(); minusOne(skill.name); },
+																		}, String(n)) : null);
 																})));
 													}));
 										}()))) : null),
@@ -4470,6 +3780,14 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 										type: "button", className: "wb_chipX", title: "去掉",
 										onClick: function () { setChipOff(true); },
 									}, "×")),
+								pickedTotal() > 0 ? h("span", { key: "sktags", className: "wb_skTags" },
+									pickedEntries().map(function (s) {
+										return h("button", {
+											type: "button", key: s.name, className: "wb_skTag",
+											title: "点一下减 1 篇",
+											onClick: function () { minusOne(s.name); },
+										}, skillDisplay(s.name), h("span", { className: "wb_skBadge" }, String(s.count)));
+									})) : null,
 								h("span", { key: "effort", className: "wb_fsel", style: { marginLeft: "auto" } },
 									h("button", {
 										type: "button", className: "wb_modelSel", "data-on": selEffort !== "__default__" ? "1" : "0",
@@ -4540,7 +3858,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 									h("span", { className: "wb_cVal" }, confirmHowText)),
 								h("div", { className: "wb_cRow" },
 									h("span", { className: "wb_cKey" }, "技能"),
-									h("span", { className: "wb_cVal" }, picked.length === 0 ? "（未选）" : picked.join("、"))),
+									h("span", { className: "wb_cVal" }, pickedLabel() === "" ? "（未选）" : pickedLabel())),
 								h("div", { className: "wb_cRow" },
 									h("span", { className: "wb_cKey" }, "模型"),
 									h("span", { className: "wb_cVal" },
@@ -4565,10 +3883,6 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 		/* ---- wiring ------------------------------------------------------- */
 		function apply(ctx, config) {
 			WbCtx = ctx;
-			if (ctx && typeof ctx.effect === "function") {
-				ctx.effect(wbInstallMobile, "dsh-workbench: mobile viewport");
-				ctx.effect(function () { return wbInstallSessionGuard(ctx); }, "dsh-workbench: personal new sessions");
-			}
 			/* 注意：**不要**在这里注册 locale。`sidebar` 命名空间是官方
 			 * dsh-client-ui-sidebar 的单一占用者，我们再去 register 会把
 			 * 官方侧边栏插件整个炸掉（"locale namespace sidebar already
@@ -4631,6 +3945,24 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			/* header 槽官方已占 priority 0 —— 显式用 -1（更低者渲染）遮蔽它，
 			 * 否则官方插件 apply 时撞车报错（9-23 实测）。 */
 			ctx.slots.inject("conversation.session.header", function () {
+				/* 会话页美化 tick：预填折叠卡 + 工具名映射（wbConvTick，幂等）。
+				 * window 单例：client.js 热重载会重跑 factory，不判重会叠出多个 timer。
+				 * 即时性：3s 轮询跟不上「发出去的一瞬间」——新预填先裸奔最长 3 秒。
+				 * 挂 MutationObserver 监听消息流，节点一变（80ms 内）立即折叠；
+				 * observer 观察整个 body（消息流容器可能随会话切换重建），tick 本身很轻。 */
+				if (!window.__wbConvTimer) {
+					window.__wbConvTimer = setInterval(wbConvTick, 3000);
+					setTimeout(wbConvTick, 400);
+					var wbTickQueued = 0;
+					var wbMo = new MutationObserver(function () {
+						if (wbTickQueued) return;
+						wbTickQueued = setTimeout(function () {
+							wbTickQueued = 0;
+							try { wbConvTick(); } catch (e) { /* tick 崩了不影响页面 */ }
+						}, 80);
+					});
+					wbMo.observe(document.body, { childList: true, subtree: true });
+				}
 				return ctx.slots.register({
 					name: "conversation.session.header",
 					id: "workbench-task-bar",
@@ -4671,13 +4003,6 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			ctx.slots.inject("conversation.input.dock", function () {
 				return ctx.slots.register({
 					name: "conversation.input.dock",
-					id: "workbench-mobile-quick",
-					order: 80,
-				}, MobileQuickPrompts);
-			});
-			ctx.slots.inject("conversation.input.dock", function () {
-				return ctx.slots.register({
-					name: "conversation.input.dock",
 					id: "workbench-pick-bar",
 					order: 85,
 				}, PickBar);
@@ -4708,15 +4033,8 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			}
 		}
 
-		exports.inject = ["slots", "layout", "sidebarRight", "sidebarRightTabs", "sessions", "uiWorkspace"];
+		exports.inject = ["slots", "layout", "sidebarRight", "sidebarRightTabs", "sessions"];
 		exports.apply = apply;
-		/* Small pure helpers are exported for the browser-package contract tests. */
-		exports.wbMapCaptureWordDir = mapCaptureWordDir;
-		exports.wbMapCaptureQuestions = mapCaptureQuestions;
-		exports.wbWeakPickedFromTicks = weakPickedFromTicks;
-		exports.wbWeakSelectionText = weakSelectionText;
-		exports.wbTickPutRequest = weakTickPutRequest;
-		exports.wbTickBulkRequest = weakTickBulkRequest;
 		return module.exports;
 	}
 });
