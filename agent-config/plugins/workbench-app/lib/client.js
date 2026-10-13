@@ -220,11 +220,11 @@ window.__ModuleLoader__.load({
 							}));
 			return h('div',{className:'wb_mAssembly'},h(MobileTopBar,{title:'新建任务'}),
 				h('div',{className:'wb_mForm'},
-					h('button',{type:'button',className:'wb_mContext',onClick:function(){sheet[1](true);}},h('span',{className:'wb_mAvatar'},(p.clientName||'客').slice(0,1)),h('span',{className:'wb_mGrow'},h('small',null,'写给'),h('b',null,contextText||(empty?'请选择客户':p.clients.status==='loading'?'客户加载中…':'请选择客户'))),wbIcon('next')),
+					h('button',{type:'button',className:'wb_mContext',disabled:!!window.dshUnified,onClick:function(){sheet[1](true);}},h('span',{className:'wb_mAvatar'},(p.clientName||'客').slice(0,1)),h('span',{className:'wb_mGrow'},h('small',null,'写给'),h('b',null,contextText||(empty?'请选择客户':p.clients.status==='loading'?'客户加载中…':'请选择客户'))),wbIcon('next')),
 					empty?h('div',{className:'wb_mEmpty'},h('b',null,'还没有分配给你的客户'),h('p',null,'联系管理员')):null,
 					p.clients.status==='error'?h('div',{className:'wb_mEmpty',role:'status'},'客户暂时无法加载，请稍后刷新重试'):null,
 					h('h3',null,'主题'),segment([['weak','薄弱问句'],['free','自己输入']],p.mode,p.setMode),
-					p.mode==='weak'?h('div',{className:'wb_mWeakWrap'},h('div',{className:'wb_mWeakStat'},'已选定 '+String(p.selectedCount||0)+' 条 · 共 '+String(weakQuestions.length)+' 条'),weakPanel,h('div',{className:'wb_mWeakSource'},'数据来源：Support · 薄弱问句（全局标准 v4，和 Support 页面数字一致）')):h('textarea',{className:'wb_mTopic',ref:topicRef,'aria-label':'主题',placeholder:'想写什么选题，直接打。',value:p.topic,onChange:function(e){p.setTopic(e.target.value);},rows:2}),
+					p.mode==='weak'?h('div',{className:'wb_mWeakWrap'},p.unified ? h('button',{type:'button',className:'wb_recommend',onClick:p.recommend},'选推荐的 3 条') : null,h('div',{className:'wb_mWeakStat'},'已选定 '+String(p.selectedCount||0)+' 条 · 共 '+String(weakQuestions.length)+' 条'),weakPanel,h('div',{className:'wb_mWeakSource'},'数据来源：Support · 薄弱问句（全局标准 v4，和 Support 页面数字一致）')):h('textarea',{className:'wb_mTopic',ref:topicRef,'aria-label':'主题',placeholder:'想写什么选题，直接打。',value:p.topic,onChange:function(e){p.setTopic(e.target.value);},rows:2}),
 					h('h3',null,'怎么写'),segment([['copy','仿写'+(p.refCount?' '+p.refCount:'')],['skill','用模板'+(p.pickedTotal?' '+p.pickedTotal:'')]],p.refTab,p.setRefTab),
 					p.refTab==='copy'?h(React.Fragment,null,
 						h('div',{className:'wb_mReferences'},p.refs.urls.map(function(url,i){return h('div',{className:'wb_mReference',key:i},h('span',{className:'wb_mRefIcon'},'↗'),h('span',{className:'wb_mGrow'},url),h('button',{type:'button',className:'wb_mIcon','aria-label':'删除参考链接',onClick:function(){p.setRefText(p.refs.urls.filter(function(_,j){return j!==i;}).concat(p.refs.body?[p.refs.body]:[]).join('\n'));}},wbIcon('close')));}),
@@ -1757,7 +1757,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			if (gap === null || gap === undefined) return "−";
 			if (gap === 0) return "−";
 			var shown = String(Math.round(Math.abs(gap) * 100) / 100);
-			return (gap > 0 ? "-" : "+") + shown + "%";
+			return (gap > 0 ? "-" : "+") + shown + (window.dshUnified ? "" : "%");
 		}
 		/* 差额 > 0 = 我们落后 → 红；< 0 = 我们领先 → 绿；0 / 没采集 → 浅灰 −。 */
 		function gapSign(gap) {
@@ -1957,9 +1957,9 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				var lb = document.createElement("span"); lb.className = "wb_ldrT";
 				ldr.appendChild(sp); ldr.appendChild(lb);
 				var phrases = ["正在查资料", "正在做选题", "正在搭文章骨架", "正在码字", "正在核对事实", "正在打磨标题"];
-				var pi = Math.floor(Math.random() * phrases.length);
+				var pi = window.dshUnified ? 3 : Math.floor(Math.random() * phrases.length);
 				wbConvText(lb, "Agent " + phrases[pi]);
-				ldr._wbLi = setInterval(function () {
+				if (!window.dshUnified) ldr._wbLi = setInterval(function () {
 					if (!ldr.isConnected) { clearInterval(ldr._wbLi); return; }
 					update(function () {
 						pi = (pi + 1) % phrases.length;
@@ -1968,6 +1968,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				}, 2200);
 				root.appendChild(ldr);
 			} else if (!running && ldr) { wbRemoveLoader(ldr); ldr = null; }
+			if(window.dshUnified && ldr){clearInterval(ldr._wbLi);wbConvText(ldr.querySelector(".wb_ldrT"), "Agent 正在码字");}
 			/* Preserve the raw tools in the injected prompt, including split tails. */
 			var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false), tn;
 			while ((tn = walker.nextNode())) {
@@ -2673,13 +2674,19 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			 * 已入库段落绿底锁定 / 正文渲染 / 底部 hint+确认(勾选数)+全部确认。
 			 * 客户来源：openTab params 优先，否则从当前会话解析。 */
 			function ReviewTabBody(props) {
-				var mobile = useWbMobile();
+				var mobile = useWbMobile() && !props.unifiedPanel;
 				var sessionId = props.sessionId;
 				var useChat = props.useChat;
 				var initialBinding = sessionId && wbNavState.bindings ? wbNavState.bindings[sessionId] : null;
 				var st = React.useState({ client: "", client_key: initialBinding && initialBinding.client_key || "", drafts: null, sel: "", body: "", msg: "", done: {}, editing: false, editText: "", saving: false });
 				var client = st[0].client, clientKey = st[0].client_key, drafts = st[0].drafts, sel = st[0].sel, bodyText = st[0].body, msg = st[0].msg, doneMap = st[0].done;
 				var setL = st[1];
+				React.useEffect(function () {
+					if (!props.unifiedPanel || !window.dshUnified) return;
+					var guard = function () { return !st[0].editing && !st[0].saving && !st[0].confirming; };
+					window.dshUnified.reviewCanLeave = guard;
+					return function () { if (window.dshUnified.reviewCanLeave === guard) delete window.dshUnified.reviewCanLeave; };
+				}, [props.unifiedPanel, st[0].editing, st[0].saving, st[0].confirming]);
 				useWbPickTick();   // 勾选集合在输入框挑篇条里维护 —— 订阅它，选中变化时这里跟着重渲
 				var checked = WB_PICK.sel;
 				var checkedCount = drafts === null ? 0 : drafts.filter(function (d) {
@@ -2695,7 +2702,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					clientKeyFromParams = navParams ? (navParams.client_key || null) : null;
 				} catch (e) { }
 				var chatSnap = null;
-				if (!clientFromParams && typeof useChat === "function" && sessionId) {
+				if ((!clientFromParams || props.unifiedPanel) && typeof useChat === "function" && sessionId) {
 					chatSnap = useChat(function (s) { return s; });
 				}
 				var metaId = "";
@@ -3026,7 +3033,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 								var nextD = {};
 								Object.keys(p.done).forEach(function (k) { if (titles[k]) nextD[k] = true; });
 								/* 已入库的（同名出现在正式库）直接标绿 —— 刷新后状态不丢 */
-								(b.library || []).forEach(function (lt) { if (titles[lt] && writeTitles[lt] === true) nextD[lt] = true; });
+								(b.library || []).forEach(function (lt) { if (!props.unifiedPanel && titles[lt] && writeTitles[lt] === true) nextD[lt] = true; });
 								Object.keys(WB_PICK.sel).forEach(function (k) { if (!titles[k]) delete WB_PICK.sel[k]; });
 								WB_PICK.client = client; WB_PICK.drafts = scope; WB_PICK.done = nextD;
 								wbPickEmit();
@@ -3036,6 +3043,10 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 						.catch(function () { });
 					return function () { alive = false; };
 				}, [client, at, writeCount, rvTick]);   /* at / writeCount / 手动刷新 回来要重拉重过滤 */
+
+				React.useEffect(function () {
+					if (props.unifiedPanel && drafts && drafts.length && !sel) openDraft(drafts[0].title);
+				}, [props.unifiedPanel, drafts, sel]);
 
 				/* 检查结果持久化恢复：本组件 state 归属正确，客户一定就从 sessionStorage 捞 */
 				React.useEffect(function () {
@@ -3090,17 +3101,17 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				}
 				function openDraft(title) {
 					WB_PICK.view = title; wbPickEmit();   // 联动：消息流 chips 高亮正在看的篇
-					setL(function (p) { return Object.assign({}, p, { sel: title, body: "加载中…", editing: false, editText: "" }); });
+					setL(function (p) { return Object.assign({}, p, { sel: title, body: "加载中…", editing: false, editText: "", readError: false }); });
 					fetch(WB_API.draft + "?client=" + encodeURIComponent(client) + "&title=" + encodeURIComponent(title), { headers: { accept: "text/markdown" } })
-						.then(function (r) { return r.text(); })
+						.then(function (r) { if(props.unifiedPanel && !r.ok) throw new Error("草稿读取失败，请重试"); return r.text(); })
 						.then(function (text) {
-							setL(function (p) { return Object.assign({}, p, { body: text }); });
+							setL(function (p) { return props.unifiedPanel && p.sel !== title ? p : Object.assign({}, p, { body: text, readError: false }); });
 							setTimeout(function () {
 								hcMarkInBody(title, hc);
 								if (WB_HC_JUMP) { hcScrollTo(WB_HC_JUMP.word, WB_HC_JUMP.para); WB_HC_JUMP = null; }
 							}, 80);
 						})
-						.catch(function (e) { setL(function (p) { return Object.assign({}, p, { body: "读取失败：" + String(e) }); }); });
+						.catch(function (e) { setL(function (p) { return props.unifiedPanel && p.sel !== title ? p : Object.assign({}, p, { body: "读取失败：" + String(e), readError: true }); }); });
 				}
 				/* 审校面板里直接改草稿（Markdown 源码）。保存走 PUT /api/workbench/draft，
 				 * 只写草稿区、不碰正式库；按用户口径「手改的不重跑检查」。 */
@@ -3119,7 +3130,8 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 								setL(function (p) { return Object.assign({}, p, { saving: false, msg: "保存失败：" + ((b && (b.detail || b.error)) || "未知错误") }); });
 								return;
 							}
-							setL(function (p) { return Object.assign({}, p, { saving: false, editing: false, editText: "", body: text }); });
+							if(props.unifiedPanel){ try {sessionStorage.removeItem("wb_hc_"+client);}catch(e){} WB_PICK.hc=null;wbPickEmit(); }
+							setL(function (p) { return Object.assign({}, p, { saving: false, editing: false, editText: "", body: text, ...(props.unifiedPanel ? {hc:null, msg:"正文已改 · 未检查"} : {}) }); });
 						})
 						.catch(function (e) {
 							setL(function (p) { return Object.assign({}, p, { saving: false, msg: "保存失败：" + String(e) }); });
@@ -3161,7 +3173,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 						.then(function (r) { return r.json().then(function (b) { return { code: r.status, body: b }; }); })
 						.then(function (res) {
 							var ok = res.body && res.body.ok === true;
-							if (ok || res.code === 409) setL(function (p) {
+							if (ok || (res.code === 409 && !props.unifiedPanel)) setL(function (p) {
 								var nextD = Object.assign({}, p.done); nextD[title] = true;
 								delete WB_PICK.sel[title];
 								WB_PICK.done = nextD;
@@ -3169,13 +3181,15 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 							});
 							wbPickEmit();
 							if (ok) return { state: "ok" };
-							if (res.code === 409) return { state: "skip" };
+							if (res.code === 409) return props.unifiedPanel ? { state: "fail", why: "正式库已有同名文章，入库结果待核对" } : { state: "skip" };
 							/* 失败要带真实原因 —— 不许再让所有失败都顶「重名」的帽子（2026-10-10） */
 							var why = res.body && (res.body.detail || res.body.error) ? String(res.body.detail || res.body.error) : "HTTP " + res.code;
 							return { state: "fail", why: why };
 						});
 				}
 				function confirmTargets(targets, label) {
+					if (props.unifiedPanel && (st[0].editing || st[0].saving || st[0].confirming)) return;
+					if (props.unifiedPanel) setL(function (p) {return Object.assign({},p,{confirming:true});});
 					var idx2 = 0, okN = 0, skipN = 0, failN = 0, failWhy = "";
 					setL(function (p) { return Object.assign({}, p, { msg: (label || "入库") + "中 0/" + targets.length + " …" }) });
 					function next() {
@@ -3183,7 +3197,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 							var m = "已入库 ✓ " + okN + " 篇";
 							if (skipN > 0) m += "，跳过 " + skipN + " 篇（正式库已有同名）";
 							if (failN > 0) m += "，失败 " + failN + " 篇" + (failWhy !== "" ? "（" + failWhy + "）" : "");
-							setL(function (p) { return Object.assign({}, p, { msg: m }) });
+							setL(function (p) { return Object.assign({}, p, { msg: m, confirming: false }) });
 							return;
 						}
 						confirmOne(targets[idx2]).then(function (r3) {
@@ -3217,9 +3231,10 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				if (!client) return h("div", { className: "wb_rvEmpty" }, "没有正在进行的任务 —— 从装配台发起后，这里会自动打开");
 				var toggleRv = function () { setL(function (p) { return Object.assign({}, p, { rvOpen: !rvOpen }); }); };
 				return h("div", { className: "wb_rv" },
+					props.unifiedPanel ? h("div", {className:"wb_reviewScope"}, "当前会话归属：" + (client || "读取中…")) : null,
 					h("div", { className: "wb_rvHead", onClick: toggleRv, title: rvOpen ? "收起检查详情" : "展开检查详情" },
 						h("span", { className: "wb_rvDot" + (doneCount === n && n > 0 ? " is-ok" : "") }, "●"),
-						h("span", { className: "wb_rvState" }, doneCount === n && n > 0 ? "已检查" : "未检查"),
+						h("span", { className: "wb_rvState" }, props.unifiedPanel ? (hc !== null ? "已检查" : "未检查") : (doneCount === n && n > 0 ? "已检查" : "未检查")),
 						h("span", { className: "wb_rvSel" }, "草稿审核"),
 						h("button", {
 							type: "button", className: "wb_rvCheck", disabled: checking || drafts === null || drafts.length === 0,
@@ -3267,11 +3282,12 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 												}, "取消"))
 											: h("button", {
 												type: "button", className: "wb_editBtn",
+												disabled: !!(props.unifiedPanel && doneMap[sel]),
 												title: "直接改这篇的 Markdown 源码，保存写回草稿文件（不重跑检查）",
 												onClick: function () {
 													setL(function (p) { return Object.assign({}, p, { editing: true, editText: p.body || "", msg: "" }); });
 												},
-											}, "编辑"))
+											}, doneMap[sel] && props.unifiedPanel ? "已入库 · 只读" : "编辑"))
 									: null,
 								st[0].editing === true
 									? h("textarea", {
@@ -3301,7 +3317,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					n > 0
 						? h("div", { className: "wb_rvFoot" },
 							h("button", {
-								type: "button", className: "wb_rvConfirm", disabled: checkedCount === 0 && sel === "",
+								type: "button", className: "wb_rvConfirm", disabled: props.unifiedPanel ? (st[0].editing || st[0].saving || st[0].confirming || st[0].readError || bodyText === "加载中…" || !sel || doneMap[sel] === true) : checkedCount === 0 && sel === "",
 								onClick: function () {
 									var targets = pending.filter(function (d) { return WB_PICK.sel[d.title] === true; }).map(function (d) { return d.title; });
 									if (targets.length === 0 && sel !== "") targets = [sel];
@@ -3309,7 +3325,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 								},
 							}, checkedCount > 0 ? "确认入库（" + checkedCount + " 篇）" : "确认入库"),
 							h("button", {
-								type: "button", className: "wb_rvConfirmAll", disabled: pending.length === 0,
+								type: "button", className: "wb_rvConfirmAll", disabled: pending.length === 0 || (props.unifiedPanel && (st[0].editing || st[0].saving || st[0].confirming)),
 								onClick: function () { confirmTargets(pending.map(function (d) { return d.title; }), "批量入库"); },
 							}, "全部确认"))
 						: null);
@@ -3337,7 +3353,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			/* 在正文容器里给命中词标红（mark.wbHcMk），先清旧标再标新的 */
 			function hcMarkInBody(title, hcArr) {
 				try {
-					var host = document.querySelector(".wb_rvMd");
+					var host = (unifiedReview || document).querySelector(".wb_rvMd");
 					if (!host) return;
 					host.querySelectorAll("mark.wbHcMk").forEach(function (m) {
 						var p = m.parentNode;
@@ -3374,7 +3390,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			}
 			function hcScrollTo(word, para) {
 				try {
-					var host = document.querySelector(".wb_rvMd");
+					var host = (unifiedReview || document).querySelector(".wb_rvMd");
 					if (!host) return;
 					/* 段号优先：块级 data-seq 与执行器段号同口径，结构类问题没有命中词也能跳 */
 					if (para && para > 0) {
@@ -3435,6 +3451,18 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			}
 
 			function TaskBar(props) {
+				var reviewPropsRef = React.useRef(props);
+				reviewPropsRef.current = props;
+				if (window.dshUnified) window.dshUnified.reviewProps = props;
+				React.useEffect(function () {
+					function connectReview() {
+						if (!window.dshUnified) return;
+						window.dshUnified.reviewProps = reviewPropsRef.current;
+						window.dispatchEvent(new Event("dsh:review-target"));
+					}
+					connectReview(); window.addEventListener("dsh:unified-ready", connectReview);
+					return function () { window.removeEventListener("dsh:unified-ready", connectReview); };
+				}, [props.sessionId]);
 				var sessionId = props.sessionId;
 				var useSessions = props.useSessions;
 				var useChat = props.useChat;
@@ -3560,7 +3588,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 							 * （sidebarRight: no session surface is mounted）。
 							 * 先弹成功、后记号 —— 失败不占位，下一条会话消息再重试；
 							 * 以前先记号，agent 写第一篇时弹失败一次就永远不弹了。 */
-							ctrl.openTab("wb-review", { params: { client: meta.client, meta: metaId } });
+							window.dshUnified ? window.dispatchEvent(new Event("dsh:review-available")) : ctrl.openTab("wb-review", { params: { client: meta.client, meta: metaId } });
 							autoRef.current = metaId;
 						}
 						catch (e) { console.warn("[dsh-workbench] 打开审核侧栏失败（下条消息重试）：", String(e)); }
@@ -3691,7 +3719,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 							type: "button", className: "wb_mini wb_reviewOpen", title: "在右侧打开「文章审核」并刷新草稿列表",
 							onClick: function () {
 								var ctrl = WbCtx && WbCtx.sidebarRight;
-								try { if (ctrl && typeof ctrl.openTab === "function") ctrl.openTab("wb-review", { params: { client: meta.client, meta: metaId } }); }
+								try { if (ctrl && typeof ctrl.openTab === "function") window.dshUnified ? window.dispatchEvent(new Event("dsh:open-review")) : ctrl.openTab("wb-review", { params: { client: meta.client, meta: metaId } }); }
 								catch (e) { console.warn("[dsh-workbench] 打开审核侧栏失败：", String(e)); }
 								setTimeout(function () { window.dispatchEvent(new CustomEvent("wb:review-refresh")); }, 50);
 							},
@@ -3860,7 +3888,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 							args.setChipOff(false);
 						},
 					})),
-				h("th", { key: "th-root" }, "词根"),
+				h("th", { key: "th-root" }, window.dshUnified ? "主题分类" : "词根"),
 				h("th", { key: "th-q" }, "问句"),
 				weakHead("综合", "summary", args.sort, args.setSort),
 				shownPlatforms.map(function (name) {
@@ -3912,10 +3940,58 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			}
 
 			return h("div", null,
-				h("div", { className: "wb_source" }, "数据来源：Support · 薄弱问句（全局标准 v4，和 Support 页面数字一致）"),
+				h("div", { className: "wb_source" }, window.dshUnified ? "我方 − 领先竞品 / 个百分点 · 按住行拖扫，连续勾选" : "数据来源：Support · 薄弱问句（全局标准 v4，和 Support 页面数字一致）"),
 				h("table", { className: "wb_tbl wb_tblGap", "data-drag": args.dragging ? "1" : "0" },
 					h("thead", null, head),
 					h("tbody", null, body)));
+		}
+
+		function useUnifiedContext() {
+			var state = React.useState(window.dshUnified ? window.dshUnified.store.state : null);
+			React.useEffect(function () {
+				var off = null;
+				function connect() {
+					if (off) off();
+					if (window.dshUnified) off = window.dshUnified.store.subscribe(state[1]);
+				}
+				connect(); window.addEventListener("dsh:unified-ready", connect);
+				return function () { if (off) off(); window.removeEventListener("dsh:unified-ready", connect); };
+			}, []);
+			return state[0];
+		}
+
+		// Phase 1 bridge only exists after the opt-in /app bootstrap. It shares the
+		// host renderer; the shell never moves or remounts the conversation tree.
+		var unifiedReview = null;
+		function installUnifiedBridge(ctx) {
+			function connect() {
+				if (!window.dshUnified) return;
+				window.dshWorkbenchBridge = {
+					React: React, ReactDOM: require("react-dom"),
+					ReactDOMClient: require("react-dom/client"), jsxRuntime: require("react/jsx-runtime"),
+					css: CSS,
+					mountReview: function (node) {
+						unifiedReview = node;
+						window.dispatchEvent(new Event("dsh:review-target"));
+						return function () { if (unifiedReview === node) { unifiedReview = null; window.dispatchEvent(new Event("dsh:review-target")); } };
+					},
+					newTask: function () { ctx.get("layout").selectPanel(WORKBENCH_KEY); },
+				};
+				window.dispatchEvent(new Event("dsh:workbench-ready"));
+			}
+			connect(); window.addEventListener("dsh:unified-ready", connect);
+			return function () { window.removeEventListener("dsh:unified-ready", connect); unifiedReview = null; delete window.dshWorkbenchBridge; };
+		}
+		function UnifiedReviewPortal() {
+			var tick = React.useState(0);
+			React.useEffect(function () {
+				var update = function () { tick[1](function (v) { return v + 1; }); };
+				window.addEventListener("dsh:review-target", update);
+				return function () { window.removeEventListener("dsh:review-target", update); };
+			}, []);
+			if (!unifiedReview) return null;
+			var props = window.dshUnified && window.dshUnified.reviewProps;
+			return createPortal(props ? h(ReviewTabBody, Object.assign({}, props, {unifiedPanel: true, key: props.sessionId})) : h("p", {role:"status"}, "打开正在写作的会话后，可在这里审核本轮草稿。"), unifiedReview);
 		}
 
 		function WorkbenchPage(props) {
@@ -3929,7 +4005,10 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			var modeS = React.useState("weak");
 			var mode = modeS[0], setMode = modeS[1];
 			var pickS = React.useState({ key: "", line: "", period: "" });
-			var pick = pickS[0], setPick = pickS[1];
+			var unified = useUnifiedContext();
+			var selected = unified && unified.status === "ready" ? unified.selection : null;
+			var pick = unified ? { key: selected ? selected.clientKey : "", line: selected ? selected.businessLineId : "", period: selected ? selected.servicePeriodId : "" } : pickS[0];
+			var setPick = unified ? function () {} : pickS[1];
 			var topicS = React.useState("");
 			var topic = topicS[0], setTopic = topicS[1];
 			var baseS = React.useState("");
@@ -4146,9 +4225,13 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				}
 			}
 			var weakClientKey = weakEntry === null ? "" : String(weakEntry.clientKey || weakEntry.id || "");
-			var weakClientId = (weakLine === null || weakLine === weakEntry) ? "" : String(weakLine.id || "");
+			var weakClientId = unified ? (selected ? selected.enterpriseId : "") : ((weakLine === null || weakLine === weakEntry) ? "" : String(weakLine.id || ""));
+			if (unified) {
+				weakClientKey = selected ? selected.clientKey : "";
+				weakLine = selected && selected.enterpriseId ? { id: selected.enterpriseId } : null;
+			}
 			var weakEnabled = mode === "weak" && weakClientKey !== "" && weakEntry !== null && weakEntry.inWindow !== false
-				&& (weakLines.length === 0 || weakLine !== null);
+				&& (unified ? !!weakClientId : (weakLines.length === 0 || weakLine !== null));
 			var weakGaps = useWeakGaps(weakClientKey, weakClientId, weakEnabled);
 			var weakTicks = useWeakTicks(weakClientKey, weakClientId, weakEnabled);
 			var weakSelectionTouched = React.useRef(false);
@@ -4486,15 +4569,41 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				weakPickSet(name, weakDragTo.current, false);
 			}
 			/* 「选前10」：一键选定当前排序下最薄的前 10 条；再点一次撤销这 10 条，防误触。 */
-			function pickTop10() {
-				var names = weakRows.slice(0, 10).map(function (row) { return row.question; });
+			function pickRecommended(scope) {
+				var source = unified && Array.isArray(scope) ? weakRows.filter(function(r){return scope.indexOf(r.question) >= 0;}) : weakRows;
+				var names = source.filter(function (r) { return r.summary && r.summary.weakCount > 0; }).slice(0,3).map(function(r){return r.question;});
+				weakBulkSet(names, true); setChipOff(false);
+				if (unified && pickedTotal() === 0 && names.length) { var defaults = (skills.skills || []).filter(function(s){return s.name === "sora-selection";}); if(defaults.length) { var nextCounts={}; nextCounts[defaults[0].name]=names.length; setCounts(nextCounts); } }
+			}
+			function pickTop10(scope) {
+				var source = unified && Array.isArray(scope) ? weakRows.filter(function(r){return scope.indexOf(r.question) >= 0;}) : weakRows;
+				var names = source.slice(0, 10).map(function (row) { return row.question; });
 				var allIn = names.length > 0 && names.every(function (n) { return weakPicked.indexOf(n) >= 0; });
 				weakBulkSet(names, !allIn);
 				setChipOff(false);
 			}
 
+			if (window.dshUnified) window.dshUnified.assembly = {
+				status: weakGaps.status, error: weakGaps.detail || weakGaps.error,
+				rows: weakRows, picked: weakPicked, clientName: clientName,
+				recommend: pickRecommended, top10: pickTop10, pick: weakPickSet, bulk: weakBulkSet,
+				rowDown: weakRowDown, rowEnter: weakRowEnter, dispatch: dispatch,
+				sending: sending, types: pickedLabel(),
+			};
+			React.useEffect(function () {
+				if (!window.dshUnified) return;
+				window.dispatchEvent(new Event("dsh:assembly-update"));
+			}, [weakGaps.status, weakRows, weakPicked, sending]);
+			React.useEffect(function () {
+				if (!window.dshUnified) return;
+				window.dshUnified.assemblyActive = true;
+				window.dispatchEvent(new Event("dsh:assembly-update"));
+				return function () { window.dshUnified.assemblyActive = false; window.dispatchEvent(new Event("dsh:assembly-update")); };
+			}, [!!unified]);
+
 			/* 工作条：日期 · 平台多选 · 词根 · 勾差额前20 · 统计 · ⟳/⤢。放大时同一份搬进浮层。 */
 			var weakBar = h("span", { className: "wb_filters" },
+					unified ? h("button", {type:"button", className:"wb_recommend", onClick:pickRecommended}, "选推荐的 3 条") : null,
 					mode !== "weak"
 						? h("span", { className: "wb_weakDate" }, "直接输入选题")
 						: [
@@ -4529,7 +4638,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 								onClick: function () { setRootOpen(!rootOpen); },
 							}, rootSel.length === 0 ? "全部词根"
 								: rootSel.length === 1 ? rootSel[0]
-									: "词根 " + rootSel.length + "/" + weakRoots.length),
+									: (unified ? "主题分类 " : "词根 ") + rootSel.length + "/" + weakRoots.length),
 							rootOpen ? h("div", { key: "shield", className: "wb_platShield", onMouseDown: function () { setRootOpen(false); } }) : null,
 							rootOpen ? h("div", { key: "menu", className: "wb_platMenu" },
 								h("button", {
@@ -4632,7 +4741,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				refCount: refCount, refStyle: refStyle, setRefStyle: setRefStyle, skills: skills, counts: counts, pickedEntries: pickedEntries(), pickedTotal: pickedTotal(),
 				addOne: addOne, minusOne: minusOne, base: base, setBase: setBase, sending: sending, dispatch: dispatch,
 				weakGaps: weakGaps, weakPicked: weakPicked, weakRows: weakRows, pickSet: weakPickSet,
-				bulkSet: weakBulkSet, rowDown: weakRowDown, rowEnter: weakRowEnter,
+				bulkSet: weakBulkSet, rowDown: weakRowDown, rowEnter: weakRowEnter, unified: !!unified, recommend: pickRecommended,
 				selectedCount: weakPicked.length,
 			});
 
@@ -4640,7 +4749,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				h("div", { className: "wb_asm" },
 
 					/* ---- A1 给谁写 ---- */
-					h("div", { className: "wb_head" },
+					h("div", { className: "wb_head", hidden: !!unified },
 						h("span", { className: "wb_headT" }, "给"),
 						h("span", { className: "wb_sel wb_lv1" },
 							h("select", {
@@ -4893,8 +5002,8 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 									type: "button", className: "wb_go",
 									disabled: clientName === "" || sending !== "",
 									title: "发送",
-									onClick: function () { setConfirmOpen(true); },
-								}, "↑"))),
+									onClick: function () { if (unified) dispatch(); else setConfirmOpen(true); },
+								}, unified ? (mode === "weak" ? "写这 " + weakPicked.length + " 条问句" : "开始写作") : "↑"))),
 						sending === "" ? null : h("div", { className: "wb_emptyS wb_bad" }, sending))),
 
 					/* ---- 发送前确认卡：一道闸管住选错客户/问句/技能/材料 ---- */
@@ -4946,6 +5055,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			WbCtx = ctx;
 			if (ctx && typeof ctx.effect === "function") {
 				ctx.effect(wbInstallMobile, "dsh-workbench: mobile viewport");
+				ctx.effect(function () { return installUnifiedBridge(ctx); }, "dsh-workbench: opt-in shell bridge");
 				ctx.effect(function () { return wbInstallSessionGuard(ctx); }, "dsh-workbench: personal new sessions");
 				ctx.effect(wbInstallConversation, "dsh-workbench: conversation decorations");
 			}
@@ -4998,7 +5108,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				return ctx.slots.register({
 					name: "sidebar.right.pane.tab",
 					key: "workbench-article-review",
-				}, ReviewTabBody);
+				}, function(props) { var shell = useUnifiedContext(); return shell ? null : h(ReviewTabBody, props); });
 			});
 			ctx.slots.inject("sidebar.right.pane.tab.title", function () {
 				return ctx.slots.register({
@@ -5072,6 +5182,8 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				});
 			});
 
+			ctx.slots.inject("shell.overlay", function () { return ctx.slots.register({name:"shell.overlay", id:"unified-review-portal", order:6}, UnifiedReviewPortal); });
+
 			/* 进来就落在装配台。布局自己的初始选择在我们后面才落定，所以延后。 */
 			var defaultPanel = (config !== null && typeof config === "object"
 				&& typeof config.defaultPanel === "string") ? config.defaultPanel : WORKBENCH_KEY;
@@ -5091,6 +5203,8 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 		exports.inject = ["slots", "layout", "sidebarRight", "sidebarRightTabs", "sessions", "uiWorkspace"];
 		exports.apply = apply;
 		/* Small pure helpers are exported for the browser-package contract tests. */
+		exports.wbUseUnifiedContext = useUnifiedContext;
+		exports.UnifiedReviewPortal = UnifiedReviewPortal;
 		exports.wbMapCaptureWordDir = mapCaptureWordDir;
 		exports.wbMapCaptureQuestions = mapCaptureQuestions;
 		exports.wbWeakPickedFromTicks = weakPickedFromTicks;
