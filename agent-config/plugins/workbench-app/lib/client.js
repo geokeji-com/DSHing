@@ -51,8 +51,12 @@ window.__ModuleLoader__.load({
 			if (record && record.confirmed > 0) return { tone: 'green', label: '已入库 ' + record.confirmed + ' 篇' };
 			return { tone: 'grey', label: record && record.running === false ? '已停止' : '状态未同步' };
 		}
-		function wbSessionTitle(rec, summary) {
-			return (summary && !summary.blank && summary.displayTitle) || (rec && rec.topic) || '未命名会话';
+		function wbSessionTitle(rec, summary, meta) {
+			var title = summary && !summary.blank && summary.displayTitle;
+			if (title && !String(title).trim().startsWith('【装配台预填')) return title;
+			var topic = String((rec && rec.topic) || '').trim() || String((meta && meta.topic) || '').trim();
+			var client = String((rec && rec.client) || '').trim() || String((meta && meta.client) || '').trim();
+			return topic || (client ? client + ' · 写作会话' : '未命名会话');
 		}
 		function wbClampTitle(text) {
 			return Array.from(String(text || '')).slice(0, 40).join('');
@@ -123,7 +127,7 @@ window.__ModuleLoader__.load({
 				catch (e) { /* wbNavRename keeps the row error across search/filter changes. */ }
 				finally { busy[1](false); }
 			}
-			var label = (it.at && it.at.length >= 10 ? it.at.slice(5, 10) + ' · ' : '') + it.title;
+			var label = (it.at && it.at.length >= 10 ? collectedDay(it.at).slice(5, 10) + ' · ' : '') + it.title;
 			return h('div', null,
 				edit[0] ? h('input', {className:'wb_nvRename', 'aria-label':'会话名称', value:draft[0], maxLength:40, autoFocus:true,
 					onFocus:function(e){e.target.select();}, onChange:function(e){draft[1](wbClampTitle(e.target.value));},
@@ -338,7 +342,7 @@ window.__ModuleLoader__.load({
 				h('aside',{className:'wb_mDrawer',ref:ref,tabIndex:-1,role:'dialog','aria-modal':true,'aria-label':'会话列表',onTouchStart:function(e){start.current=e.touches[0].clientX;},onTouchEnd:function(e){if(start.current-e.changedTouches[0].clientX>70)p.close();}},
 					h('div',{className:'wb_mDrawerHead'},h('b',null,'生文 Agent'),h('button',{type:'button',className:'wb_mIcon','aria-label':'关闭会话抽屉',onClick:p.close},wbIcon('close'))),
 					h('div',{className:'wb_mDrawerTools'},h('button',{type:'button',className:'wb_mPrimary',onClick:p.compose},wbIcon('plus'),'新建任务'),h('label',{className:'wb_mSearch'},wbIcon('search'),h('input',{type:'search','aria-label':'搜索会话',placeholder:'搜索会话',value:wbNavState.q,onChange:function(e){wbNavState.q=e.target.value;wbNavEmit();}}))),
-					h('div',{className:'wb_mTree'},p.names.map(function(name){var open=wbNavState.open[name]!==false;return h('section',{key:name},h('button',{type:'button',className:'wb_mGroup','aria-expanded':open,onClick:function(){wbNavState.open[name]=!open;wbNavEmit();}},h('span',{className:'wb_mAvatar'},name.slice(0,1)),h('b',null,name),h('small',null,p.groups[name].length),wbIcon(open?'down':'next')),open?p.groups[name].map(function(it){var status=wbSessionStatus(wbNavState.statuses&&wbNavState.statuses[it.id]);return h('button',{key:it.id,type:'button',className:'wb_mSession','aria-current':it.id===wbNavState.current,onClick:function(){p.openSession(it.id);}},h('span',{className:'wb_mStatus','data-tone':status.tone}),h('span',{className:'wb_mGrow'},h('b',null,it.title),h('small',null,[it.at?it.at.slice(5,10).replace('-','月')+'日':'',status.label].filter(Boolean).join(' · '))));}):null);}),p.names.length===0?h('p',{className:'wb_mEmpty'},wbNavState.q?'没有匹配的会话':'还没有会话，点上方新建任务'):null),
+					h('div',{className:'wb_mTree'},p.names.map(function(name){var open=wbNavState.open[name]!==false;return h('section',{key:name},h('button',{type:'button',className:'wb_mGroup','aria-expanded':open,onClick:function(){wbNavState.open[name]=!open;wbNavEmit();}},h('span',{className:'wb_mAvatar'},name.slice(0,1)),h('b',null,name),h('small',null,p.groups[name].length),wbIcon(open?'down':'next')),open?p.groups[name].map(function(it){var status=wbSessionStatus(wbNavState.statuses&&wbNavState.statuses[it.id]);return h('button',{key:it.id,type:'button',className:'wb_mSession','aria-current':it.id===wbNavState.current,onClick:function(){p.openSession(it.id);}},h('span',{className:'wb_mStatus','data-tone':status.tone}),h('span',{className:'wb_mGrow'},h('b',null,it.title),h('small',null,[it.at?collectedDay(it.at).slice(5,10).replace('-','月')+'日':'',status.label].filter(Boolean).join(' · '))));}):null);}),p.names.length===0?h('p',{className:'wb_mEmpty'},wbNavState.q?'没有匹配的会话':'还没有会话，点上方新建任务'):null),
 					h('div',{className:'wb_mAccount'},h('span',{className:'wb_mAvatar'},p.me.label.slice(0,1)),h('div',null,h('b',null,p.me.label),p.me.sub?h('small',null,p.me.sub):null)))),document.body);
 		}
 		function MobileQuickPrompts(p) {
@@ -375,7 +379,7 @@ window.__ModuleLoader__.load({
 			useWbPickTick();
 			var rows=wbMobileProgress(p.nodes||[],p.legacy,WB_PICK.drafts,WB_PICK.done);
 			var meta=p.meta||{}, binding=wbNavState.bindings[p.sessionId]||{};
-			var title=(wbNavState.renames[p.sessionId]&&wbNavState.renames[p.sessionId].title)||p.title||meta.topic||binding.topic||'会话';
+			var title=(wbNavState.renames[p.sessionId]&&wbNavState.renames[p.sessionId].title)||wbSessionTitle(meta, wbNavState.sessions && wbNavState.sessions[p.sessionId] || {displayTitle:p.title}, binding);
 			async function saveTitle(){
 				if(renaming[0])return;
 				renaming[1](true);
@@ -1883,13 +1887,16 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			if (gap === 0) return platformName + "：持平";
 			return platformName + "：" + (gap > 0 ? "我们落后 " : "我们领先 ") + String(Math.round(Math.abs(gap) * 100) / 100) + " 个百分点";
 		}
-		/** 采集时间（ISO，UTC）→ 北京时间的 YYYY-MM-DD。 */
+		/** 带时区的 ISO 时间转北京时间；无时区的本地时间保持原值。 */
+		function beijingStamp(iso) {
+			var text = String(iso || "");
+			if (!/[T ]\d{2}:\d{2}.*(?:Z|[+-]\d{2}:?\d{2})$/i.test(text)) return text;
+			var d = new Date(text);
+			if (isNaN(d.getTime())) return text;
+			return new Date(d.getTime() + 8 * 3600 * 1000).toISOString();
+		}
 		function collectedDay(iso) {
-			if (!iso) return "";
-			var d = new Date(iso);
-			if (isNaN(d.getTime())) return String(iso).slice(0, 10);
-			var beijing = new Date(d.getTime() + 8 * 3600 * 1000);
-			return beijing.toISOString().slice(0, 10);
+			return beijingStamp(iso).slice(0, 10);
 		}
 		function tickStamp(iso) {
 			if (!iso) return "";
@@ -2410,7 +2417,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 								item.type = "button"; item.className = "wb_reviewItem";
 								if (d.title === currentTitle) item.setAttribute("data-on", "1");
 								var t1 = document.createElement("span"); t1.className = "wb_reviewItemTitle"; t1.textContent = d.title;
-								var t2 = document.createElement("span"); t2.className = "wb_reviewItemMeta"; t2.textContent = Math.round(d.chars / 100) / 10 + "k 字 · " + (d.updatedAt || "").slice(5, 16).replace("T", " ");
+								var t2 = document.createElement("span"); t2.className = "wb_reviewItemMeta"; t2.textContent = Math.round(d.chars / 100) / 10 + "k 字 · " + beijingStamp(d.updatedAt).slice(5, 16).replace("T", " ");
 								item.appendChild(t1); item.appendChild(t2);
 								item.onclick = function () { openBody(d.title); loadDrafts(); };
 								listEl.appendChild(item);
@@ -3391,7 +3398,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				var pending = drafts ? drafts.filter(function (d) { return doneMap[d.title] !== true; }) : [];
 
 				if (mobile && !props.mobileInline) {
-					return h(MobileChatHeader, { title: "会话", sessionId: sessionId, meta: st[0].meta || { client: client }, nodes: Array.isArray(legacyNodes) ? legacyNodes : [], legacy: chatSnap && chatSnap.legacy, reviewProps: props });
+					return h(MobileChatHeader, { sessionId: sessionId, meta: st[0].meta || { client: client }, nodes: Array.isArray(legacyNodes) ? legacyNodes : [], legacy: chatSnap && chatSnap.legacy, reviewProps: props });
 				}
 				if (mobile && props.mobileInline) {
 					return h("div", { className: "wb_mReview" },
@@ -3734,7 +3741,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 						Object.keys(byId).forEach(function (id) {
 							var rec = byId[id];
 							if (rec && rec.parentId === sessionId) {
-								rows.push((rec.displayTitle || id) + "｜" + (rec.status || ""));
+								rows.push((wbNavState.renames[id] ? wbNavState.renames[id].title : wbSessionTitle(wbNavState.map[id] || wbNavState.bindings[id], rec)) + "｜" + (rec.status || ""));
 							}
 						});
 						return rows.join("§");
@@ -3823,7 +3830,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				}, [metaId, client, writeCount, rvTick]);
 				if (meta === null || typeof meta !== "object") {
 					return h("div", { className: "wb_task" },
-						h("span", { className: "wb_taskTitle" }, title === "" ? "会话" : title),
+						h("span", { className: "wb_taskTitle" }, (wbNavState.renames[sessionId] && wbNavState.renames[sessionId].title) || wbSessionTitle(wbNavState.map[sessionId] || wbNavState.bindings[sessionId], {displayTitle:title}, meta)),
 );
 				}
 

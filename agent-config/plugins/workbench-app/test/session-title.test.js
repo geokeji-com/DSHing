@@ -112,3 +112,26 @@ test('a post-save refresh replaces optimistic text with the normalized harness t
   await own.wbNavReadSessions()
   assert.equal(own.wbNavState.renames[id].title, '仍在保存')
 })
+
+test('prefill titles fall back to trimmed topic, task metadata, client, then unnamed', () => {
+  const summary = { displayTitle: ' \n【装配台预填 · 初始上下文】 工具' }
+  assert.equal(api.wbSessionTitle({ topic: '  选题  ', client: '客户' }, summary), '选题')
+  assert.equal(api.wbSessionTitle({ topic: '  ', client: '客户' }, summary, { topic: '任务选题' }), '任务选题')
+  assert.equal(api.wbSessionTitle({ topic: '  ', client: ' 客户 ' }, summary), '客户 · 写作会话')
+  assert.equal(api.wbSessionTitle(null, summary, { client: '客户' }), '客户 · 写作会话')
+  assert.equal(api.wbSessionTitle({ topic: ' ', client: ' ' }, summary), '未命名会话')
+  assert.equal(api.wbSessionTitle({ topic: '选题' }, { displayTitle: ' 手动标题 ' }), ' 手动标题 ')
+})
+
+test('mobile and sidebar keep rename overrides and seed editing from the displayed title', () => {
+  const own = load()
+  const p = { sessionId: id, title: '【装配台预填 · 初始上下文】' }
+  const meta = { topic: '任务选题' }, binding = { client: '客户' }
+  const mobileTitle = source.match(/var title=(.*);\n\s*async function saveTitle/)[1]
+  const resolve = () => vm.runInNewContext(mobileTitle, { p, meta, binding, wbNavState: own.wbNavState, wbSessionTitle: own.wbSessionTitle })
+  assert.equal(resolve(), '任务选题')
+  own.wbNavState.renames[id] = { title: '【装配台预填 用户自定名称' }
+  assert.equal(resolve(), '【装配台预填 用户自定名称')
+  assert.match(source, /draft\[1\]\(it.title\)/)
+  assert.match(source, /newTitle\[1\]\(title\)/)
+})
