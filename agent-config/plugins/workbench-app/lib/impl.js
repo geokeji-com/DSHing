@@ -305,6 +305,16 @@ function schemaNames(ctx) {
   return []
 }
 
+export function confirmQuestionContext(ctx, resolved, sessionId, binding) {
+  if (!sessionId || !binding || !Array.isArray(binding.questions)) return {};
+  const service = toolService(ctx)
+  const schemas = service && (typeof service.schemas === 'function' ? service.schemas() : service.schemas)
+  const schema = Array.isArray(schemas) && schemas.find(s => s.name === `mcp__${resolved.server}__${resolved.tool}`)
+  const input = schema && (schema.inputSchema || schema.parameters)
+  return input && input.properties && input.properties.question_context
+    ? { question_context: { session_id: sessionId } } : {}
+}
+
 /** Normalize config/plugin-id/prefix spellings to the serverName used in calls. */
 function canonicalServerName(value) {
   let name = firstString(value)
@@ -683,6 +693,14 @@ function mergeSessionClientBinding(index, sessionId, entry) {
     bound_at: firstString(entry && entry.bound_at) || new Date().toISOString(),
   }
   if (prev.owner_uid) next.owner_uid = prev.owner_uid
+  // Snapshot only explicit selection metadata, never the mutable shared ticks.
+  if (Array.isArray(entry.questions)) {
+    next.questions = entry.questions
+    next.capture_period = firstString(entry.capture_period)
+  } else if (Array.isArray(prev.questions)) {
+    next.questions = prev.questions
+    next.capture_period = prev.capture_period
+  }
   Object.defineProperty(index, id, { value: next, enumerable: true, configurable: true, writable: true })
   return next
 }
@@ -1531,6 +1549,8 @@ export function create(ctx, config) {
             title,
             content,
             draft: false,
+            ...confirmQuestionContext(hostCtx, writeResolved, firstString(parsed.session_id, parsed.session),
+              ownEntry(readSessionClientIndex(), firstString(parsed.session_id, parsed.session))),
           })
           if (!called.ok) {
             sendJson(res, {

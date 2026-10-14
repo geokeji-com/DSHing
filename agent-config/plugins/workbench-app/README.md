@@ -155,3 +155,19 @@ NODE_PATH=/workspace/mobile-audit/tool/node_modules:/workspace/dsh-cloud/publish
 fixture 只能验证所模拟的上游结构，键盘为 visualViewport 模拟，safe-area 在 headless 中为 0；正式发布仍需真实 harness 与实体 iOS Safari 复验。W1 的 document 双滚动由 dsh-cloud tokens.css 另行修复，本插件不增加底栏占位；W11 上游消息操作按钮不在本轮范围。
 
 部署沿用 dsh-cloud `docs/dsh-ops-surface-lockdown-v0.md` §ZF0：备份、vendor ff-only 到已合并 main、`bin/dsh-sync-zoe-fleet --apply-homes --dry-run`、检查候选差异，再 `--apply-homes`。同步生成 prod 快照并更新 home，不重启（`recycle=False`）。正式 harness 的 client-hmr 以 500ms stat 轮询 bundle，module host 重新读取字节并发布新 revision；旧进程可在刷新后收到新版本。勿修改 `lib/index.js`、loader 配置或回收在线用户进程来交付纯客户端变更。
+
+## 文章 → 问句关联
+
+装配台会把实际选中的 qid、问句、client_key、采集期及 task/date 快照随
+session-client POST 传给云端，等待绑定响应后才提交初始任务。云端响应
+`article_question_links.version=1` 时，任务说明要求把选题分配表复制为
+`write_article.question_context` 的结构化 `article_no` / `assignment` 行；
+没有分配行时只传 session_id，由云端保存 `source=session` 的关联。
+不从标题、正文或共享 ticks 的后续状态猜测逐篇覆盖。
+
+确认入库仅在该会话已有 questions 元数据、且工具 schema 显式支持
+question_context 时追加 session_id；云端保留草稿已有 assignment 链接。
+旧云端无能力标记/无参数 schema 时仍用原工具参数；旧插件亦可继续调用新云端。
+云端 `DSH_ARTICLE_QUESTION_LINKS=0` 可关闭新关联。MCP keys、地址、配置、插件
+入口和路由无变化。部署时只需更新各目标 home 中的 `lib/client.js`、`lib/impl.js`；
+本次只改仓库工作树，未复制至实际 homes。

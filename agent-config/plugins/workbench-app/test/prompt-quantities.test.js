@@ -98,3 +98,31 @@ test('single article keeps the prototype allocation condition; free topics and s
   assert.equal(f.api.skillDesc('long', [{ name: 'long', description: '长'.repeat(100) }]).length, 90)
   assert.equal(f.api.skillDisplay('sora-selection×3'), '选型决策×3')
 })
+
+
+test('session selection snapshots qids and client; feature capability gates structured write context', async () => {
+  const f = assembly(); let a = f.render()
+  a.setWeakPicked(['产品值得信任吗？']); a = f.render()
+  await a.dispatch()
+  const bind = JSON.parse(f.storage.get('wb-pending-bind'))
+  assert.deepEqual(bind.questions, [{ qid: 'q2', question: '产品值得信任吗？', client_key: 'CUS-test' }])
+  assert.equal(bind.collected_at, '2026-10-13')
+  assert.equal(f.api.wbQuestionLinkPrompt('sid', bind, { ok: true }), '')
+  assert.equal(f.api.wbQuestionLinkPrompt('sid', bind, { article_question_links: { version: 2 } }), '')
+  const text = f.api.wbQuestionLinkPrompt('sid', bind, { article_question_links: { version: 1 } })
+  assert.match(text, /question_context/)
+  assert.match(text, /assignment/)
+  assert.match(text, /q2/)
+  assert.doesNotMatch(text, /q1/)
+  assert.match(text, /没有分配表时仅带 session_id/)
+})
+
+
+test('session snapshot preserves selected historical capture ticks and excludes unselected questions', () => {
+  const f = assembly()
+  const rows = f.api.wbSelectedSessionQuestions(questions, [{qid:'old',question:'历史问句'}, {qid:'q2',question:'产品值得信任吗？'}], ['产品值得信任吗？','历史问句'], 'CUS-test')
+  assert.deepEqual(JSON.parse(JSON.stringify(rows)), [
+    {qid:'q2', question:'产品值得信任吗？',client_key:'CUS-test'},
+    {qid:'old', question:'历史问句',client_key:'CUS-test'},
+  ])
+})

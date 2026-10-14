@@ -1617,6 +1617,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 							setValue({
 								status: "ready",
 								collectedAt: body.collectedAt || "",
+								capturePeriod: body.clientId || enterprise || "",
 								computedAt: body.computedAt || "",
 								taskId: body.taskId || "",
 								excluded: body.excluded === null ? null : (typeof body.excluded === "number" ? body.excluded : null),
@@ -2041,9 +2042,25 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			};
 		}
 
+		function selectedSessionQuestions(questions, ticks, picked, clientKey) {
+			var records = (questions || []).concat(ticks || []), seen = {};
+			return picked.map(function (name) {
+				var item = records.find(function (q) { return q.question === name && q.qid; });
+				if (!item || seen[item.qid]) return null;
+				seen[item.qid] = true;
+				return { qid: item.qid, question: item.question, client_key: clientKey };
+			}).filter(Boolean);
+		}
+
+		function questionLinkPrompt(sessionId, bind, response) {
+			if (!response || !response.article_question_links || response.article_question_links.version !== 1 || !bind.questions || !bind.questions.length) return "";
+			return "\n\n【文章问句关联】本会话 session_id=" + JSON.stringify(sessionId) + "；问句清单=" + JSON.stringify(bind.questions) +
+				"。write_article 的工具 schema 支持 question_context 时，每次写稿必须带 question_context.session_id；把选题分配表的第 N 篇、覆盖的问句转换为结构化参数 article_no:N, assignment:[{article_no:N,qids:[该行覆盖问句的qid]}]，放入 question_context。只复制分配表的明确映射，不从标题或正文猜测；没有分配表时仅带 session_id，由服务端关联本会话全部问句。工具 schema 没有 question_context 时不要传此参数。";
+		}
+
 		function bindSessionClient(sessionId, bind) {
-			if (!sessionId || !bind) return;
-			fetch("/api/workbench/session-client", {
+			if (!sessionId || !bind) return Promise.resolve(null);
+			return fetch("/api/workbench/session-client", {
 				method: "POST",
 				headers: { "content-type": "application/json", accept: "application/json" },
 				body: JSON.stringify({
@@ -2052,6 +2069,10 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					client: bind.client || "",
 					meta_id: bind.meta_id || "",
 					topic: bind.topic || "",
+					questions: bind.questions || [],
+					capture_period: bind.capture_period || "",
+					capture_task_id: bind.capture_task_id || "",
+					collected_at: bind.collected_at || "",
 				}),
 			})
 				.then(function (r) { return r.json().catch(function () { return {}; }); })
@@ -2066,6 +2087,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 						body: JSON.stringify({ session: sessionId, client: bind.client || "", client_key: bind.client_key || "", topic: bind.topic || "", meta_id: bind.meta_id || "" }),
 					}).catch(function () { });
 					try { window.dispatchEvent(new Event("wb-session-bound")); } catch (e) { /* */ }
+					return body;
 				})
 				.catch(function (e) {
 					console.warn("[dsh-workbench] session-client 绑定失败（会话暂进未归类）：", String(e && e.message ? e.message : e));
@@ -2142,6 +2164,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					return;
 				}
 				var text = pendingPrompt.text;
+				var questionBinding = Promise.resolve(null);
 				pendingPrompt = null;
 				/* 把任务参数编号绑定到这个会话 —— C1 任务条按 sessionId 取。
 				 * （多设备/刷新后不跨会话残留。） */
@@ -2153,7 +2176,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 						sessionStorage.removeItem("wb-pending-meta");
 					}
 					/* WB-SUP P1：session id 已知时立刻写 session↔client 索引。
-					 * 失败只打 log，不挡发消息 —— 会话暂时进「未归类」。 */
+					 * 等待绑定响应后提交，旧云端没有关联能力标记时保留旧流程。 */
 					var bindRaw = sessionStorage.getItem("wb-pending-bind") || "";
 					if (bindRaw !== "" && typeof props.sessionId === "string" && props.sessionId !== "") {
 						var bind = null;
@@ -2161,7 +2184,9 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 						sessionStorage.removeItem("wb-pending-bind");
 						if (bind && typeof bind === "object") {
 							if (!bind.meta_id && pendingId) bind.meta_id = pendingId;
-							bindSessionClient(props.sessionId, bind);
+							questionBinding = bindSessionClient(props.sessionId, bind).then(function (response) {
+								text += questionLinkPrompt(props.sessionId, bind, response);
+							});
 						}
 					} else if (bindRaw !== "" && !(typeof props.sessionId === "string" && props.sessionId !== "")) {
 						console.warn("[dsh-workbench] 起会话后暂无 session id，绑定推迟；会话可能暂进未归类");
@@ -2172,7 +2197,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					var modelRaw = sessionStorage.getItem(WB_KEY.modelPending) || "";
 					if (modelRaw !== "") { sessionStorage.removeItem(WB_KEY.modelPending); pendingModel = JSON.parse(modelRaw); }
 				} catch (error) { pendingModel = null; }
-				function submitDraft() { actions.setDraft(text); actions.submit(); }
+				function submitDraft() { questionBinding.then(function () { actions.setDraft(text); actions.submit(); }); }
 				var sessions = props.wbCtx && typeof props.wbCtx.get === "function" ? props.wbCtx.get("sessions") : null;
 				if (pendingModel && sessions && typeof sessions.selectModel === "function" && props.sessionId) {
 					var req = { sessionId: props.sessionId, provider: String(pendingModel.provider || ""), model: String(pendingModel.model || "") };
@@ -4370,6 +4395,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				 * 编号追加在预填消息尾部 + 记进 sessionStorage —— 会话页顶部
 				 * 的任务条凭编号读回参数。登记失败不挡发送（任务条显示兜底）。 */
 				var metaId = "";
+				var selectedQuestions = mode === "weak" ? selectedSessionQuestions(weakGaps.questions, weakTicks.ticks, weakPicked, pick.key) : [];
 				setSending("正在登记任务参数…");
 				try {
 					var resp = await fetch("/api/workbench/task-meta", {
@@ -4415,6 +4441,10 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 								client: clientName,
 								topic: topic,
 								meta_id: metaId,
+								questions: selectedQuestions,
+								capture_period: weakGaps.capturePeriod || weakClientId || "",
+								capture_task_id: weakGaps.taskId || "",
+								collected_at: weakGaps.collectedAt || "",
 							}));
 						} catch (error) { /* 隐身模式就算了 */ }
 					};
@@ -5209,6 +5239,9 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 		exports.wbMapCaptureQuestions = mapCaptureQuestions;
 		exports.wbWeakPickedFromTicks = weakPickedFromTicks;
 		exports.wbWeakSelectionText = weakSelectionText;
+		exports.wbQuestionLinkPrompt = questionLinkPrompt;
+		exports.wbSelectedSessionQuestions = selectedSessionQuestions;
+		exports.wbBindSessionClient = bindSessionClient;
 		exports.wbTickPutRequest = weakTickPutRequest;
 		exports.wbTickBulkRequest = weakTickBulkRequest;
 		return module.exports;
