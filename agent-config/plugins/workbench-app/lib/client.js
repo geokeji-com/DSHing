@@ -358,7 +358,7 @@ window.__ModuleLoader__.load({
 				}
 			}
 			var titles={};
-			nodes.forEach(function(node){if(node.kind==='tool-result'&&node.call&&/^(?:mcp__articles__|mcp__sora-articles__)write_article$/.test(node.call.name)&&node.isError!==true){try{var args=JSON.parse(node.call.argsRaw||'{}');var title=String(args.title||args.file||'').replace(/\.md$/i,'');if(title)titles[title]=true;}catch(e){}}});
+			nodes.forEach(function(node){if(node.kind==='tool-result'&&node.call&&WB_WRITE_TOOL_RE.test(node.call.name)&&node.isError!==true){try{var args=JSON.parse(node.call.argsRaw||'{}');var title=String(args.title||args.file||'').replace(/\.md$/i,'');if(title)titles[title]=true;}catch(e){}}});
 			var count=Object.keys(titles).length, confirmed=Object.keys(done||{}).filter(function(t){return titles[t]&&done[t];}).length;
 			var running=!!(legacy&&(legacy.partial||(legacy.runningCalls&&legacy.runningCalls.length)));
 			var rows=[[running?'run':count?'done':'wait',running?'写作中':count?'本会话已写 '+count+' 篇文章':'已停止，尚无文章产物']];
@@ -1310,8 +1310,21 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 		var WORKBENCH_KEY = "workbench";
 
 		/* ---- 工作台后端 API（路径收口，别再散写魔法串）---------------- */
-		/* 文章库写入工具名：正式站 MCP 服务名是 articles，旧部署是 sora-articles —— 两种都算本会话的产物。 */
-		var WB_WRITE_TOOL_RE = /^mcp__(?:articles|sora-articles)__write_article$/;
+		/* articles / sora-articles 以及自定义 MCP 服务别名共用同一写入识别。 */
+		var WB_WRITE_TOOL_RE = /^mcp__.+__write_article$/;
+		function wbIsSuccessfulWrite(node) {
+			return !!(node && node.kind === "tool-result" && node.call
+				&& WB_WRITE_TOOL_RE.test(String(node.call.name || "")) && node.isError !== true);
+		}
+		/* writeCount 是当前 user turn 内的成功写入数；首次快照只建基线。
+		 * openedTurn 由调用方保存，关闭面板不清除；停止后的历史回放不触发。 */
+		function wbReviewAutoOpenDecision(prev, next) {
+			var sameTurn = prev && prev.turnKey === next.turnKey;
+			var increase = !!(prev && prev.sessionId === next.sessionId && next.turnKey > 0
+				&& next.turnKey >= prev.turnKey && next.writeCount > (sameTurn ? prev.writeCount : 0)
+				&& (next.running || (sameTurn && prev.running)));
+			return { open: increase && prev.openedTurn !== next.turnKey, refresh: increase };
+		}
 		var WB_API = {
 			clients: "/api/workbench/clients",
 			skills: "/api/workbench/skills",
@@ -2853,7 +2866,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					clientKeyFromParams = navParams ? (navParams.client_key || null) : null;
 				} catch (e) { }
 				var chatSnap = null;
-				if ((!clientFromParams || props.unifiedPanel) && typeof useChat === "function" && sessionId) {
+				if ((!mobile || !clientFromParams || props.unifiedPanel) && typeof useChat === "function" && sessionId) {
 					chatSnap = useChat(function (s) { return s; });
 				}
 				var metaId = "";
@@ -2866,12 +2879,12 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				/* 本会话产物归属：数消息流里成功的 write_article 调用（argsRaw 带 title）。
 				 * 文件时刻会串会话（别的会话后入库也会晚于本任务发起），
 				 * 消息流留痕才是真正的会话归属。 */
-				var writeTitles = {};
+				var writeTitles = {}, writeCount = 0;
 				if (Array.isArray(legacyNodes)) {
 					for (var wsi = 0; wsi < legacyNodes.length; wsi++) {
 						var wsn = legacyNodes[wsi];
-						if (wsn && wsn.kind === "tool-result" && wsn.call
-							&& WB_WRITE_TOOL_RE.test(String(wsn.call.name || "")) && wsn.isError !== true) {
+						if (wbIsSuccessfulWrite(wsn)) {
+							writeCount++;
 							try {
 								var wargs = JSON.parse(wsn.call.argsRaw || "{}");
 								var wtitle = String(wargs.title || wargs.file || "").replace(/\.md$/i, "");
@@ -2880,8 +2893,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 						}
 					}
 				}
-				var writeCount = 0;
-				for (var wtk in writeTitles) writeCount++;
+				if (mobile) { writeCount = 0; for (var wtk in writeTitles) writeCount++; }
 				var list = (metaId === "" && Array.isArray(legacyNodes)) ? legacyNodes : null;
 				for (var i = 0; list !== null && i < list.length; i++) {
 					var node = list[i];
@@ -3170,11 +3182,20 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				}, []);
 				React.useEffect(function () {
 					if (!client) { setL(function (p) { return Object.assign({}, p, { drafts: null, sel: "", body: "", checked: {}, done: {} }); }); return; }
-					var alive = true;
-					fetch(WB_API.drafts + "?client=" + encodeURIComponent(client), { headers: { accept: "application/json" } })
+					var alive = true, retryTimer = null, retry = 0;
+					function loadDrafts() {
+						fetch(WB_API.drafts + "?client=" + encodeURIComponent(client), { headers: { accept: "application/json" } })
 						.then(function (r) { return r.json(); })
 						.then(function (b) {
-							if (alive && b && b.ok === true) setL(function (p) {
+							if (!alive || !b || b.ok !== true) return;
+							/* 工具结果可能先于文件列表可见；缺篇时仅补两次短重试。 */
+							var available = {};
+							(b.drafts || []).forEach(function (d) { available[d.title] = true; });
+							(b.library || []).forEach(function (title) { available[title] = true; });
+							if (!mobile && retry < 2 && Object.keys(writeTitles).some(function (title) { return !available[title]; })) {
+								retryTimer = setTimeout(loadDrafts, [400, 1200][retry++]);
+							}
+							setL(function (p) {
 								var scope = at ? (b.drafts || []).filter(function (d) { return d.updatedAt >= at; }) : (b.drafts || []);
 								/* 会话归属：消息流里有 write 调用 → 只显示本会话写的那几篇。
 								 * 没有（还没开写 / 已终止）→ 列表为空，别的会话的产物不串进来。 */
@@ -3192,7 +3213,9 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 							});
 						})
 						.catch(function () { });
-					return function () { alive = false; };
+					}
+					loadDrafts();
+					return function () { alive = false; clearTimeout(retryTimer); };
 				}, [client, at, writeCount, rvTick]);   /* at / writeCount / 手动刷新 回来要重拉重过滤 */
 
 				React.useEffect(function () {
@@ -3642,6 +3665,25 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				if (Array.isArray(legacyNodes)) list = legacyNodes;
 				else if (legacyNodes && typeof legacyNodes.values === "function") list = legacyNodes.values();
 				else if (legacyNodes && typeof legacyNodes.forEach === "function") { legacyNodes.forEach(function (v) { list.push(v); }); }
+				/* 元数据加载前就统计成功写入；turnKey 用 user 消息数，重写同篇也计数。 */
+				var writeCount = 0, turnKey = 0, turnWriteCount = 0, writeTitles = {};
+				for (var wi = 0; wi < list.length; wi++) {
+					var tn = list[wi];
+					if (tn && tn.kind === "user") { turnKey++; turnWriteCount = 0; }
+					if (wbIsSuccessfulWrite(tn)) {
+						writeCount++; turnWriteCount++;
+						try {
+							var targs = JSON.parse(tn.call.argsRaw || "{}");
+							var ttitle = String(targs.title || targs.file || "").replace(/\.md$/i, "");
+							if (ttitle !== "") writeTitles[ttitle] = true;
+						} catch (e) { }
+					}
+				}
+				var writeDone = writeCount;
+				var running = !!(chatSnap && chatSnap.legacy && (chatSnap.legacy.partial != null
+					|| (chatSnap.legacy.runningCalls && chatSnap.legacy.runningCalls.length > 0)));
+				var binding = wbNavState.bindings[sessionId] || {}, mapped = wbNavState.map[sessionId] || {};
+				var client = (meta && meta.client) || binding.client || mapped.client || "";
 				diag = (Array.isArray(legacyNodes) ? "Array" : legacyNodes ? typeof legacyNodes : "null") + "/" + list.length;
 				for (var i = 0; i < list.length; i++) {
 					var node = list[i];
@@ -3723,50 +3765,62 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					};
 				}, [metaId, meta && meta.client]);
 
-				/* 草稿区（write draft:true 落「文章库/<客户>/草稿/」）：待人工确认入库 */
-				var state3 = React.useState({ drafts: null });
-				var drafts = state3[0].drafts;
-				var setRv = state3[1];
-				/* 草稿从无到有 → 自动在右侧栏打开"文章审核" tab（每个任务编号只弹一次） */
-				var autoRef = React.useRef(null);
+				/* 只由本轮实时 write 触发；草稿目录和 task-meta 均不在打开路径上。 */
+				var autoRef = React.useRef({ previous: null, opened: {}, timer: null });
+				autoRef.current.target = { client: client, meta: metaId };
 				React.useEffect(function () {
-					if (drafts === null || drafts.length === 0) return;
-					if (autoRef.current === metaId) return;
-					var ctrl = WbCtx && WbCtx.sidebarRight;
-					if (ctrl && typeof ctrl.openTab === "function") {
+					return function () { clearTimeout(autoRef.current.timer); autoRef.current.timer = null; };
+				}, [sessionId, turnKey]);
+				React.useEffect(function () {
+					var auto = autoRef.current, key = sessionId + "/" + turnKey;
+					var next = { sessionId: sessionId, turnKey: turnKey, writeCount: turnWriteCount, running: running };
+					var prev = auto.previous && Object.assign({}, auto.previous, { openedTurn: auto.opened[key] ? turnKey : null });
+					var decision = wbReviewAutoOpenDecision(prev, next);
+					auto.previous = next;
+					if (WB_MOBILE.matches) return;
+					if (decision.refresh) window.dispatchEvent(new CustomEvent("wb:review-refresh", { detail: { sessionId: sessionId } }));
+					if (!decision.open) return;
+					auto.opened[key] = true;
+					var attempts = 0;
+					function openReview() {
+						auto.timer = null;
 						try {
-							/* 2026-09-26：openTab 在右栏 surface 未挂载时直接 throw
-							 * （sidebarRight: no session surface is mounted）。
-							 * 先弹成功、后记号 —— 失败不占位，下一条会话消息再重试；
-							 * 以前先记号，agent 写第一篇时弹失败一次就永远不弹了。 */
-							window.dshUnified ? window.dispatchEvent(new Event("dsh:review-available")) : ctrl.openTab("wb-review", { params: { client: meta.client, meta: metaId } });
-							autoRef.current = metaId;
+							var ctrl = WbCtx && WbCtx.sidebarRight;
+							if (window.dshUnified) window.dispatchEvent(new Event("dsh:review-available"));
+							else if (ctrl && typeof ctrl.openTab === "function") ctrl.openTab("wb-review", { params: auto.target });
+							else throw new Error("sidebarRight is not ready");
+						} catch (e) {
+							if (++attempts <= 40) auto.timer = setTimeout(openReview, 250);
+							else console.warn("[dsh-workbench] 打开审核侧栏失败（重试超时）：", String(e));
 						}
-						catch (e) { console.warn("[dsh-workbench] 打开审核侧栏失败（下条消息重试）：", String(e)); }
 					}
-				}, [drafts, metaId]);
+					openReview();
+				}, [sessionId, turnKey, turnWriteCount, running]);
+
+				/* 手动刷新另计 tick；实时写入已通过 writeCount 触发同一次拉取。 */
+				var rvTickS = React.useState(0), rvTick = rvTickS[0];
 				React.useEffect(function () {
-					if (meta === null || typeof meta !== "object" || !meta.client) return;
+					function onRefresh(e) { if (!e.detail || !e.detail.sessionId) rvTickS[1](function (n) { return n + 1; }); }
+					window.addEventListener("wb:review-refresh", onRefresh);
+					return function () { window.removeEventListener("wb:review-refresh", onRefresh); };
+				}, []);
+				/* 草稿目录只随客户 / 写入 / 手动刷新变化，不随流式 delta 重拉。 */
+				React.useEffect(function () {
+					if (!client) return;
 					var alive = true;
-					fetch(WB_API.drafts + "?client=" + encodeURIComponent(meta.client), { headers: { accept: "application/json" } })
+					fetch(WB_API.drafts + "?client=" + encodeURIComponent(client), { headers: { accept: "application/json" } })
 						.then(function (r) { return r.json(); })
 						.then(function (b) {
 							if (alive && b && b.ok === true) {
-								setRv(function (p) { return Object.assign({}, p, { drafts: b.drafts || [] }); });
-								/* 与 R 区同口径：本会话 write 过的才算 —— 否则全量覆盖
-								 * 会把 R 区过滤好的列表冲掉，chips 序号就和 R 区对不上。 */
-								var scope2 = b.drafts || [];
-								var wc2 = 0; for (var k2 in writeTitles) wc2++;
-								if (wc2 > 0) scope2 = scope2.filter(function (d) { return writeTitles[d.title] === true; });
-								else scope2 = [];
-								WB_PICK.client = meta.client; WB_PICK.drafts = scope2;
+								/* 同 R 区按本会话 title 过滤，客户旧稿不能进入 chips。 */
+								WB_PICK.client = client;
+								WB_PICK.drafts = (b.drafts || []).filter(function (d) { return writeTitles[d.title] === true; });
 								wbPickEmit();
-
 							}
 						})
 						.catch(function () { });
 					return function () { alive = false; };
-				}, [metaId, meta && meta.client, chatSnap]);
+				}, [metaId, client, writeCount, rvTick]);
 				if (meta === null || typeof meta !== "object") {
 					return h("div", { className: "wb_task" },
 						h("span", { className: "wb_taskTitle" }, title === "" ? "会话" : title),
@@ -3788,24 +3842,6 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				var wsText = (st.ws && st.ws.exists) ? "工作区共 " + st.ws.files + " 个文件" + (st.ws.recent > 0 ? "（本任务新增 " + st.ws.recent + "）" : "") : "暂无";
 				var libText = (st.lib && st.lib.exists) ? "文章库共 " + st.lib.files + " 篇" + (st.lib.recent > 0 ? "（本任务新增 " + st.lib.recent + "）" : "") : "暂无";
 				var subRows = subsText === "" ? [] : subsText.split("§");
-				/* 真进度（2026-09-26 用户指出旧两行是静态假话）：数会话消息流里
-				 * 成功落地的 write_article 调用 —— 节点 kind='tool-result'，
-				 * call.name 匹配、isError 不为 true 才算数。agent 每写完一篇，
-				 * 消息流更新 → 这里跟着变，是真数据不是推导。 */
-				var writeDone = 0;
-				var writeTitles = {};
-				for (var wi = 0; wi < list.length; wi++) {
-					var tn = list[wi];
-					if (tn && tn.kind === "tool-result" && tn.call
-						&& WB_WRITE_TOOL_RE.test(String(tn.call.name || "")) && tn.isError !== true) {
-						writeDone += 1;
-						try {
-							var targs = JSON.parse(tn.call.argsRaw || "{}");
-							var ttitle = String(targs.title || targs.file || "").replace(/\.md$/i, "");
-							if (ttitle !== "") writeTitles[ttitle] = true;
-						} catch (e) { }
-					}
-				}
 				var skillTotal = (meta.skills || []).length;
 				/* 任务清单样式的行：[状态, 文本] —— done=绿勾，run=进行中，wait=待办 */
 				var taskRows = [];
@@ -5252,7 +5288,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			/* ---- R 区：右侧栏"文章审核" tab（2026-09-24）--------------------
 			 * stage1：向 tab 注册表声明类型（分页型，不带资源地址）；
 			 * stage2：`sidebar.right.pane.tab`/`.title` 槽按 id 给 body 和 chip。
-			 * TaskBar 探测到草稿从无到有时 openTab 自动展开右侧栏。 */
+			 * TaskBar 探测到本轮首次实时写入时 openTab 自动展开右侧栏。 */
 			try {
 				ctx.sidebarRightTabs.register({
 					id: "workbench-article-review",
