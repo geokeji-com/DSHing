@@ -51,6 +51,91 @@ window.__ModuleLoader__.load({
 			if (record && record.confirmed > 0) return { tone: 'green', label: '已入库 ' + record.confirmed + ' 篇' };
 			return { tone: 'grey', label: record && record.running === false ? '已停止' : '状态未同步' };
 		}
+		function wbSessionTitle(rec, summary) {
+			return (summary && !summary.blank && summary.displayTitle) || (rec && rec.topic) || '未命名会话';
+		}
+		function wbClampTitle(text) {
+			return Array.from(String(text || '')).slice(0, 40).join('');
+		}
+		function wbTitleToSave(text, previous) {
+			var title = wbClampTitle(String(text || '').trim()).trim();
+			return title && title !== previous ? title : '';
+		}
+		function wbTitleKey(e, save, cancel) {
+			e.stopPropagation();
+			if (e.isComposing || (e.nativeEvent && e.nativeEvent.isComposing) || e.keyCode === 229) return;
+			if (e.key === 'Enter') { e.preventDefault(); save(); }
+			if (e.key === 'Escape') { e.preventDefault(); cancel(); }
+		}
+		function wbCanRename(id) {
+			var uid = (window.dshUnified && window.dshUnified.store && window.dshUnified.store.state && window.dshUnified.store.state.uid) || wbNavState.uid;
+			return !uid || [wbNavState.map[id], wbNavState.bindings[id]].every(function (rec) {
+				return !rec || rec.owner_uid === undefined || rec.owner_uid === uid;
+			});
+		}
+		async function wbSaveSessionTitle(ctx, id, text, previous, showTitle) {
+			var title = wbTitleToSave(text, previous);
+			if (!title) return;
+			showTitle(title);
+			try {
+				if (!wbCanRename(id)) throw Error();
+				var svc = ctx && ctx.get('sessions');
+				function binding() {
+					var snapshot = svc && svc.list && svc.list.getSnapshot();
+					return snapshot && snapshot.byId && snapshot.byId[id] && svc.binding(id);
+				}
+				var bound = binding();
+				if (!bound && svc && typeof svc.refresh === 'function') { await svc.refresh(); bound = binding(); }
+				if (!bound || !bound.session || !wbCanRename(id)) throw Error();
+				var result = await bound.session.rename(title);
+				if (!result || !result.ok) throw Error();
+			} catch (e) {
+				showTitle(previous);
+				throw Error('重命名失败，请稍后重试');
+			}
+		}
+		function WbSessionRow(p) {
+			var edit = React.useState(false), draft = React.useState(''), menu = React.useState(null), busy = React.useState(false);
+			var editing = React.useRef(false), timer = React.useRef(null), menuRef = React.useRef(null);
+			var allowed = wbCanRename(p.item.id), it = p.item;
+			React.useEffect(function () { return function () { clearTimeout(timer.current); }; }, []);
+			React.useEffect(function () {
+				if (!menu[0]) return;
+				function outside(e) { if (!menuRef.current || !menuRef.current.contains(e.target)) menu[1](null); }
+				function close() { menu[1](null); }
+				function key(e) { if (e.key === 'Escape') { e.preventDefault(); close(); } }
+				document.addEventListener('pointerdown', outside, true);
+				document.addEventListener('keydown', key);
+				window.addEventListener('scroll', close, true);
+				return function () { document.removeEventListener('pointerdown', outside, true); document.removeEventListener('keydown', key); window.removeEventListener('scroll', close, true); };
+			}, [menu[0]]);
+			function start() {
+				clearTimeout(timer.current); menu[1](null);
+				if (!allowed || busy[0] || (wbNavState.renames[it.id] && wbNavState.renames[it.id].saving)) return;
+				delete wbNavState.renameErrors[it.id];
+				editing.current = true; draft[1](it.title); edit[1](true);
+			}
+			function cancel() { editing.current = false; edit[1](false); }
+			async function save() {
+				if (!editing.current) return;
+				cancel(); busy[1](true);
+				try { await wbNavRename(p.ctx, it.id, draft[0], it.title); }
+				catch (e) { /* wbNavRename keeps the row error across search/filter changes. */ }
+				finally { busy[1](false); }
+			}
+			var label = (it.at && it.at.length >= 10 ? it.at.slice(5, 10) + ' · ' : '') + it.title;
+			return h('div', null,
+				edit[0] ? h('input', {className:'wb_nvRename', 'aria-label':'会话名称', value:draft[0], maxLength:40, autoFocus:true,
+					onFocus:function(e){e.target.select();}, onChange:function(e){draft[1](wbClampTitle(e.target.value));},
+					onKeyDown:function(e){wbTitleKey(e,save,cancel);}, onBlur:save, onClick:function(e){e.stopPropagation();}})
+				: h('button', {type:'button', className:'wb_nvItem'+(it.id===wbNavState.current?' wb_nvCur':''), title:label,
+					onClick:function(e){if(editing.current)return;clearTimeout(timer.current);if(e.detail===0)p.open(it.id);else if(e.detail===1)timer.current=setTimeout(function(){p.open(it.id);},300);},
+					onDoubleClick:function(e){e.preventDefault();start();},
+					onContextMenu:function(e){e.preventDefault();clearTimeout(timer.current);if(allowed&&!busy[0])menu[1]({x:Math.max(0,Math.min(e.clientX,window.innerWidth-140)),y:Math.max(0,Math.min(e.clientY,window.innerHeight-48))});}},label),
+				wbNavState.renameErrors[it.id] ? h('small',{className:'wb_nvRenameError',role:'alert'},wbNavState.renameErrors[it.id]) : null,
+				menu[0] && allowed ? createPortal(h('div',{className:'wb_nvMenu',ref:menuRef,role:'menu',style:{left:menu[0].x,top:menu[0].y}},
+					h('button',{type:'button',role:'menuitem',autoFocus:true,onClick:start},'重命名')),document.body) : null);
+		}
 		function wbInstallMobile() {
 			var root = document.documentElement;
 			var previousFrame = null, previousColumns = '';
@@ -286,19 +371,26 @@ window.__ModuleLoader__.load({
 			var chatRef=React.useRef(null);
 			useWbScene(true, 'chat');
 			useWbChatLayout(chatRef);
-			var menu=React.useState(false), preset=React.useState(false), rename=React.useState(false), newTitle=React.useState(""), renameError=React.useState("");
+			var menu=React.useState(false), preset=React.useState(false), rename=React.useState(false), newTitle=React.useState(""), renameError=React.useState(""), renaming=React.useState(false);
 			useWbPickTick();
 			var rows=wbMobileProgress(p.nodes||[],p.legacy,WB_PICK.drafts,WB_PICK.done);
 			var meta=p.meta||{}, binding=wbNavState.bindings[p.sessionId]||{};
-			var title=p.title||meta.topic||binding.topic||'会话';
+			var title=(wbNavState.renames[p.sessionId]&&wbNavState.renames[p.sessionId].title)||p.title||meta.topic||binding.topic||'会话';
+			async function saveTitle(){
+				if(renaming[0])return;
+				renaming[1](true);
+				try{await wbNavRename(WbCtx,p.sessionId,newTitle[0],title);rename[1](false);}
+				catch(e){renameError[1](e.message);}
+				finally{renaming[1](false);}
+			}
 			var refCount=meta.refs?((meta.refs.urls||[]).length+(meta.refs.body?1:0)):0;
 			var sub=wbContextLabel([meta.client||binding.client,meta.line,meta.period,refCount?'仿写 '+refCount+' 篇':'']);
 			var completed=rows.filter(function(row){return row[0]==='done';}).length;
 			return h('div',{className:'wb_mChat',ref:chatRef},h(MobileTopBar,{title:title,sub:sub,back:function(){var layout=WbCtx&&WbCtx.get?WbCtx.get('layout'):null;if(layout)layout.selectPanel(WORKBENCH_KEY);},more:function(){menu[1](true);}}),
 				h('div',{className:'wb_mPinned'},rows.length?h('details',{className:'wb_mProgress'},h('summary',null,h('span',null,'任务进度'),h('small',null,completed+'/'+rows.length),wbIcon('down')),h('div',{className:'wb_mChecklist'},rows.map(function(row,i){return h('div',{className:'wb_trow',key:i},h('span',{className:'wb_ticon','data-s':row[0]},row[0]==='done'?'✓':row[0]==='run'?'◷':'○'),h('span',null,row[1]));}))):null,
 					h(ReviewTabBody,Object.assign({},p.reviewProps,{mobileInline:true}))),
-				menu[0]?h(MobileModal,{title:'会话操作',close:function(){menu[1](false);}},h('button',{type:'button',className:'wb_mMenuRow',onClick:function(){menu[1](false);newTitle[1](title);rename[1](true);}},'重命名'),h('button',{type:'button',className:'wb_mMenuRow',onClick:function(){menu[1](false);preset[1](true);}},'这次发起时的预设'),h('button',{type:'button',className:'wb_mMenuRow',onClick:function(){menu[1](false);wbNavState.drawer=true;wbNavEmit();}},'会话列表'),h('button',{type:'button',className:'wb_mMenuRow',onClick:function(){menu[1](false);preset[1]('desktop');}},'在电脑上打开')):null,
-				rename[0]?h(MobileModal,{title:'重命名',close:function(){rename[1](false);}},h('input',{className:'wb_mRename',value:newTitle[0],'aria-label':'会话名称',onChange:function(e){newTitle[1](e.target.value);}}),renameError[0]?h('p',{role:'status'},renameError[0]):null,h('button',{type:'button',className:'wb_mPrimary',disabled:!newTitle[0].trim(),onClick:async function(){try{var svc=WbCtx.get('sessions');var binding=svc.binding(p.sessionId);var result=await binding.session.rename(newTitle[0].trim());if(!result.ok)throw Error(result.error.message);rename[1](false);}catch(e){renameError[1]('重命名失败，请稍后重试');}}},'保存')):null,
+				menu[0]?h(MobileModal,{title:'会话操作',close:function(){menu[1](false);}},wbCanRename(p.sessionId)?h('button',{type:'button',className:'wb_mMenuRow',onClick:function(){menu[1](false);newTitle[1](title);renameError[1]('');rename[1](true);}},'重命名'):null,h('button',{type:'button',className:'wb_mMenuRow',onClick:function(){menu[1](false);preset[1](true);}},'这次发起时的预设'),h('button',{type:'button',className:'wb_mMenuRow',onClick:function(){menu[1](false);wbNavState.drawer=true;wbNavEmit();}},'会话列表'),h('button',{type:'button',className:'wb_mMenuRow',onClick:function(){menu[1](false);preset[1]('desktop');}},'在电脑上打开')):null,
+				rename[0]?h(MobileModal,{title:'重命名',close:function(){rename[1](false);}},h('input',{className:'wb_mRename',value:newTitle[0],maxLength:40,autoFocus:true,disabled:renaming[0],'aria-label':'会话名称',onFocus:function(e){e.target.select();},onChange:function(e){newTitle[1](wbClampTitle(e.target.value));},onKeyDown:function(e){wbTitleKey(e,saveTitle,function(){rename[1](false);});}}),renameError[0]?h('p',{role:'alert'},renameError[0]):null,h('button',{type:'button',className:'wb_mPrimary',disabled:renaming[0],onClick:saveTitle},'保存')):null,
 				preset[0]?h(MobileModal,{title:preset[0]==='desktop'?'在电脑上打开':'这次发起时的预设',close:function(){preset[1](false);}},h('div',{className:'wb_mPreset'},preset[0]==='desktop'?'在电脑上登录同一账号，从会话列表打开「'+title+'」。':[meta.client,meta.line,meta.period,meta.topic,meta.refs&&meta.refs.style,(meta.skills||[]).map(skillDisplay).join('、'),meta.base].filter(Boolean).join('\n')||'此会话没有装配台预设')):null);
 		}
 
@@ -731,6 +823,10 @@ window.__ModuleLoader__.load({
 			".wb_nvGroupName:hover{background:#eef2f7;}",
 			".wb_nvItem{width:100%;border:none;background:none;text-align:left;font-size:12.5px;color:#4b5563;cursor:pointer;padding:6px 6px 6px 18px;border-radius:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}",
 			".wb_nvItem:hover{background:#eef2f7;color:#111827;}",
+			".wb_nvRename{width:100%;box-sizing:border-box;padding:5px 8px;border:1px solid #93c5fd;border-radius:6px;font:inherit;}",
+			".wb_nvRenameError{display:block;padding:2px 8px;color:#b91c1c;font-size:12px;}",
+			".wb_nvMenu{position:fixed;z-index:10000;min-width:132px;padding:4px;background:#fff;border:1px solid #e5e7eb;border-radius:8px;box-shadow:0 4px 16px #0002;}",
+			".wb_nvMenu button{width:100%;padding:7px 12px;border:0;border-radius:4px;background:none;text-align:left;color:#374151;cursor:pointer;}.wb_nvMenu button:hover,.wb_nvMenu button:focus{background:#eef2f7;}",
 			".wb_nvCur,.wb_nvItem.wb_nvCur{background:#e8f0fe;color:#1d4ed8;}",
 
 			/* 挑篇条（原型 pick-row）：改哪几篇 + 编号格子 + 全选 + 红绿点（机器检查未接，置灰） */
@@ -1311,6 +1407,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 		var CLIENTS_RETRY_DELAYS = [1200, 3000];
 
 		function wbCacheWorkspace(body) {
+			if (body && body.ok === true && body.uid !== undefined) wbNavState.uid = body.uid || "";
 			var info = body && body.workspace;
 			var personal = info && info.personal;
 			wbWorkspaceInfo = personal && typeof personal.id === "string" && personal.id !== ""
@@ -2349,7 +2446,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			 * "会话→客户"来自我们自己的映射表；新客户在装配台勾选即出现，
 			 * 不需要预先建任何组。绝不改动官方组件内部（历史教训：一改就崩）。 */
 			var WB_NAV_W = 330;
-			var wbNavState = { sessions: null, map: {}, q: "", open: {}, current: "", navW: 330, drawer: false, bindings: {}, customers: [], clientsReady: false };
+			var wbNavState = { sessions: null, map: {}, q: "", open: {}, current: "", navW: 330, drawer: false, bindings: {}, customers: [], clientsReady: false, uid: "", renames: {}, renameErrors: {} };
 			try {
 				var savedW = parseInt(localStorage.getItem(WB_KEY.navW) || "0", 10);
 				if (savedW >= 200 && savedW <= 480) wbNavState.navW = savedW;
@@ -2374,7 +2471,43 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			var wbNavSubs = [];
 			var wbFrameMo = null;
 			function wbNavEmit() { wbNavSubs.forEach(function (f) { try { f(); } catch (e) { } }); }
+			async function wbNavReadSessions() {
+				// Only retire edits already saved when this refresh starts.
+				var saved = {};
+				Object.keys(wbNavState.renames).forEach(function (id) {
+					if (!wbNavState.renames[id].saving) saved[id] = wbNavState.renames[id];
+				});
+				try {
+					var ctx = wbNavCtx || WbCtx;
+					var svc = ctx && typeof ctx.get === 'function' && ctx.get('sessions');
+					if (!svc || !svc.list || typeof svc.list.getSnapshot !== 'function') return;
+					if (typeof svc.refresh === 'function') await svc.refresh();
+					var snapshot = svc.list.getSnapshot();
+					if (!snapshot || (snapshot.phase && snapshot.phase !== 'ready')) return;
+					wbNavState.sessions = snapshot.byId || {};
+					Object.keys(saved).forEach(function (id) {
+						if (wbNavState.renames[id] === saved[id] && wbNavState.sessions[id]) delete wbNavState.renames[id];
+					});
+					wbNavEmit();
+				} catch (e) { /* Older seats may not expose the sessions service. */ }
+			}
+			async function wbNavRename(ctx, id, text, previous) {
+				if (!wbTitleToSave(text, previous) || (wbNavState.renames[id] && wbNavState.renames[id].saving)) return;
+				delete wbNavState.renameErrors[id];
+				try {
+					await wbSaveSessionTitle(ctx, id, text, previous, function (title) {
+						if (title === previous) delete wbNavState.renames[id];
+						else wbNavState.renames[id] = { title: title, saving: true };
+						wbNavEmit();
+					});
+					wbNavState.renames[id].saving = false;
+					wbNavReadSessions();
+				} catch (e) {
+					wbNavState.renameErrors[id] = e.message; wbNavEmit(); throw e;
+				}
+			}
 			function wbNavRefresh() {
+				wbNavReadSessions();
 				/* 组装清单优先读正式 P1 session-client 索引，再合并 Noah 的
 				 * client-map（topic/旧会话兼容）。客户显示名来自 list_clients。
 				 * 单个兼容路由尚未热上的过渡期不应遮住正式索引。 */
@@ -2540,7 +2673,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				Object.keys(map).forEach(function (id) {
 					var rec = map[id];
 					var m = rec && rec.client ? rec.client : "其他";
-					var title = rec && rec.topic ? rec.topic : "未命名会话";
+					var title = wbNavState.renames[id] ? wbNavState.renames[id].title : wbSessionTitle(rec, wbNavState.sessions && wbNavState.sessions[id]);
 					if (q !== "" && title.indexOf(q) < 0 && m.indexOf(q) < 0) return;
 					if (groups[m] === undefined) groups[m] = [];
 					groups[m].push({ id: id, title: title, at: rec && rec.at ? rec.at : "" });
@@ -2614,14 +2747,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 											},
 										}, (open ? "▾ " : "▸ ") + name + "（" + groups[name].length + "）"),
 										open ? groups[name].map(function (it) {
-											/* 对齐原型："09-18 · 老榜单" —— 登记日期做前缀 */
-											var label = (it.at && it.at.length >= 10 ? it.at.slice(5, 10) + " · " : "") + it.title;
-											return h("button", {
-												type: "button", key: String(it.id),
-												className: "wb_nvItem" + (it.id === wbNavState.current ? " wb_nvCur" : ""),
-												title: label,
-												onClick: function () { openSession(it.id); },
-											}, label);
+											return h(WbSessionRow, { key: String(it.id), item: it, ctx: ctx, open: openSession });
 										}) : null);
 								}))));
 			}
