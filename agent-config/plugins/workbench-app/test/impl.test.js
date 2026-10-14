@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  confirmQuestionContext,
   mergeDraftLists,
   normalizeLibraryArticles,
   resolveServer,
@@ -78,3 +79,17 @@ test('merges local and Support draft/ready metadata without duplicate titles', (
   assert.deepEqual(merged.library.sort(), ['本地正式', '远端正式'])
 })
 
+
+
+test('confirm sends session context only for a selected-question session and capable cloud schema', () => {
+  const resolved = { server: 'articles', tool: 'write_article' }
+  const binding = { questions: [{ qid: 'q1', question: '问题' }] }
+  const legacy = fakeContext(['mcp__articles__write_article'])
+  assert.deepEqual(confirmQuestionContext(legacy, resolved, 'sid', binding), {})
+  for (const field of ['inputSchema', 'parameters']) {
+    const capable = { tools: { schemas: () => [{ name: 'mcp__articles__write_article', [field]: { properties: { question_context: { type: 'object' } } } }] } }
+    assert.deepEqual(confirmQuestionContext(capable, resolved, 'sid', binding), { question_context: { session_id: 'sid' } })
+    assert.deepEqual(confirmQuestionContext(capable, resolved, 'sid', {}), {})
+    assert.deepEqual(confirmQuestionContext(capable, resolved, '', binding), {})
+  }
+})
