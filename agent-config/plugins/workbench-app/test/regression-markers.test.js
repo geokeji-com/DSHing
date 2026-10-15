@@ -39,15 +39,15 @@ test('write recognition, explicit article review and both scoped confirmation bo
   assert.match(source, /fetch\(WB_API\.sessionClient/)
 })
 
-test('capture-words endpoints and shared ticks remain the only weak-question source', () => {
+test('capture-words data stays shared while workbench selection is local', () => {
   assert.equal(api.WB_API.weakDir, '/api/v1/capture-words/clients')
   assert.equal(api.WB_API.weakGaps, '/api/v1/capture-words')
   assert.equal(api.WB_API.weakTicks, '/api/v1/capture-words/ticks')
-  assert.equal(api.WB_API.weakTicksBulk, '/api/v1/capture-words/ticks/bulk')
+  assert.equal(api.WB_API.weakTicksBulk, undefined)
   assert.match(source, /weakSelectionText\(weakGaps\.questions, weakPicked\)/)
   assert.match(source, /weakPickedFromTicks\(weakTicks\.ticks, weakGaps\.questions\)/)
   assert.doesNotMatch(source, /\/api\/workbench\/weak-(?:dir|gaps)/)
-  assert.doesNotMatch(source, /WB_KEY\.weakPicked|weakPicked[^\n]*sessionStorage/)
+  assert.match(source, /useWeakSelection\(weakSelectionKey, weakSuggestion\)/)
   assert.match(source, /write_article 写入，必须带 draft:true/)
 })
 
