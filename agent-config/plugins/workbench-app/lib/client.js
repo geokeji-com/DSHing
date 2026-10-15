@@ -6,6 +6,51 @@ window.__ModuleLoader__.load({
 		var React = require("react");
 		var h = React.createElement;
 		var createPortal = require("react-dom").createPortal;
+		/* Keep exiting surfaces mounted for one shared motion interval. Reopening
+		 * cancels disposal; reduced motion also skips the JS retention delay. */
+		function wbAfterMotion(done) {
+			var media = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)');
+			var duration = parseFloat(window.getComputedStyle(document.body).getPropertyValue('--wb-motion-panel')) || 220;
+			var timer;
+			function cancel() { clearTimeout(timer); if (media) media.removeEventListener('change', changed); }
+			function finish() { cancel(); done(); }
+			function changed() { if (media.matches) finish(); }
+			if (media && media.matches) { done(); return function () {}; }
+			timer = setTimeout(finish, duration);
+			if (media) media.addEventListener('change', changed);
+			return cancel;
+		}
+		function WbPresence(p) {
+			var show = !!p.children, present = React.useState(show), last = React.useRef(null);
+			if (show) last.current = p.children;
+			React.useEffect(function () {
+				if (show) { present[1](true); return; }
+				if (!present[0]) return;
+				return wbAfterMotion(function () { present[1](false); });
+			}, [show]);
+			return show || present[0] ? React.cloneElement(last.current, {
+				'data-wb-leave': show ? undefined : '1', inert: show ? undefined : true,
+				'aria-hidden': show ? undefined : true,
+			}) : null;
+		}
+		function WbCollapse(p) {
+			return h('div', {className:'wb_collapse' + (p.className ? ' ' + p.className : ''), 'data-open':p.open ? '1' : '0', 'aria-hidden':!p.open, inert:p.open ? undefined : true},
+				h('div', {className:'wb_collapseInner'}, p.children));
+		}
+		function WbSkeleton(p) {
+			return h('div', {className:'wb_skeleton' + (p.compact ? ' wb_skeletonCompact' : ''), role:'status', 'aria-busy':true},
+				p.label ? h('span', {className:'wb_skeletonLabel'}, p.label) : null,
+				h('div', {className:'wb_skeletonBlocks', 'aria-hidden':true}, [0,1,2].map(function (i) { return h('span', {className:'wb_skeletonLine', key:i}); })));
+		}
+		function wbShowSkeleton(el, label) {
+			el.textContent = '';
+			var skeleton = document.createElement('div'); skeleton.className = 'wb_skeleton';
+			skeleton.setAttribute('role', 'status');
+			var caption = document.createElement('span'); caption.className = 'wb_skeletonLabel'; caption.textContent = label;
+			var blocks = document.createElement('div'); blocks.className = 'wb_skeletonBlocks'; blocks.setAttribute('aria-hidden', 'true');
+			[0,1,2].forEach(function () { var line = document.createElement('span'); line.className = 'wb_skeletonLine'; blocks.appendChild(line); });
+			skeleton.appendChild(caption); skeleton.appendChild(blocks); el.appendChild(skeleton);
+		}
 		/* Mobile adapters: keep the desktop tree and every write handler intact. */
 		var WB_MOBILE = typeof window.matchMedia === 'function'
 			? window.matchMedia('(max-width: 767px)')
@@ -251,6 +296,7 @@ window.__ModuleLoader__.load({
 		function MobileModal(p) {
 			var ref=React.useRef(null);
 			React.useEffect(function(){
+				if(p['data-wb-leave']) return;
 				var previous=document.activeElement, el=ref.current;
 				if(el) el.focus();
 				function key(e){
@@ -259,8 +305,8 @@ window.__ModuleLoader__.load({
 				}
 				document.addEventListener('keydown',key);
 				return function(){document.removeEventListener('keydown',key);if(previous&&previous.isConnected)previous.focus({preventScroll:true});};
-			},[]);
-			return createPortal(h('div',{className:'wb_mScrim',onClick:function(e){if(e.target===e.currentTarget)p.close();}},
+			},[p['data-wb-leave']]);
+			return createPortal(h('div',{'data-wb-leave':p['data-wb-leave'],inert:p.inert,'aria-hidden':p['aria-hidden'],className:'wb_mScrim',onClick:function(e){if(e.target===e.currentTarget)p.close();}},
 				h('section',{ref:ref,tabIndex:-1,role:'dialog','aria-modal':true,'aria-label':p.title,className:p.full?'wb_mEditor':'wb_mSheet'},
 					!p.full?h('div',{className:'wb_mGrab'}):null,
 					h('div',{className:'wb_mSheetHead'},h('h2',null,p.title),h('button',{type:'button',className:'wb_mIcon','aria-label':'关闭',onClick:p.close},wbIcon('close'))),p.children)),document.body);
@@ -283,7 +329,7 @@ window.__ModuleLoader__.load({
 			function skillLayer(s){var raw=String(s.layer||'');return raw==='personal'||raw==='个人'?'personal':raw==='middle'||raw==='_middle'||raw.indexOf('中')>=0?'middle':raw==='public'||raw==='公共'?'public':'other';}
 			var weakQuestions = p.weakGaps && p.weakGaps.status === 'ready' ? (p.weakRows || p.weakGaps.questions || []) : [];
 			var weakPanel = p.weakGaps && p.weakGaps.status === 'loading'
-				? h('div',{className:'wb_mWeakEmpty'},'薄弱问句加载中…')
+				? h(WbSkeleton,{label:'薄弱问句加载中…'})
 				: p.weakGaps && p.weakGaps.status === 'error'
 					? h('div',{className:'wb_mWeakEmpty'},'薄弱问句暂时无法加载，请稍后刷新')
 					: weakQuestions.length === 0
@@ -310,39 +356,40 @@ window.__ModuleLoader__.load({
 			return h('div',{className:'wb_mAssembly'},h(MobileTopBar,{title:'新建任务'}),
 				h('div',{className:'wb_mForm'},
 					h('button',{type:'button',className:'wb_mContext',disabled:!!window.dshUnified,onClick:function(){sheet[1](true);}},h('span',{className:'wb_mAvatar'},(p.clientName||'客').slice(0,1)),h('span',{className:'wb_mGrow'},h('small',null,'写给'),h('b',null,contextText||(empty?'请选择客户':p.clients.status==='loading'?'客户加载中…':'请选择客户'))),wbIcon('next')),
+					p.clients.status==='loading'?h(WbSkeleton,{label:'客户加载中…'}):null,
 					empty?h('div',{className:'wb_mEmpty'},h('b',null,'还没有分配给你的客户'),h('p',null,'联系管理员')):null,
 					p.clients.status==='error'?h('div',{className:'wb_mEmpty',role:'status'},'客户暂时无法加载，请稍后刷新重试'):null,
 					h('h3',null,'主题'),segment([['weak','薄弱问句'],['free','自己输入']],p.mode,p.setMode),
 					p.mode==='weak'?h('div',{className:'wb_mWeakWrap'},p.unified ? h('button',{type:'button',className:'wb_recommend',onClick:p.recommend},'选推荐的 3 条') : null,h('div',{className:'wb_mWeakStat'},'已选定 '+String(p.selectedCount||0)+' 条 · 共 '+String(weakQuestions.length)+' 条'),weakPanel,h('div',{className:'wb_mWeakSource'},'数据来源：Support · 薄弱问句（全局标准 v4，和 Support 页面数字一致）'),h('textarea',{className:'wb_mTopic',ref:topicRef,'aria-label':'补充要求',placeholder:'补充要求（选填）…',value:p.base,onChange:function(e){p.setBase(e.target.value);},rows:2})):h('textarea',{className:'wb_mTopic',ref:topicRef,'aria-label':'主题',placeholder:'想写什么选题，直接打。',value:p.topic,onChange:function(e){p.setTopic(e.target.value);},rows:2}),
 					h('h3',null,'怎么写'),segment([['copy','仿写'+(p.refCount?' '+p.refCount:'')],['skill','用模板'+(p.pickedTotal?' '+p.pickedTotal:'')]],p.refTab,p.setRefTab),
 					p.refTab==='copy'?h(React.Fragment,null,
-						h('div',{className:'wb_mReferences'},p.refs.urls.map(function(url,i){return h('div',{className:'wb_mReference',key:i},h('span',{className:'wb_mRefIcon'},'↗'),h('span',{className:'wb_mGrow'},url),h('button',{type:'button',className:'wb_mIcon','aria-label':'删除参考链接',onClick:function(){p.setRefText(p.refs.urls.filter(function(_,j){return j!==i;}).concat(p.refs.body?[p.refs.body]:[]).join('\n'));}},wbIcon('close')));}),
+						h('div',{className:'wb_mReferences',key:'copy'},p.refs.urls.map(function(url,i){return h('div',{className:'wb_mReference',key:i},h('span',{className:'wb_mRefIcon'},'↗'),h('span',{className:'wb_mGrow'},url),h('button',{type:'button',className:'wb_mIcon','aria-label':'删除参考链接',onClick:function(){p.setRefText(p.refs.urls.filter(function(_,j){return j!==i;}).concat(p.refs.body?[p.refs.body]:[]).join('\n'));}},wbIcon('close')));}),
 						p.refs.body?h('div',{className:'wb_mReference'},h('span',{className:'wb_mRefIcon'},'▤'),h('span',{className:'wb_mGrow'},'粘贴的正文'),h('small',null,p.refs.body.length+' 字'),h('button',{type:'button',className:'wb_mIcon','aria-label':'删除参考正文',onClick:function(){p.setRefText(p.refs.urls.join('\n'));}},wbIcon('close'))):null,
 						h('button',{type:'button',className:'wb_mAdd',onClick:function(){addText[1]('');fileError[1]('');editor[1]('reference');}},wbIcon('plus'),'添加链接、正文或文件')),
 						h('div',{className:'wb_mChips wb_mStyles'},REF_STYLES.map(function(s){return chip(s,p.refStyle===s,function(){p.setRefStyle(s);});})))
-					:h('div',{className:'wb_mSkills'},p.skills.status==='loading'?h('p',null,'技能加载中…'):p.skills.status==='error'?h('p',null,'技能暂时无法加载，请稍后重试'):p.skills.skills.length===0?h('p',null,'还没有可用模板'):layers.map(function(layer){var list=p.skills.skills.filter(function(s){return skillLayer(s)===layer[0];});return list.length?h('section',{key:layer[0]},h('small',null,layer[1]),h('div',{className:'wb_mChips'},list.map(function(s){var n=p.counts[s.name]||0;return h('button',{type:'button',key:s.name,className:'wb_mChip','aria-pressed':n>0,title:s.description,onClick:function(e){p.addOne(s.name,e.currentTarget);}},skillDisplay(s.name),n>0?h('span',{className:'wb_skBadge',role:'button',tabIndex:0,'aria-label':'减少 '+skillDisplay(s.name)+' 1 篇',onClick:function(e){e.stopPropagation();p.minusOne(s.name);},onKeyDown:function(e){if(e.key==='Enter'||e.key===' '){e.preventDefault();e.stopPropagation();p.minusOne(s.name);}}},String(n)):null);}))):null;})),
+					:h('div',{className:'wb_mSkills',key:'skill'},p.skills.status==='loading'?h(WbSkeleton,{label:'技能加载中…'}):p.skills.status==='error'?h('p',null,'技能暂时无法加载，请稍后重试'):p.skills.skills.length===0?h('p',null,'还没有可用模板'):layers.map(function(layer){var list=p.skills.skills.filter(function(s){return skillLayer(s)===layer[0];});return list.length?h('section',{key:layer[0]},h('small',null,layer[1]),h('div',{className:'wb_mChips'},list.map(function(s){var n=p.counts[s.name]||0;return h('button',{type:'button',key:s.name,className:'wb_mChip','aria-pressed':n>0,title:s.description,onClick:function(e){p.addOne(s.name,e.currentTarget);}},skillDisplay(s.name),n>0?h('span',{className:'wb_skBadge',role:'button',tabIndex:0,'aria-label':'减少 '+skillDisplay(s.name)+' 1 篇',onClick:function(e){e.stopPropagation();p.minusOne(s.name);},onKeyDown:function(e){if(e.key==='Enter'||e.key===' '){e.preventDefault();e.stopPropagation();p.minusOne(s.name);}}},String(n)):null);}))):null;})),
 					h('button',{type:'button',className:'wb_mExtra',onClick:function(){editor[1]('base');}},h('b',null,'补充要求'),h('span',{className:'wb_mGrow'},p.base||'选填'),wbIcon('next'))),
 				h('div',{className:'wb_mAction wb_mAboveTabs'},p.pickedTotal>0?h('span',{className:'wb_skTags'},p.pickedEntries.map(function(s){return h('button',{type:'button',key:s.name,className:'wb_skTag',title:'点一下减 1 篇',onClick:function(){p.minusOne(s.name);}},skillDisplay(s.name),h('span',{className:'wb_skBadge'},String(s.count)));})):null,p.sending?h('p',{role:'status'},p.sending):null,h('button',{type:'button',className:'wb_mPrimary wb_mStart',disabled:!p.clientName||!!p.sending,onClick:p.dispatch},wbIcon('star'),'开始生文')),
-				sheet[0]?h(MobileModal,{title:'写给谁',close:function(){sheet[1](false);}},
-					h('small',{className:'wb_mCaption'},'客户'),empty?h('div',{className:'wb_mEmpty'},'还没有分配给你的客户 · 联系管理员'):h('div',{role:'radiogroup','aria-label':'客户'},p.clients.customers.map(function(c){var on=customerId(c)===p.pick.key;var bits=[];if(typeof c.files==='number')bits.push('知识库 '+c.files+' 条');if(on&&p.articles.status==='ready')bits.push('文章库 '+p.articles.articles.length+' 篇');return h('button',{type:'button',role:'radio','aria-checked':on,key:customerId(c),className:'wb_mClient',onClick:function(){setClient(c);}},h('span',{className:'wb_mAvatar'},customerName(c).slice(0,1)),h('span',{className:'wb_mGrow'},h('b',null,customerName(c)),h('small',null,bits.join(' · ')||'\u00a0')),h('span',{className:'wb_mRadio','data-on':on?'1':'0'},on?'✓':''));})),
+				h(WbPresence,null,sheet[0]?h(MobileModal,{title:'写给谁',close:function(){sheet[1](false);}},
+					h('small',{className:'wb_mCaption'},'客户'),p.clients.status==='loading'?h(WbSkeleton,{label:'客户加载中…'}):empty?h('div',{className:'wb_mEmpty'},'还没有分配给你的客户 · 联系管理员'):h('div',{role:'radiogroup','aria-label':'客户'},p.clients.customers.map(function(c){var on=customerId(c)===p.pick.key;var bits=[];if(typeof c.files==='number')bits.push('知识库 '+c.files+' 条');if(on&&p.articles.status==='ready')bits.push('文章库 '+p.articles.articles.length+' 篇');return h('button',{type:'button',role:'radio','aria-checked':on,key:customerId(c),className:'wb_mClient',onClick:function(){setClient(c);}},h('span',{className:'wb_mAvatar'},customerName(c).slice(0,1)),h('span',{className:'wb_mGrow'},h('b',null,customerName(c)),h('small',null,bits.join(' · ')||'\u00a0')),h('span',{className:'wb_mRadio','data-on':on?'1':'0'},on?'✓':''));})),
 					!empty?h(React.Fragment,null,h('small',{className:'wb_mCaption'},'产品线'),h('div',{className:'wb_mChips'},p.lines.length?p.lines.map(function(l){return chip(l.name||l.id,p.pick.line===String(l.id),function(){p.onLine({target:{value:String(l.id)}});},l.id);}):h('p',null,'暂无产品线')),h('small',{className:'wb_mCaption'},'期数'),h('div',{className:'wb_mChips'},p.periods.length?p.periods.map(function(v){return chip(v.name||v.id,p.pick.period===String(v.id),function(){p.setPick({key:p.pick.key,line:p.pick.line,period:String(v.id)});},v.id);}):h('p',null,'暂无期数'))):null,
-					h('button',{type:'button',className:'wb_mPrimary',disabled:!p.clientName,onClick:function(){sheet[1](false);}},'确定')):null,
-				editor[0]?h(MobileModal,{full:true,title:editor[0]==='base'?'补充要求':'添加参考',close:close},
+					h('button',{type:'button',className:'wb_mPrimary',disabled:!p.clientName,onClick:function(){sheet[1](false);}},'确定')):null),
+				h(WbPresence,null,editor[0]?h(MobileModal,{full:true,title:editor[0]==='base'?'补充要求':'添加参考',close:close},
 					h('textarea',{'aria-label':editor[0]==='base'?'补充要求':'参考链接或正文',placeholder:editor[0]==='base'?'还有什么写作要求？':'一行一个链接，或粘贴正文',value:editor[0]==='base'?p.base:addText[0],onChange:function(e){(editor[0]==='base'?p.setBase:addText[1])(e.target.value);}}),
 					editor[0]==='reference'?h('label',{className:'wb_mFile'},'选择文本文件（.txt / .md）',h('input',{type:'file',accept:'.txt,.md,text/plain,text/markdown',onChange:function(e){var f=e.target.files[0];if(!f)return;if(f.size>1024*1024){fileError[1]('请选择 1 MB 以内的文本文件');return;}f.text().then(function(text){addText[1](function(old){return [old,text].filter(Boolean).join('\n');});});}})):null,
 					fileError[0]?h('p',{role:'status'},fileError[0]):null,
-					h('button',{type:'button',className:'wb_mPrimary',onClick:function(){if(editor[0]==='reference')p.setRefText([p.refText,addText[0]].filter(Boolean).join('\n'));close();}},'完成')):null);
+					h('button',{type:'button',className:'wb_mPrimary',onClick:function(){if(editor[0]==='reference')p.setRefText([p.refText,addText[0]].filter(Boolean).join('\n'));close();}},'完成')):null));
 		}
 
 
 		function MobileDrawer(p) {
 			var start=React.useRef(0), ref=React.useRef(null);
-			React.useEffect(function(){var previous=document.activeElement;ref.current&&ref.current.focus();function key(e){if(e.key==='Escape')p.close();if(e.key==='Tab'){var items=Array.from(ref.current.querySelectorAll('button,input'));var first=items[0],last=items[items.length-1];if(e.shiftKey&&(document.activeElement===first||document.activeElement===ref.current)){e.preventDefault();last.focus();}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first.focus();}}}document.addEventListener('keydown',key);return function(){document.removeEventListener('keydown',key);if(previous&&previous.isConnected)previous.focus({preventScroll:true});};},[]);
-			return createPortal(h('div',{className:'wb_mScrim',onClick:function(e){if(e.target===e.currentTarget)p.close();}},
+			React.useEffect(function(){if(p['data-wb-leave'])return;var previous=document.activeElement;ref.current&&ref.current.focus();function key(e){if(e.key==='Escape')p.close();if(e.key==='Tab'){var items=Array.from(ref.current.querySelectorAll('button,input'));var first=items[0],last=items[items.length-1];if(e.shiftKey&&(document.activeElement===first||document.activeElement===ref.current)){e.preventDefault();last.focus();}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first.focus();}}}document.addEventListener('keydown',key);return function(){document.removeEventListener('keydown',key);if(previous&&previous.isConnected)previous.focus({preventScroll:true});};},[p['data-wb-leave']]);
+			return createPortal(h('div',{'data-wb-leave':p['data-wb-leave'],inert:p.inert,'aria-hidden':p['aria-hidden'],className:'wb_mScrim',onClick:function(e){if(e.target===e.currentTarget)p.close();}},
 				h('aside',{className:'wb_mDrawer',ref:ref,tabIndex:-1,role:'dialog','aria-modal':true,'aria-label':'会话列表',onTouchStart:function(e){start.current=e.touches[0].clientX;},onTouchEnd:function(e){if(start.current-e.changedTouches[0].clientX>70)p.close();}},
 					h('div',{className:'wb_mDrawerHead'},h('b',null,'生文 Agent'),h('button',{type:'button',className:'wb_mIcon','aria-label':'关闭会话抽屉',onClick:p.close},wbIcon('close'))),
 					h('div',{className:'wb_mDrawerTools'},h('button',{type:'button',className:'wb_mPrimary',onClick:p.compose},wbIcon('plus'),'新建任务'),h('label',{className:'wb_mSearch'},wbIcon('search'),h('input',{type:'search','aria-label':'搜索会话',placeholder:'搜索会话',value:wbNavState.q,onChange:function(e){wbNavState.q=e.target.value;wbNavEmit();}}))),
-					h('div',{className:'wb_mTree'},p.names.map(function(name){var open=wbNavState.open[name]!==false;return h('section',{key:name},h('button',{type:'button',className:'wb_mGroup','aria-expanded':open,onClick:function(){wbNavState.open[name]=!open;wbNavEmit();}},h('span',{className:'wb_mAvatar'},name.slice(0,1)),h('b',null,name),h('small',null,p.groups[name].length),wbIcon(open?'down':'next')),open?p.groups[name].map(function(it){var status=wbSessionStatus(wbNavState.statuses&&wbNavState.statuses[it.id]);return h('button',{key:it.id,type:'button',className:'wb_mSession','aria-current':it.id===wbNavState.current,onClick:function(){p.openSession(it.id);}},h('span',{className:'wb_mStatus','data-tone':status.tone}),h('span',{className:'wb_mGrow'},h('b',null,it.title),h('small',null,[it.at?collectedDay(it.at).slice(5,10).replace('-','月')+'日':'',status.label].filter(Boolean).join(' · '))));}):null);}),p.names.length===0?h('p',{className:'wb_mEmpty'},wbNavState.q?'没有匹配的会话':'还没有会话，点上方新建任务'):null),
+					h('div',{className:'wb_mTree'},p.names.map(function(name){var open=wbNavState.open[name]!==false;return h('section',{key:name},h('button',{type:'button',className:'wb_mGroup','aria-expanded':open,onClick:function(){wbNavState.open[name]=!open;wbNavEmit();}},h('span',{className:'wb_mAvatar'},name.slice(0,1)),h('b',null,name),h('small',null,p.groups[name].length),wbIcon(open?'down':'next')),h(WbCollapse,{open:open},p.groups[name].map(function(it){var status=wbSessionStatus(wbNavState.statuses&&wbNavState.statuses[it.id]);return h('button',{key:it.id,type:'button',className:'wb_mSession','aria-current':it.id===wbNavState.current,onClick:function(){p.openSession(it.id);}},h('span',{className:'wb_mStatus','data-tone':status.tone}),h('span',{className:'wb_mGrow'},h('b',null,it.title),h('small',null,[it.at?collectedDay(it.at).slice(5,10).replace('-','月')+'日':'',status.label].filter(Boolean).join(' · '))));})));}),p.names.length===0?h('p',{className:'wb_mEmpty'},wbNavState.q?'没有匹配的会话':'还没有会话，点上方新建任务'):null),
 					h('div',{className:'wb_mAccount'},h('span',{className:'wb_mAvatar'},p.me.label.slice(0,1)),h('div',null,h('b',null,p.me.label),p.me.sub?h('small',null,p.me.sub):null)))),document.body);
 		}
 		function MobileQuickPrompts(p) {
@@ -393,9 +440,9 @@ window.__ModuleLoader__.load({
 			return h('div',{className:'wb_mChat',ref:chatRef},h(MobileTopBar,{title:title,sub:sub,back:function(){var layout=WbCtx&&WbCtx.get?WbCtx.get('layout'):null;if(layout)layout.selectPanel(WORKBENCH_KEY);},more:function(){menu[1](true);}}),
 				h('div',{className:'wb_mPinned'},rows.length?h('details',{className:'wb_mProgress'},h('summary',null,h('span',null,'任务进度'),h('small',null,completed+'/'+rows.length),wbIcon('down')),h('div',{className:'wb_mChecklist'},rows.map(function(row,i){return h('div',{className:'wb_trow',key:i},h('span',{className:'wb_ticon','data-s':row[0]},row[0]==='done'?'✓':row[0]==='run'?'◷':'○'),h('span',null,row[1]));}))):null,
 					h(ReviewTabBody,Object.assign({},p.reviewProps,{mobileInline:true}))),
-				menu[0]?h(MobileModal,{title:'会话操作',close:function(){menu[1](false);}},wbCanRename(p.sessionId)?h('button',{type:'button',className:'wb_mMenuRow',onClick:function(){menu[1](false);newTitle[1](title);renameError[1]('');rename[1](true);}},'重命名'):null,h('button',{type:'button',className:'wb_mMenuRow',onClick:function(){menu[1](false);preset[1](true);}},'这次发起时的预设'),h('button',{type:'button',className:'wb_mMenuRow',onClick:function(){menu[1](false);wbNavState.drawer=true;wbNavEmit();}},'会话列表'),h('button',{type:'button',className:'wb_mMenuRow',onClick:function(){menu[1](false);preset[1]('desktop');}},'在电脑上打开')):null,
-				rename[0]?h(MobileModal,{title:'重命名',close:function(){rename[1](false);}},h('input',{className:'wb_mRename',value:newTitle[0],maxLength:40,autoFocus:true,disabled:renaming[0],'aria-label':'会话名称',onFocus:function(e){e.target.select();},onChange:function(e){newTitle[1](wbClampTitle(e.target.value));},onKeyDown:function(e){wbTitleKey(e,saveTitle,function(){rename[1](false);});}}),renameError[0]?h('p',{role:'alert'},renameError[0]):null,h('button',{type:'button',className:'wb_mPrimary',disabled:renaming[0],onClick:saveTitle},'保存')):null,
-				preset[0]?h(MobileModal,{title:preset[0]==='desktop'?'在电脑上打开':'这次发起时的预设',close:function(){preset[1](false);}},h('div',{className:'wb_mPreset'},preset[0]==='desktop'?'在电脑上登录同一账号，从会话列表打开「'+title+'」。':[meta.client,meta.line,meta.period,meta.topic,meta.refs&&meta.refs.style,(meta.skills||[]).map(skillDisplay).join('、'),meta.base].filter(Boolean).join('\n')||'此会话没有装配台预设')):null);
+				h(WbPresence,null,menu[0]?h(MobileModal,{title:'会话操作',close:function(){menu[1](false);}},wbCanRename(p.sessionId)?h('button',{type:'button',className:'wb_mMenuRow',onClick:function(){menu[1](false);newTitle[1](title);renameError[1]('');rename[1](true);}},'重命名'):null,h('button',{type:'button',className:'wb_mMenuRow',onClick:function(){menu[1](false);preset[1](true);}},'这次发起时的预设'),h('button',{type:'button',className:'wb_mMenuRow',onClick:function(){menu[1](false);wbNavState.drawer=true;wbNavEmit();}},'会话列表'),h('button',{type:'button',className:'wb_mMenuRow',onClick:function(){menu[1](false);preset[1]('desktop');}},'在电脑上打开')):null),
+				h(WbPresence,null,rename[0]?h(MobileModal,{title:'重命名',close:function(){rename[1](false);}},h('input',{className:'wb_mRename',value:newTitle[0],maxLength:40,autoFocus:true,disabled:renaming[0],'aria-label':'会话名称',onFocus:function(e){e.target.select();},onChange:function(e){newTitle[1](wbClampTitle(e.target.value));},onKeyDown:function(e){wbTitleKey(e,saveTitle,function(){rename[1](false);});}}),renameError[0]?h('p',{role:'alert'},renameError[0]):null,h('button',{type:'button',className:'wb_mPrimary',disabled:renaming[0],onClick:saveTitle},'保存')):null),
+				h(WbPresence,null,preset[0]?h(MobileModal,{title:preset[0]==='desktop'?'在电脑上打开':'这次发起时的预设',close:function(){preset[1](false);}},h('div',{className:'wb_mPreset'},preset[0]==='desktop'?'在电脑上登录同一账号，从会话列表打开「'+title+'」。':[meta.client,meta.line,meta.period,meta.topic,meta.refs&&meta.refs.style,(meta.skills||[]).map(skillDisplay).join('、'),meta.base].filter(Boolean).join('\n')||'此会话没有装配台预设')):null));
 		}
 
 		/* ==================================================================
@@ -492,6 +539,7 @@ window.__ModuleLoader__.load({
 			 * the conversation skin needs it too. The light palette is fixed so
 			 * host Appearance changes cannot create a mixed skin. */
 			"body{",
+			"  --wb-klein:#002FA7; --wb-motion:200ms; --wb-motion-fast:150ms; --wb-motion-panel:220ms; --wb-ease:cubic-bezier(0.2, 0, 0, 1);",
 			"  --wb-bg:#ffffff; --wb-side:#f6f7f9; --wb-elev:#ffffff; --wb-elev2:#eef1f5;",
 			"  --wb-line:#e2e5ea; --wb-line-soft:#edeff3;",
 			"  --wb-text:#1d2129; --wb-strong:#000000; --wb-dim:#5b626e; --wb-dim2:#98a0ac;",
@@ -560,8 +608,11 @@ window.__ModuleLoader__.load({
 			"[data-slot='main.conversation'][data-wb-running] [data-disclosure-row],",
 			"[data-slot='main.conversation'][data-wb-running] button[data-turn-process],",
 			"[data-slot='main.conversation'][data-wb-running] [data-chat-flow-kind='reasoning']{display:none !important;}",
-			".wb_ldr{display:flex; align-items:center; gap:10px; background:#fff; border:1px solid #e7e9ee; border-radius:13px; padding:11px 16px; margin:8px 0; max-width:640px; color:#565c6b; font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif; font-size:13px; box-shadow:0 1px 2px rgba(16,24,40,.04);}",
-			".wb_ldrSpin{width:14px; height:14px; flex:none; border:2px solid #dbe2ef; border-top-color:#3b6df6; border-radius:50%; animation:wbSpin .8s linear infinite;}",
+			/* Direct child of the unpadded conversation slot: reserve a full inset
+			 * inside its scroll/clip boundary, without changing the host overflow. */
+			".wb_ldr{box-sizing:border-box;display:flex;flex:0 0 auto;align-items:center;gap:10px;background:#fff;border:1px solid #e7e9ee;border-radius:13px;padding:11px 16px;margin:8px 16px;max-width:min(640px,calc(100% - 32px));min-width:0;overflow:visible;color:#565c6b;font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;font-size:13px;box-shadow:0 2px 8px rgba(0,47,167,.05);animation:wbEnter var(--wb-motion) var(--wb-ease);}",
+			".wb_ldrSpin{display:inline-block;box-sizing:border-box;width:18px;height:18px;flex:0 0 18px;border:0;border-radius:50%;corner-shape:round;background:conic-gradient(from 0deg,rgba(0,47,167,.15) 0deg 90deg,var(--wb-klein) 270deg 360deg);-webkit-mask:radial-gradient(farthest-side,transparent calc(100% - 2px),#000 calc(100% - 1.5px));mask:radial-gradient(farthest-side,transparent calc(100% - 2px),#000 calc(100% - 1.5px));animation:wbSpin .8s linear infinite;}",
+			".wb_ldrT{min-width:0;overflow-wrap:anywhere;}",
 			"@keyframes wbSpin{to{transform:rotate(360deg)}}",
 			/* —— 进行中思考淡化 —— */
 			"[data-slot='main.conversation'] [data-chat-flow-kind='reasoning']{opacity:.55;}",
@@ -1015,7 +1066,7 @@ window.__ModuleLoader__.load({
 			"  font-weight:600; text-align:center; box-shadow:0 1px 3px rgba(0,0,0,.28); cursor:pointer;",
 			"}",
 			".wb_skBadge:hover{filter:brightness(.88);}",
-			".wb_bump{animation:wb_bump .32s ease;}",
+			".wb_bump{animation:wb_bump var(--wb-motion) var(--wb-ease);}",
 			"@keyframes wb_bump{0%{transform:scale(1);}35%{transform:scale(1.14);}100%{transform:scale(1);}}",
 			".wb_fly{",
 			"  position:fixed; width:10px; height:10px; border-radius:50%; background:var(--wb-accent);",
@@ -1098,6 +1149,46 @@ window.__ModuleLoader__.load({
 			".wb_emptyT{font-size:13px;}",
 			".wb_emptyS{font-size:11.5px; color:var(--wb-dim2); line-height:1.7; max-width:46em;}",
 			".wb_bad{color:var(--wb-bad);}",
+
+			/* Motion: short feedback, 220ms surfaces, transform-only waiting shimmer.
+			 * Durations/easing follow Ant Design's restrained interaction patterns. */
+			"@keyframes wbEnter{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}",
+			"@keyframes wbFade{from{opacity:0}to{opacity:1}}",
+			"@keyframes wbFadeOut{from{opacity:1}to{opacity:0}}",
+			"@keyframes wbSurfaceIn{from{opacity:0;transform:translate3d(var(--wb-enter-x,0px),var(--wb-enter-y,16px),0)}to{opacity:1;transform:none}}",
+			"@keyframes wbSurfaceOut{from{opacity:1;transform:none}to{opacity:0;transform:translate3d(var(--wb-enter-x,0px),var(--wb-enter-y,16px),0)}}",
+			"@keyframes wbShimmer{from{transform:translateX(-100%)}to{transform:translateX(100%)}}",
+			".wb_skeleton{box-sizing:border-box;width:100%;min-width:0;padding:14px;color:var(--wb-dim);font-size:12.5px;}",
+			".wb_skeletonLabel{display:block;margin-bottom:10px;}.wb_skeletonBlocks{display:grid;gap:10px;}",
+			".wb_skeletonLine{display:block;position:relative;overflow:hidden;height:12px;border-radius:6px;background:rgba(0,47,167,.06);}.wb_skeletonLine:last-child{width:65%;}",
+			".wb_skeletonLine::after{content:'';position:absolute;inset:0;background:linear-gradient(90deg,transparent,rgba(255,255,255,.85),transparent);animation:wbShimmer 1.4s var(--wb-ease) infinite;}",
+			".wb_skeletonCompact{width:160px;max-width:100%;padding:0;}.wb_skeletonCompact .wb_skeletonBlocks{grid-template-columns:2fr 1fr 1fr;gap:6px;}.wb_skeletonCompact .wb_skeletonLine:last-child{width:100%;}",
+			".wb_empty>.wb_skeleton{max-width:480px;}.wb_skeletonCompact .wb_skeletonLabel{margin-bottom:4px;font-size:inherit;}",
+			".wb_root button,button:is([class^='wb_'],[class*=' wb_']),.wb_mScrim button,.wb_mSegment button,.wb_ri,.wb_mWeakRow,.wb_tblGap td,.wb_sel select{transition:background-color var(--wb-motion-fast) var(--wb-ease),border-color var(--wb-motion-fast) var(--wb-ease),color var(--wb-motion-fast) var(--wb-ease),box-shadow var(--wb-motion-fast) var(--wb-ease),opacity var(--wb-motion-fast) var(--wb-ease),transform var(--wb-motion-fast) var(--wb-ease);}",
+			"button:is([class^='wb_'],[class*=' wb_']):active:not(:disabled),.wb_mSegment button:active:not(:disabled){transform:scale(.97);}",
+			"button:is(.wb_send,.wb_go,.wb_nvNew,.wb_rvConfirmAll,.wb_mPrimary):hover:not(:disabled){box-shadow:0 3px 10px rgba(0,47,167,.18);}",
+			"button:is(.wb_rvConfirm,.wb_rvCheck,.wb_editBtn,.wb_editCancel,.wb_mIcon,.wb_mChip):hover:not(:disabled){border-color:var(--wb-klein);color:var(--wb-klein);}",
+			"html[data-wb-mobile] .wb_mSession:hover,html[data-wb-mobile] .wb_mGroup:hover{background:rgba(0,47,167,.05);}.wb_nvItem,.wb_mSession,.wb_ri,.wb_mReviewItem{animation:wbEnter var(--wb-motion) var(--wb-ease);}",
+			"button[class*='wb_'][aria-busy='true']{cursor:wait;opacity:.65;}button[class*='wb_'][aria-busy='true']::before{content:'';display:inline-block;box-sizing:border-box;width:14px;height:14px;margin-right:6px;vertical-align:-2px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;corner-shape:round;animation:wbSpin .8s linear infinite;}",
+			".wb_go[aria-busy='true']::before{position:absolute;margin:0;}.wb_go[aria-busy='true']{font-size:0;}",
+			".wb_workBody,.wb_refBd,.wb_mReferences,.wb_mSkills,.wb_mWeakWrap,.wb_mTopic,.wb_reviewText,.wb_mArticle{animation:wbFade var(--wb-motion) var(--wb-ease);}",
+			".wb_empty,.wb_skEmpty,.wb_mEmpty,.wb_mWeakEmpty,.wb_reviewMsg:not(:empty),.wb_editMsg:not(:empty),.wb_nvRenameError,.wb_tickError,.wb_bad:not(:empty),.wb_mAssembly [role='status'],.wb_mScrim [role='alert'],.wb_nvMenu,.wb_platMenu,.wb_modelMenu{animation:wbEnter var(--wb-motion) var(--wb-ease);}",
+			".wb_mScrim,.wb_zoomMask,.wb_confirmMask,.wb_reviewWrap{animation:wbFade var(--wb-motion-panel) var(--wb-ease);}",
+			".wb_mSheet,.wb_mEditor,.wb_mDrawer,.wb_mReview,.wb_zoomSheet,.wb_confirmCard,.wb_review,.wb_rv{animation:wbSurfaceIn var(--wb-motion-panel) var(--wb-ease);}",
+			".wb_mDrawer{--wb-enter-x:-24px;--wb-enter-y:0px;}.wb_rv{--wb-enter-x:12px;--wb-enter-y:0px;}",
+			"[data-wb-leave='1']:is(.wb_mScrim,.wb_zoomMask,.wb_confirmMask,.wb_reviewWrap){animation:wbFadeOut var(--wb-motion-panel) var(--wb-ease) forwards;pointer-events:none;}",
+			"[data-wb-leave='1']>:is(.wb_mSheet,.wb_mEditor,.wb_mDrawer,.wb_zoomSheet,.wb_confirmCard,.wb_review),.wb_mReview[data-wb-leave='1']{animation:wbSurfaceOut var(--wb-motion-panel) var(--wb-ease) forwards;pointer-events:none;}",
+			".wb_collapse{display:grid;grid-template-rows:0fr;opacity:0;flex:0 0 auto;transition:grid-template-rows var(--wb-motion-panel) var(--wb-ease),opacity var(--wb-motion-panel) var(--wb-ease);}.wb_collapse[data-open='1']{grid-template-rows:1fr;opacity:1;}.wb_collapseInner{min-height:0;overflow:hidden;}",
+			".wb_rvCollapse .wb_collapseInner{transform:translateY(-6px);transition:transform var(--wb-motion-panel) var(--wb-ease);}.wb_rvCollapse[data-open='1'] .wb_collapseInner{transform:none;}",
+			".wb_ref>.wb_collapse{flex:1;min-height:0;}.wb_ref>.wb_collapse>.wb_collapseInner{display:flex;flex-direction:column;}.wb_ref[data-open='0']{min-height:0;}",
+			".wb_mProgress summary svg,.wb_rvChev,[data-slot='main.conversation'] [data-disclosure-row] svg{transition:transform var(--wb-motion) var(--wb-ease),color var(--wb-motion) var(--wb-ease);}",
+			"[data-slot='main.conversation'] :is(button[data-turn-process],[data-disclosure-row]){transition:background-color var(--wb-motion-fast) var(--wb-ease),opacity var(--wb-motion) var(--wb-ease);}",
+			".wb_mProgress[open] .wb_mChecklist,[data-slot='main.conversation'] [data-wb-open]>:not(.wb_prefoldHead),[data-slot='main.conversation'] [data-disclosure-row]{animation:wbFade var(--wb-motion) var(--wb-ease);}",
+			"@supports selector(details::details-content){.wb_mProgress::details-content{opacity:0;transition:opacity var(--wb-motion) var(--wb-ease),content-visibility var(--wb-motion) allow-discrete;}.wb_mProgress[open]::details-content{opacity:1;}}",
+			/* Progressive intrinsic-height interpolation; older engines retain the fold. */
+			"@supports (interpolate-size:allow-keywords){[data-slot='main.conversation'] [data-wb-prefold]{interpolate-size:allow-keywords;height:auto;max-height:none;overflow:hidden;transition:height var(--wb-motion) var(--wb-ease);}[data-slot='main.conversation'] [data-wb-prefold]:not([data-wb-open]){height:37px;max-height:none;}}",
+			"html[data-wb-mobile][data-wb-scene='compose'] dsh-tabbar a{transition:opacity var(--wb-motion-fast) var(--wb-ease),transform var(--wb-motion-fast) var(--wb-ease);}html[data-wb-mobile][data-wb-scene='compose'] dsh-tabbar a:active{opacity:.7;transform:scale(.96);}",
+			"@media (prefers-reduced-motion: reduce){[class^='wb_'],[class*=' wb_'],[class^='wb_']::before,[class^='wb_']::after,[class*=' wb_']::before,[class*=' wb_']::after,.wb_root *,.wb_mScrim *,.wb_mProgress *,[data-slot='main.conversation'] [data-wb-prefold],[data-slot='main.conversation'] [data-wb-open]>*,[data-slot='main.conversation'] button[data-turn-process],[data-slot='main.conversation'] [data-disclosure-row],[data-slot='main.conversation'] [data-disclosure-row] *,html[data-wb-mobile][data-wb-scene='compose'] dsh-tabbar a{animation:none!important;transition:none!important;scroll-behavior:auto!important;}.wb_mProgress::details-content{transition:none!important;}.wb_ldrSpin{transform:none;}.wb_fly{display:none;}}",
 		].join("\n");
 
 		/* Mobile CSS: tokens/components adapted from screens/ds.css. */
@@ -2041,7 +2132,8 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			var ldr = root.querySelector(":scope > .wb_ldr");
 			if (running && !ldr) {
 				ldr = document.createElement("div"); ldr.className = "wb_ldr";
-				var sp = document.createElement("span"); sp.className = "wb_ldrSpin";
+				ldr.setAttribute("role", "status"); ldr.setAttribute("aria-label", "Agent 正在处理"); ldr.setAttribute("aria-live", "off");
+				var sp = document.createElement("span"); sp.className = "wb_ldrSpin"; sp.setAttribute("aria-hidden", "true");
 				var lb = document.createElement("span"); lb.className = "wb_ldrT";
 				ldr.appendChild(sp); ldr.appendChild(lb);
 				var phrases = ["正在查资料", "正在做选题", "正在搭文章骨架", "正在码字", "正在核对事实", "正在打磨标题"];
@@ -2200,7 +2292,8 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 		function Empty(props) {
 			return h("div", { className: "wb_empty" },
 				h("div", { className: "wb_emptyT" + (props.bad ? " wb_bad" : "") }, props.title),
-				props.sub ? h("div", { className: "wb_emptyS" }, props.sub) : null);
+				props.sub ? h("div", { className: "wb_emptyS" }, props.sub) : null,
+				props.loading ? h(WbSkeleton, {}) : null);
 		}
 
 		/* 会话域接力：装配台（root 域）拿不到 inputActions，发不了消息。
@@ -2343,7 +2436,12 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				head.innerHTML = '<div><div class="wb_reviewTitle">产物审核</div><div class="wb_reviewSub">客户「' + client + '」 · 确认后才正式入库</div></div>';
 				var closeBtn = document.createElement("button");
 				closeBtn.type = "button"; closeBtn.className = "wb_reviewClose"; closeBtn.textContent = "关闭";
-				closeBtn.onclick = function () { wrap.remove(); };
+				function closeReview() {
+					if (wrap.hasAttribute("data-wb-leave")) return;
+					wrap.setAttribute("data-wb-leave", "1"); wrap.inert = true;
+					wbAfterMotion(function () { wrap.remove(); });
+				}
+				closeBtn.onclick = closeReview;
 				head.appendChild(closeBtn);
 				var bodyEl = document.createElement("div");
 				bodyEl.className = "wb_reviewBody";
@@ -2354,7 +2452,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				bodyEl.appendChild(listEl); bodyEl.appendChild(mainEl);
 				card.appendChild(head); card.appendChild(bodyEl);
 				wrap.appendChild(card);
-				wrap.addEventListener("click", function (e) { if (e.target === wrap) wrap.remove(); });
+				wrap.addEventListener("click", function (e) { if (e.target === wrap) closeReview(); });
 				document.body.appendChild(wrap);
 
 				var mainTitle = null, mainText = null, mainFoot = null, msgEl = null, currentTitle = "";
@@ -2376,6 +2474,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					mainEl.appendChild(mainTitle); mainEl.appendChild(mainText); mainEl.appendChild(mainFoot);
 				}
 				function loadDrafts() {
+					if (!listEl.children.length) wbShowSkeleton(listEl, "草稿列表加载中…");
 					fetch(WB_API.drafts + "?client=" + encodeURIComponent(client), { headers: { accept: "application/json" } })
 						.then(function (r) { return r.json(); })
 						.then(function (b) {
@@ -2398,7 +2497,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				function openBody(title) {
 					currentTitle = title; ensureMain();
 					mainTitle.textContent = title;
-					mainText.textContent = "加载中…"; mainFoot.style.display = "none";
+					wbShowSkeleton(mainText, "加载中…"); mainFoot.style.display = "none";
 					fetch(WB_API.draft + "?client=" + encodeURIComponent(client) + "&title=" + encodeURIComponent(title), { headers: { accept: "text/markdown" } })
 						.then(function (r) { return r.text(); })
 						.then(function (text) { mainText.textContent = text; mainFoot.style.display = "flex"; })
@@ -2696,7 +2795,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				var mobile = useWbMobile();
 				if (mobile) {
 					var me = { label: "生文 Agent", sub: "" };
-					return wbNavState.drawer ? h(MobileDrawer, { groups: groups, names: names, me: me, compose: goCompose, openSession: openSession, close: function () { wbNavState.drawer = false; wbNavEmit(); } }) : null;
+					return h(WbPresence, null, wbNavState.drawer ? h(MobileDrawer, { groups: groups, names: names, me: me, compose: goCompose, openSession: openSession, close: function () { wbNavState.drawer = false; wbNavEmit(); } }) : null);
 				}
 				return h("div", { className: "wb_nv", style: { width: String(wbNavState.navW) + "px" } },
 					h("div", { className: "wb_nvBrand" }, h("span", { className: "wb_nvBrandT" }, "生文 Agent")),
@@ -2736,9 +2835,9 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 												wbNavState.open[name] = !open; wbNavEmit();
 											},
 										}, (open ? "▾ " : "▸ ") + name + "（" + groups[name].length + "）"),
-										open ? groups[name].map(function (it) {
+										h(WbCollapse, { open: open }, groups[name].map(function (it) {
 											return h(WbSessionRow, { key: String(it.id), item: it, ctx: ctx, open: openSession });
-										}) : null);
+										})));
 								}))));
 			}
 
@@ -2816,6 +2915,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			 * 客户来源：openTab params 优先，否则从当前会话解析。 */
 			function ReviewTabBody(props) {
 				var mobile = useWbMobile() && !props.unifiedPanel;
+				var mobileReview = React.useState(false);
 				var sessionId = props.sessionId;
 				var useChat = props.useChat;
 				var initialBinding = sessionId && wbNavState.bindings ? wbNavState.bindings[sessionId] : null;
@@ -3339,8 +3439,8 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 						});
 				}
 				function confirmTargets(targets, label) {
-					if (props.unifiedPanel && (st[0].editing || st[0].saving || st[0].confirming)) return;
-					if (props.unifiedPanel) setL(function (p) {return Object.assign({},p,{confirming:true});});
+					if (st[0].confirming || (props.unifiedPanel && (st[0].editing || st[0].saving))) return;
+					setL(function (p) {return Object.assign({},p,{confirming:true});});
 					var idx2 = 0, okN = 0, skipN = 0, failN = 0, failWhy = "";
 					setL(function (p) { return Object.assign({}, p, { msg: (label || "入库") + "中 0/" + targets.length + " …" }) });
 					function next() {
@@ -3371,13 +3471,18 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					return h(MobileChatHeader, { sessionId: sessionId, meta: st[0].meta || { client: client }, nodes: Array.isArray(legacyNodes) ? legacyNodes : [], legacy: chatSnap && chatSnap.legacy, reviewProps: props });
 				}
 				if (mobile && props.mobileInline) {
-					return h("div", { className: "wb_mReview" },
-						h(MobileTopBar, { title: client || "文章审核", back: function () {} }),
-						h("div", { className: "wb_mReviewList" },
+					return h(React.Fragment, null,
+						h("button", { type: "button", className: "wb_mPending", onClick: function () { mobileReview[1](true); } }, "草稿审核"),
+						h(WbPresence, null, mobileReview[0] ? h("div", { className: "wb_mReview" },
+						h(MobileTopBar, { title: client || "文章审核", back: function () {
+						if (sel) setL(function (p) { return Object.assign({}, p, { sel: "" }); });
+						else mobileReview[1](false);
+					} }),
+						!sel ? h("div", { className: "wb_mReviewList" },
 							pending.map(function (d) { return h("button", { type: "button", key: d.title, className: "wb_mReviewItem", onClick: function () { openDraft(d.title); } }, h("b", null, d.title), h("small", null, doneMap[d.title] ? "已入库" : "待审核")); }),
-							pending.length === 0 ? h("p", { className: "wb_mEmpty" }, drafts === null ? "草稿列表加载中…" : "草稿区是空的") : null),
-						sel ? h("article", { className: "wb_mArticle" }, h("h1", null, sel), h("div", { dangerouslySetInnerHTML: { __html: wbMdToHtml(bodyText) } })) : null,
-						pending.length ? h("div", { className: "wb_mAction" }, h("button", { type: "button", className: "wb_mPrimary", disabled: checkedCount === 0, onClick: function () { confirmTargets(pending.filter(function (d) { return WB_PICK.sel[d.title]; }).map(function (d) { return d.title; }), "入库"); } }, "确认入库（" + checkedCount + " 篇）")) : null);
+							pending.length === 0 ? (drafts === null ? h(WbSkeleton, { label: "草稿列表加载中…" }) : h("p", { className: "wb_mEmpty" }, "草稿区是空的")) : null) : null,
+						sel ? h("article", { className: "wb_mArticle", key: sel }, h("h1", null, sel), bodyText === "加载中…" ? h(WbSkeleton, { label: bodyText }) : h("div", { dangerouslySetInnerHTML: { __html: wbMdToHtml(bodyText) } })) : null,
+						pending.length ? h("div", { className: "wb_mAction" }, h("button", { type: "button", className: "wb_mPrimary", "aria-busy": !!st[0].confirming, disabled: !!st[0].confirming || checkedCount === 0, onClick: function () { confirmTargets(pending.filter(function (d) { return WB_PICK.sel[d.title]; }).map(function (d) { return d.title; }), "入库"); } }, "确认入库（" + checkedCount + " 篇）")) : null) : null));
 				}
 				if (!client) return h("div", { className: "wb_rvEmpty" }, "没有正在进行的任务 —— 从装配台发起后，这里会自动打开");
 				var toggleRv = function () { setL(function (p) { return Object.assign({}, p, { rvOpen: !rvOpen }); }); };
@@ -3388,7 +3493,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 						h("span", { className: "wb_rvState" }, props.unifiedPanel ? (hc !== null ? "已检查" : "未检查") : (doneCount === n && n > 0 ? "已检查" : "未检查")),
 						h("span", { className: "wb_rvSel" }, "草稿审核"),
 						h("button", {
-							type: "button", className: "wb_rvCheck", disabled: checking || drafts === null || drafts.length === 0,
+							type: "button", className: "wb_rvCheck", "aria-busy": checking, disabled: checking || drafts === null || drafts.length === 0,
 							title: "跑一遍硬检规则（拦/证/提 三档，纯正则零 token）",
 							onClick: function (ev) { ev.stopPropagation(); runCheck(); },
 						}, checking ? "检查中…" : (hc !== null ? "重新检查" : "开始检查")),
@@ -3396,12 +3501,11 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					h("div", { className: "wb_rvProg" },
 						h("span", { className: "wb_rvCount" }, "已通过 " + doneCount + " / " + n),
 						h("span", { className: "wb_rvHint" }, "确认 = 入库")),
-					rvOpen && hcChildren.length > 0
-						? h.apply(null, ["div", { className: "wb_hc" }].concat(hcChildren))
-						: null,
+					h(WbCollapse, { open: rvOpen && hcChildren.length > 0, className: "wb_rvCollapse" },
+						h.apply(null, ["div", { className: "wb_hc" }].concat(hcChildren))),
 					msg ? h("div", { className: "wb_reviewMsg" }, msg) : null,
 					n === 0
-						? h("div", { className: "wb_rvEmpty2" }, drafts === null ? "草稿列表加载中…" : "草稿区是空的 —— agent 写完会出现在这里")
+						? (drafts === null ? h(WbSkeleton, { label: "草稿列表加载中…" }) : h("div", { className: "wb_rvEmpty2" }, "草稿区是空的 —— agent 写完会出现在这里"))
 						: h("div", { className: "wb_rvCols" },
 							h("div", { className: "wb_reviewList" },
 								pending.map(function (d, idx) {
@@ -3423,7 +3527,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 										st[0].editing === true
 											? h("span", { className: "wb_editOps" },
 												h("button", {
-													type: "button", className: "wb_editSave",
+													type: "button", className: "wb_editSave", "aria-busy": st[0].saving === true,
 													disabled: st[0].saving === true,
 													onClick: saveDraft,
 												}, st[0].saving === true ? "保存中…" : "保存"),
@@ -3452,7 +3556,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 									})
 									: (bodyText && bodyText !== "加载中…"
 										? h("div", { className: "wb_reviewText wb_rvMd", dangerouslySetInnerHTML: { __html: wbMdToHtml(bodyText) } })
-										: h("div", { className: "wb_reviewText" }, bodyText || "")))),
+										: bodyText === "加载中…" ? h(WbSkeleton, { label: bodyText }) : h("div", { className: "wb_reviewText" }, bodyText || "")))),
 					n > 0 && doneCount > 0
 						? h("div", { className: "wb_rvDoneSeg" },
 							h("div", { className: "wb_rvSep" }, "已入库 " + doneCount),
@@ -3468,7 +3572,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					n > 0
 						? h("div", { className: "wb_rvFoot" },
 							h("button", {
-								type: "button", className: "wb_rvConfirm", disabled: props.unifiedPanel ? (st[0].editing || st[0].saving || st[0].confirming || st[0].readError || bodyText === "加载中…" || !sel || doneMap[sel] === true) : checkedCount === 0 && sel === "",
+								type: "button", className: "wb_rvConfirm", "aria-busy": !!st[0].confirming, disabled: st[0].confirming || (props.unifiedPanel ? (st[0].editing || st[0].saving || st[0].readError || bodyText === "加载中…" || !sel || doneMap[sel] === true) : checkedCount === 0 && sel === ""),
 								onClick: function () {
 									var targets = pending.filter(function (d) { return WB_PICK.sel[d.title] === true; }).map(function (d) { return d.title; });
 									if (targets.length === 0 && sel !== "") targets = [sel];
@@ -3476,7 +3580,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 								},
 							}, checkedCount > 0 ? "确认入库（" + checkedCount + " 篇）" : "确认入库"),
 							h("button", {
-								type: "button", className: "wb_rvConfirmAll", disabled: pending.length === 0 || (props.unifiedPanel && (st[0].editing || st[0].saving || st[0].confirming)),
+								type: "button", className: "wb_rvConfirmAll", "aria-busy": !!st[0].confirming, disabled: st[0].confirming || pending.length === 0 || (props.unifiedPanel && (st[0].editing || st[0].saving)),
 								onClick: function () { confirmTargets(pending.map(function (d) { return d.title; }), "批量入库"); },
 							}, "全部确认"))
 						: null);
@@ -4025,11 +4129,12 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				else if (args.unmapped.indexOf(args.clientName) >= 0) sub = "「" + args.clientName + "」还没配到数据服务的企业 ID。";
 				else sub = "数据服务的 45 天窗口内没有「" + args.clientName + "」。";
 				return h(Empty, {
+					loading: args.dirStatus === "loading",
 					title: args.dirStatus === "loading" ? "正在取可查客户…" : "这个客户还没有薄弱问句数据",
 					sub: sub,
 				});
 			}
-			if (gaps.status === "loading") return h(Empty, { title: "取数中…", sub: "" });
+			if (gaps.status === "loading") return h(Empty, { loading: true, title: "取数中…", sub: "" });
 			if (gaps.status === "error") return h(Empty, { bad: true, title: "这个客户取不到薄弱问句", sub: weakErrorText(gaps.error, gaps.detail) });
 			if (gaps.status !== "ready") return h(Empty, { title: "还没有数据", sub: "" });
 			if (gaps.questions.length === 0) return h(Empty, { title: "这一期没有问句", sub: "" });
@@ -4262,7 +4367,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 						{ transform: "translate(0px,0px) scale(1)", opacity: "1" },
 						{ transform: "translate(" + (dx * 0.5) + "px," + (dy * 0.5 - 26) + "px) scale(0.9)", opacity: "1", offset: 0.55 },
 						{ transform: "translate(" + dx + "px," + dy + "px) scale(0.45)", opacity: "0" },
-					], { duration: 460, easing: "cubic-bezier(.3,.7,.4,1)" });
+					], { duration: 300, easing: "cubic-bezier(0.2, 0, 0, 1)" });
 					anim.onfinish = function () { dot.remove(); };
 					anim.oncancel = function () { dot.remove(); };
 				} catch (error) { /* 动画失败不影响功能 */ }
@@ -4938,7 +5043,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 							className: "wb_mini", disabled: true,
 							title: "新建客户 = 去知识库那边建一个；这一版还没接",
 						}, "＋ 新建客户"),
-						h("span", { className: "wb_hint" }, headHint)),
+						h("span", { className: "wb_hint" }, clients.status === "loading" ? h(WbSkeleton, { compact: true, label: headHint }) : headHint)),
 
 					/* ---- A2 主题 ---- */
 					h("div", { className: "wb_row" },
@@ -4948,17 +5053,17 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 							h("button", { type: "button", className: "wb_tab", "data-on": mode === "free" ? "1" : "0", onClick: function () { setMode("free"); setChipOff(false); setWeakZoom(false); } }, "输入"))),
 
 					/* ---- A3 工作区（⤢ 放大时整块搬进全屏浮层，工作条/表格复用同一份） ---- */
-					(weakZoom && mode === "weak" && weakGaps.status === "ready"
+					h(WbPresence, null, weakZoom && mode === "weak" && weakGaps.status === "ready"
 						? h("div", {
 							className: "wb_zoomMask",
 							onMouseDown: function (e) { if (e.target === e.currentTarget) setWeakZoom(false); },
 						},
 							h("div", { className: "wb_zoomSheet" },
 								h("div", { className: "wb_workBar" }, weakBar),
-								h("div", { className: "wb_workBody" }, weakBody)))
-						: h("div", { className: "wb_work", id: "wb-work", style: workHeight === null ? undefined : { flex: "0 0 " + workHeight.work + "px" } },
+								h("div", { className: "wb_workBody", key: mode }, weakBody))) : null),
+					!(weakZoom && mode === "weak" && weakGaps.status === "ready") ? h("div", { className: "wb_work", id: "wb-work", style: workHeight === null ? undefined : { flex: "0 0 " + workHeight.work + "px" } },
 							h("div", { className: "wb_workBar" }, weakBar),
-							h("div", { className: "wb_workBody" }, weakBody))),
+							h("div", { className: "wb_workBody", key: mode }, weakBody)) : null,
 
 					/* ---- A4 拖杆 ---- */
 					h("div", {
@@ -4985,7 +5090,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 									onClick: function (e) { e.stopPropagation(); setRefTab("skill"); setRefOpen(true); },
 								}, "用模板" + (pickedTotal() === 0 ? "" : " " + pickedTotal()))),
 							h("span", { className: "wb_refSum" }, refSummary)),
-						refOpen ? h("div", { className: "wb_refBd" },
+						h(WbCollapse, { open: refOpen }, h("div", { className: "wb_refBd", key: refTab },
 							refTab === "copy"
 								? h("div", { style: { display: "flex", flexDirection: "column", gap: "10px" } },
 									h("div", { className: "wb_refBox" },
@@ -5029,7 +5134,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 									skills.status === "error"
 										? h("div", { className: "wb_skEmpty" }, skillsErrorText(skills.error, skills.detail))
 										: skills.status === "loading"
-											? h("div", { className: "wb_skEmpty" }, "技能目录读取中…")
+											? h(WbSkeleton, { label: "技能目录读取中…" })
 											: skills.skills.length === 0
 												? h("div", { className: "wb_skEmpty" }, "技能服务是空的 —— 一个 skill 都没注册")
 										: (function () {
@@ -5074,7 +5179,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 																		}, String(n)) : null);
 																})));
 													}));
-										}()))) : null),
+										}()))))),
 
 					/* ---- A6 底座 + A7 放大 ---- */
 					h("div", { className: "wb_base", "data-zoom": zoom ? "1" : "0" },
@@ -5153,7 +5258,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 						sending === "" ? null : h("div", { className: "wb_emptyS wb_bad" }, sending))),
 
 					/* ---- 发送前确认卡：一道闸管住选错客户/问句/技能/材料 ---- */
-					confirmOpen ? h("div", {
+					h(WbPresence, null, confirmOpen ? h("div", {
 						className: "wb_confirmMask",
 						onMouseDown: function (e) { if (e.target === e.currentTarget) setConfirmOpen(false); },
 					},
@@ -5193,7 +5298,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 									disabled: sending !== "",
 									onClick: function () { setConfirmOpen(false); dispatch(); },
 								}, "确认发送"))))
-						: null);
+						: null));
 		}
 
 		/* ---- wiring ------------------------------------------------------- */
