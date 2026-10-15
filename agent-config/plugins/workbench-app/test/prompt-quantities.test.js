@@ -4,24 +4,26 @@ import vm from 'node:vm'
 import { readFileSync } from 'node:fs'
 
 const source = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
-const questions = [{ qid: 'q1', question: '怎么选产品？' }, { qid: 'q2', question: '产品值得信任吗？' }]
+const questions = [{ qid: 'q1', question: '怎么选产品？' }, { qid: 'q2', question: '产品值得信任吗？' }].map(q => ({ ...q, root: '产品', platforms: [], summary: { gap: 2, weakCount: 1 } }))
 const catalog = [
   { name: 'sora-selection', description: '帮助用户做选型决策。当用户需要选购时触发。' },
   { name: 'sora-trust', description: '用事实建立信任。' },
 ]
-function assembly({ failOpen = false } = {}) {
+function assembly({ failOpen = false, mobile = false, rows = questions } = {}) {
   let api, cursor = 0, current
   const states = [], requests = [], storage = new Map()
   const react = {
-    createElement() {}, useRef: value => ({ current: value }), useEffect() {},
+    createElement: (type, props, ...children) => ({ type, props: { ...props, children: children.flat(Infinity) } }),
+    useRef(value) { const at = cursor++; if (!(at in states)) states[at] = { current: value }; return states[at] },
+    useEffect() {}, useLayoutEffect() {},
     useState(initial) {
       const at = cursor++
       if (!(at in states)) {
         let value = typeof initial === 'function' ? initial() : initial
-        if (value?.customers) value = { ...value, status: 'ready', customers: [{ id: 'CUS-test', name: '测试客户' }] }
+        if (value?.customers) value = { ...value, status: 'ready', uid: 'user-test', customers: [{ id: 'CUS-test', name: '测试客户' }] }
         if (value?.key === '') value = { key: 'CUS-test', line: '', period: '' }
         if (value?.skills) value = { ...value, status: 'ready', skills: catalog }
-        if (value?.questions) value = { ...value, status: 'ready', questions, collectedAt: '2026-10-13' }
+        if (value?.questions) value = { ...value, status: 'ready', questions: rows, collectedAt: '2026-10-13' }
         states[at] = value
       }
       return [states[at], next => { states[at] = typeof next === 'function' ? next(states[at]) : next }]
@@ -29,18 +31,23 @@ function assembly({ failOpen = false } = {}) {
   }
   const workspace = { async openWorkspace(id, beforeOpen) { if (failOpen) throw Error('offline'); beforeOpen('session-test') } }
   const instrumented = source
-    .replace('return module.exports;', 'return {...module.exports, WorkbenchPage, wbCacheWorkspace, skillDesc, skillDisplay};')
-    .replace('function startDrag(event) {', 'if (props.capture) return props.capture({composePrompt, dispatch, addOne, minusOne, pickedEntries, pickedTotal, pickedLabel, setWeakPicked, setMode, setTopic, setBase}); function startDrag(event) {')
+    .replace('return module.exports;', 'return {...module.exports, WorkbenchPage, wbCacheWorkspace, skillDesc, skillDisplay, pending: () => pendingPrompt};')
+    .replace('if (mobile) return h(MobileAssembly, {', 'if (props.capture) return props.capture({composePrompt, dispatch, addOne, minusOne, pickedEntries, pickedTotal, pickedLabel, setWeakPicked, weakPicked, weakSelectionKey, weakPickSet, weakBulkSet, weakRowDown, weakRowEnter, pickRecommended, pickTop10, setMode, setTopic, setBase}); if (mobile) return h(MobileAssembly, {')
   vm.runInNewContext(instrumented, {
-    window: { matchMedia: query => ({ matches: query.includes('reduced-motion') }), dispatchEvent() {}, __ModuleLoader__: { load({ factory }) { api = factory(() => react) } } },
+    window: { matchMedia: query => ({ matches: query.includes('reduced-motion') || mobile }), dispatchEvent() {}, __ModuleLoader__: { load({ factory }) { api = factory(() => react) } } },
     Event,
     sessionStorage: { setItem: (k, v) => storage.set(k, v), getItem: k => storage.get(k) ?? null, removeItem: k => storage.delete(k) },
     fetch: async (url, options) => { requests.push({ url, options }); return { json: async () => ({ ok: true, id: 'meta-test' }) } },
   })
   api.wbCacheWorkspace({ workspace: { personal: { id: 'personal-test', path: '/personal/test' }, legacySharedIds: [] } })
-  function render() { cursor = 0; api.WorkbenchPage({ ctx: { get: () => workspace }, capture: value => { current = value } }); return current }
+  function render(capture = true) {
+    cursor = 0
+    const node = api.WorkbenchPage({ ctx: { get: () => workspace }, capture: capture ? value => { current = value } : null })
+    return capture ? current : node
+  }
+  function renderMobile() { const node = render(false); return node.type(node.props) }
   render()
-  return { api, render, requests, storage }
+  return { api, render, renderMobile, requests, storage }
 }
 
 test('cart increments/decrements quantities, labels counts and dispatches them with the production client key', async () => {
@@ -67,7 +74,7 @@ test('cart increments/decrements quantities, labels counts and dispatches them w
   assert.equal(retry.render().pickedTotal(), 1, 'failed session opening retains cart for retry')
 })
 
-test('prompt uses shared capture-word ticks, prototype allocation wording and the draft gate', () => {
+test('prompt uses local selection seeded from capture-word ticks, prototype allocation wording and the draft gate', () => {
   const f = assembly()
   let a = f.render()
   a.setWeakPicked(f.api.wbWeakPickedFromTicks([{ qid: 'q2', question: '旧问句' }, { qid: 'saved', question: '历史勾选问句' }], questions))
@@ -125,4 +132,68 @@ test('session snapshot preserves selected historical capture ticks and excludes 
     {qid:'q2', question:'产品值得信任吗？',client_key:'CUS-test'},
     {qid:'old', question:'历史问句',client_key:'CUS-test'},
   ])
+})
+
+
+test('all selection helpers issue no requests and dispatch exactly the local question selection', async () => {
+  const rows = Array.from({ length: 12 }, (_, i) => ({ qid: 'q' + i, question: '问句 ' + i, root: '', platforms: [], summary: { gap: 12 - i, weakCount: 1 } }))
+  const f = assembly({ rows })
+  const names = () => Array.from(f.render().weakPicked)
+  assert.deepEqual(JSON.parse(f.render().weakSelectionKey.slice('wb-weak-selection-'.length)), ['user-test', 'CUS-test', '', ''])
+  f.render().weakPickSet(rows[0].question, true)
+  f.render().weakPickSet(rows[0].question, false)
+  assert.deepEqual(names(), [])
+  f.render().pickRecommended()
+  assert.deepEqual(names(), rows.slice(0, 3).map(q => q.question))
+  f.render().pickTop10()
+  assert.deepEqual(names(), rows.slice(0, 10).map(q => q.question))
+  f.render().pickTop10()
+  assert.deepEqual(names(), [])
+  f.render().weakBulkSet(rows.map(q => q.question), true)
+  assert.equal(names().length, 12)
+  f.render().weakBulkSet(names(), false)
+  assert.deepEqual(names(), [])
+  f.render().weakRowDown(rows[4].question, { button: 0, preventDefault() {} })
+  f.render().weakRowEnter(rows[5].question)
+  assert.deepEqual(names(), rows.slice(4, 6).map(q => q.question))
+  assert.deepEqual(f.requests, [], 'checkbox, recommendations, top 10, select all, clear and drag stay local')
+  await f.render().dispatch()
+  const bind = JSON.parse(f.storage.get('wb-pending-bind'))
+  assert.deepEqual(bind.questions, rows.slice(4, 6).map(q => ({ qid: q.qid, question: q.question, client_key: 'CUS-test' })))
+  const text = f.api.pending().text
+  assert.match(text, /1\. 问句 4\n2\. 问句 5/)
+  assert.doesNotMatch(text, /问句 (?:0|1|2|3|6|7|8|9)/)
+  assert.deepEqual(f.requests.map(r => r.url), ['/api/workbench/task-meta'])
+  assert.deepEqual(names(), [], 'successful send finishes this draft selection')
+  assert.equal(f.storage.get(f.render().weakSelectionKey), '[]')
+  const retry = assembly({ failOpen: true })
+  retry.render().weakPickSet(questions[1].question, true)
+  await retry.render().dispatch()
+  assert.deepEqual(Array.from(retry.render().weakPicked), [questions[1].question], 'failed send retains the selection')
+})
+
+function descendants(node) {
+  return !node || typeof node !== 'object' ? [] : [node, ...(node.props?.children || []).flatMap(descendants)]
+}
+
+test('mobile weak-mode supplementary textarea feeds the same send payload and prompt as desktop', async () => {
+  const mobile = assembly({ mobile: true }), desktop = assembly()
+  const findInput = () => descendants(mobile.renderMobile()).find(node => node.type === 'textarea' && node.props['aria-label'] === '补充要求')
+  const input = findInput()
+  assert.ok(input)
+  assert.equal(input.props.placeholder, '补充要求（选填）…')
+  assert.equal(input.props.maxLength, undefined, 'desktop does not impose a max length')
+  assert.equal(input.props.className, 'wb_mTopic', 'reuse the topic textarea sizing')
+  const base = '  写 4 篇，保留参数。\n每篇面向不同人群。  '
+  input.props.onChange({ target: { value: base } })
+  assert.equal(findInput().props.value, base)
+  desktop.render().setBase(base)
+  for (const f of [mobile, desktop]) f.render().weakPickSet(questions[1].question, true)
+  assert.equal(mobile.render().composePrompt(), desktop.render().composePrompt())
+  const send = descendants(mobile.renderMobile()).find(node => node.props.className === 'wb_mPrimary wb_mStart')
+  await send.props.onClick()
+  const payload = JSON.parse(mobile.requests.find(r => r.url === '/api/workbench/task-meta').options.body)
+  assert.equal(payload.base, base)
+  assert.ok(mobile.api.pending().text.includes('补充要求：' + base.trim()))
+  assert.deepEqual(JSON.parse(mobile.storage.get('wb-pending-bind')).questions, [{ qid: 'q2', question: questions[1].question, client_key: 'CUS-test' }])
 })

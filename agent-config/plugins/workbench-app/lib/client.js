@@ -278,7 +278,7 @@ window.__ModuleLoader__.load({
 				function grow(){var el=topicRef.current;if(!WB_MOBILE.matches||!el)return;el.style.height='72px';el.style.height=Math.max(72,el.scrollHeight+2)+'px';}
 				grow(); window.addEventListener('resize',grow);
 				return function(){window.removeEventListener('resize',grow);};
-			},[p.topic,p.mode]);
+			},[p.topic,p.base,p.mode]);
 			var layers=[['personal','个人层'],['middle','个人中间层'],['public','公共层'],['other','其他技能']];
 			function skillLayer(s){var raw=String(s.layer||'');return raw==='personal'||raw==='个人'?'personal':raw==='middle'||raw==='_middle'||raw.indexOf('中')>=0?'middle':raw==='public'||raw==='公共'?'public':'other';}
 			var weakQuestions = p.weakGaps && p.weakGaps.status === 'ready' ? (p.weakRows || p.weakGaps.questions || []) : [];
@@ -313,7 +313,7 @@ window.__ModuleLoader__.load({
 					empty?h('div',{className:'wb_mEmpty'},h('b',null,'还没有分配给你的客户'),h('p',null,'联系管理员')):null,
 					p.clients.status==='error'?h('div',{className:'wb_mEmpty',role:'status'},'客户暂时无法加载，请稍后刷新重试'):null,
 					h('h3',null,'主题'),segment([['weak','薄弱问句'],['free','自己输入']],p.mode,p.setMode),
-					p.mode==='weak'?h('div',{className:'wb_mWeakWrap'},p.unified ? h('button',{type:'button',className:'wb_recommend',onClick:p.recommend},'选推荐的 3 条') : null,h('div',{className:'wb_mWeakStat'},'已选定 '+String(p.selectedCount||0)+' 条 · 共 '+String(weakQuestions.length)+' 条'),weakPanel,h('div',{className:'wb_mWeakSource'},'数据来源：Support · 薄弱问句（全局标准 v4，和 Support 页面数字一致）')):h('textarea',{className:'wb_mTopic',ref:topicRef,'aria-label':'主题',placeholder:'想写什么选题，直接打。',value:p.topic,onChange:function(e){p.setTopic(e.target.value);},rows:2}),
+					p.mode==='weak'?h('div',{className:'wb_mWeakWrap'},p.unified ? h('button',{type:'button',className:'wb_recommend',onClick:p.recommend},'选推荐的 3 条') : null,h('div',{className:'wb_mWeakStat'},'已选定 '+String(p.selectedCount||0)+' 条 · 共 '+String(weakQuestions.length)+' 条'),weakPanel,h('div',{className:'wb_mWeakSource'},'数据来源：Support · 薄弱问句（全局标准 v4，和 Support 页面数字一致）'),h('textarea',{className:'wb_mTopic',ref:topicRef,'aria-label':'补充要求',placeholder:'补充要求（选填）…',value:p.base,onChange:function(e){p.setBase(e.target.value);},rows:2})):h('textarea',{className:'wb_mTopic',ref:topicRef,'aria-label':'主题',placeholder:'想写什么选题，直接打。',value:p.topic,onChange:function(e){p.setTopic(e.target.value);},rows:2}),
 					h('h3',null,'怎么写'),segment([['copy','仿写'+(p.refCount?' '+p.refCount:'')],['skill','用模板'+(p.pickedTotal?' '+p.pickedTotal:'')]],p.refTab,p.setRefTab),
 					p.refTab==='copy'?h(React.Fragment,null,
 						h('div',{className:'wb_mReferences'},p.refs.urls.map(function(url,i){return h('div',{className:'wb_mReference',key:i},h('span',{className:'wb_mRefIcon'},'↗'),h('span',{className:'wb_mGrow'},url),h('button',{type:'button',className:'wb_mIcon','aria-label':'删除参考链接',onClick:function(){p.setRefText(p.refs.urls.filter(function(_,j){return j!==i;}).concat(p.refs.body?[p.refs.body]:[]).join('\n'));}},wbIcon('close')));}),
@@ -1346,18 +1346,17 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			captureWordsClients: "/api/v1/capture-words/clients",
 			captureWords: "/api/v1/capture-words",
 			captureWordsTicks: "/api/v1/capture-words/ticks",
-			captureWordsTicksBulk: "/api/v1/capture-words/ticks/bulk",
 			/* 语义别名，方便表格逻辑和宿主调试时按旧分区名查路由。 */
 			weakDir: "/api/v1/capture-words/clients",
 			weakGaps: "/api/v1/capture-words",
 			weakTicks: "/api/v1/capture-words/ticks",
-			weakTicksBulk: "/api/v1/capture-words/ticks/bulk",
 			/* 会话创建（2026-10-12）：绕开 Session Intent 向导页。 */
 			sessionCreate: "/api/workbench/session-create",
 		};
 
 		/* ---- sessionStorage 键收口（登记链路 / 布局记忆共用）----------- */
 		var WB_KEY = {
+			weakSelection: "wb-weak-selection-", // 本标签页的装配草稿，按 uid / 客户 / 业务线 / 期数隔离
 			pendingMeta: "wb-pending-meta",       // 装配台 → PromptRelay：任务编号
 			pendingClient: "wb-pending-client",   // 装配台 → PromptRelay：客户
 			pendingTopic: "wb-pending-topic",     // 装配台 → PromptRelay：主题
@@ -1687,6 +1686,35 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			return out;
 		}
 
+		function readWeakSelection(key) {
+			try {
+				var names = JSON.parse(sessionStorage.getItem(key));
+				if (Array.isArray(names) && names.every(function (name) { return typeof name === "string"; })) return names;
+			} catch (error) { /* storage unavailable */ }
+			return null;
+		}
+		function saveWeakSelection(key, names) {
+			try { sessionStorage.setItem(key, JSON.stringify(names)); } catch (error) { /* in-memory selection still works */ }
+		}
+		function useWeakSelection(key, suggestion) {
+			var state = React.useState(function () { return { key: key, names: readWeakSelection(key) }; });
+			var value = state[0].key === key ? state[0] : { key: key, names: readWeakSelection(key) };
+			React.useEffect(function () {
+				// Shared ticks are only an initial suggestion, including an empty suggestion.
+				if (value.names === null && suggestion !== null) state[1]({ key: key, names: suggestion });
+				else if (state[0] !== value) state[1](value);
+			}, [key, value.names, suggestion]);
+			React.useEffect(function () {
+				if (state[0].key === key && state[0].names !== null) saveWeakSelection(key, state[0].names);
+			}, [key, state[0]]);
+			return [value.names || [], function (update) {
+				state[1](function (previous) {
+					var names = (previous.key === key ? previous.names : readWeakSelection(key)) || [];
+					return { key: key, names: typeof update === "function" ? update(names) : update };
+				});
+			}];
+		}
+
 		function useWeakDir() {
 			var state = React.useState({ status: "loading", customers: [], unmapped: [], error: "", detail: "" });
 			var setValue = state[1];
@@ -1729,7 +1757,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 						if (!alive) return;
 						if (body && body.ok === true) {
 							setValue({
-								status: "ready",
+								status: "ready", clientKey: clientKey, enterprise: enterprise,
 								collectedAt: body.collectedAt || "",
 								capturePeriod: body.clientId || enterprise || "",
 								computedAt: body.computedAt || "",
@@ -1758,27 +1786,6 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			var query = WB_API.weakTicks + "?client=" + encodeURIComponent(clientKey) + "&enterprise=" + encodeURIComponent(enterprise || "");
 			return fetch(query, { credentials: "same-origin", headers: { accept: "application/json" } }).then(readCaptureJson);
 		}
-		function weakTickPutRequest(clientKey, enterprise, item, ticked) {
-			return {
-				url: WB_API.weakTicks,
-				options: {
-					method: "PUT", credentials: "same-origin",
-					headers: { accept: "application/json", "Content-Type": "application/json", "X-Requested-With": "XMLHttpRequest" },
-					body: JSON.stringify({ client: clientKey, enterprise: enterprise || "", qid: item.qid, question: item.question, ticked: ticked === true }),
-				},
-			};
-		}
-		function weakTickBulkRequest(clientKey, enterprise, items, ticked) {
-			return {
-				url: WB_API.weakTicksBulk,
-				options: {
-					method: "POST", credentials: "same-origin",
-					headers: { accept: "application/json", "Content-Type": "application/json", "X-Requested-With": "XMLHttpRequest" },
-					body: JSON.stringify({ client: clientKey, enterprise: enterprise || "", items: items.slice(0, 500), ticked: ticked === true }),
-				},
-			};
-		}
-
 		function useWeakTicks(clientKey, enterprise, enabled) {
 			var initial = { status: "idle", ticks: [], error: "", detail: "" };
 			var state = React.useState(initial);
@@ -1790,7 +1797,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				function load() {
 					weakTicksFetch(clientKey, enterprise).then(function (body) {
 						if (!alive) return;
-						if (body && body.ok !== false) setValue({ status: "ready", ticks: Array.isArray(body.ticks) ? body.ticks : [], error: "", detail: "" });
+						if (body && body.ok !== false) setValue({ status: "ready", clientKey: clientKey, enterprise: enterprise, ticks: Array.isArray(body.ticks) ? body.ticks : [], error: "", detail: "" });
 						else setValue({ status: "error", ticks: [], error: (body && body.error) || "unknown", detail: (body && body.detail) || "" });
 					}).catch(function (e) {
 						if (alive) setValue({ status: "error", ticks: [], error: "unreachable", detail: String(e && e.message ? e.message : e) });
@@ -1809,43 +1816,6 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				};
 			}, [clientKey, enterprise, enabled]);
 
-			function optimisticTicks(previous, items, ticked) {
-				var next = previous.slice();
-				for (var i = 0; i < items.length; i++) {
-					var item = items[i] || {};
-					var at = -1;
-					for (var j = 0; j < next.length; j++) {
-						var sameQid = item.qid !== undefined && item.qid !== null && item.qid !== ""
-							&& next[j].qid !== undefined && next[j].qid !== null && next[j].qid !== ""
-							&& String(next[j].qid) === String(item.qid);
-						if (sameQid || (!sameQid && next[j].question === item.question)) { at = j; break; }
-					}
-					if (ticked && at < 0) next.push({ qid: item.qid, question: item.question, by: "", byName: "", at: "" });
-					else if (!ticked && at >= 0) next.splice(at, 1);
-				}
-				return next;
-			}
-
-			function writeItems(items, ticked, bulk) {
-				if (!enabled || clientKey === "" || items.length === 0) return;
-				var before = value.ticks.slice();
-				setValue({ status: value.status === "idle" ? "loading" : value.status, ticks: optimisticTicks(before, items, ticked), error: "", detail: "" });
-				var descriptor = bulk
-					? weakTickBulkRequest(clientKey, enterprise, items, ticked)
-					: weakTickPutRequest(clientKey, enterprise, items[0], ticked);
-				var request = fetch(descriptor.url, descriptor.options);
-				request.then(readCaptureJson).then(function (body) {
-					if (body && body.ok !== false) setValue({ status: "ready", ticks: Array.isArray(body.ticks) ? body.ticks : [], error: "", detail: "" });
-					else { setValue({ status: "error", ticks: before, error: (body && body.error) || "unknown", detail: (body && body.detail) || "" }); }
-				}).catch(function (e) {
-					setValue({ status: "error", ticks: before, error: "unreachable", detail: String(e && e.message ? e.message : e) });
-				});
-			}
-			value.refresh = function () { weakTicksFetch(clientKey, enterprise).then(function (body) {
-				if (body && body.ok !== false) setValue({ status: "ready", ticks: Array.isArray(body.ticks) ? body.ticks : [], error: "", detail: "" });
-			}); };
-			value.put = function (item, ticked) { writeItems([item], ticked, false); };
-			value.bulk = function (items, ticked) { writeItems(items.slice(0, 500), ticked, true); };
 			return value;
 		}
 
@@ -4297,9 +4267,6 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					anim.oncancel = function () { dot.remove(); };
 				} catch (error) { /* 动画失败不影响功能 */ }
 			}
-			/* 已选的薄弱问句按当前客户/业务线同步到 Support 的共享 ticks。 */
-			var weakPickedS = React.useState([]);
-			var weakPicked = weakPickedS[0], setWeakPicked = weakPickedS[1];
 
 			var zoomS = React.useState(false);
 			var zoom = zoomS[0], setZoom = zoomS[1];
@@ -4428,15 +4395,13 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				&& (unified ? !!weakClientId : (weakLines.length === 0 || weakLine !== null));
 			var weakGaps = useWeakGaps(weakClientKey, weakClientId, weakEnabled);
 			var weakTicks = useWeakTicks(weakClientKey, weakClientId, weakEnabled);
-			var weakSelectionTouched = React.useRef(false);
-			React.useEffect(function () {
-				weakSelectionTouched.current = false;
-				setWeakPicked(weakPickedFromTicks(weakTicks.ticks, weakGaps.questions));
-			}, [weakClientKey, weakClientId, weakGaps.questions]);
-			React.useEffect(function () {
-				if (weakSelectionTouched.current) return;
-				setWeakPicked(weakPickedFromTicks(weakTicks.ticks, weakGaps.questions));
-			}, [weakTicks.ticks]);
+			var weakSelectionKey = WB_KEY.weakSelection + JSON.stringify([(unified && unified.uid) || clients.uid || "", pick.key, pick.line, pick.period]);
+			var weakSuggestion = weakEnabled && weakTicks.status === "ready" && weakGaps.status === "ready"
+				&& weakTicks.clientKey === weakClientKey && weakTicks.enterprise === weakClientId
+				&& weakGaps.clientKey === weakClientKey && weakGaps.enterprise === weakClientId
+				? weakPickedFromTicks(weakTicks.ticks, weakGaps.questions) : null;
+			var weakPickedS = useWeakSelection(weakSelectionKey, weakSuggestion);
+			var weakPicked = weakPickedS[0], setWeakPicked = weakPickedS[1];
 			/* 这一期出现过哪些词根（给下拉用）。 */
 			var weakRoots = [];
 			for (var wr = 0; wr < weakGaps.questions.length; wr++) {
@@ -4597,7 +4562,9 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 							sessionStorage.setItem(WB_KEY.modelPending, JSON.stringify({ provider: selModel === "__default__" ? "deepseek-official" : mp[0], model: selModel === "__default__" ? "deepseek-flash" : mp[1], effort: selEffort === "__default__" ? "" : selEffort }));
 						}
 					} catch (error) { /* storage unavailable */ }
+					var openedSession = false;
 					var rememberPending = function (sessionId) {
+						openedSession = true;
 						pendingPrompt = { text: text, sessionId: sessionId };
 						try {
 							if (metaId !== "") {
@@ -4630,6 +4597,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 						rememberPending(createdId);
 					}
 					setCounts({});
+					if (openedSession) { setWeakPicked([]); saveWeakSelection(weakSelectionKey, []); }
 					setSending("");
 				} catch (error) {
 					pendingPrompt = null;
@@ -4689,15 +4657,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				: [];
 
 			/* 薄弱问句勾选：点行、拖行、勾方块、全选，都走这一个入口。 */
-			function weakTickItem(name) {
-				for (var ti = 0; ti < weakGaps.questions.length; ti++) {
-					var question = weakGaps.questions[ti];
-					if (question.question === name) return { qid: question.qid, question: question.question };
-				}
-				return { qid: "", question: name };
-			}
 			function weakPickedUpdate(names, on) {
-				weakSelectionTouched.current = true;
 				setWeakPicked(function (prev) {
 					var next = prev.slice();
 					for (var ni = 0; ni < names.length; ni++) {
@@ -4709,36 +4669,23 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					return next;
 				});
 			}
-			function weakPickSet(name, on, write) {
+			function weakPickSet(name, on) {
 				weakPickedUpdate([name], on);
-				if (write !== false && weakTicks && typeof weakTicks.put === "function") weakTicks.put(weakTickItem(name), on);
 			}
 			function weakBulkSet(names, on) {
 				var unique = [];
 				for (var i = 0; i < names.length; i++) if (unique.indexOf(names[i]) < 0) unique.push(names[i]);
 				weakPickedUpdate(unique, on);
-				if (weakTicks && typeof weakTicks.bulk === "function") weakTicks.bulk(unique.map(weakTickItem), on);
 			}
-			function weakPickItems(names, on) {
-				var unique = [];
-				for (var i = 0; i < names.length; i++) if (unique.indexOf(names[i]) < 0) unique.push(names[i]);
-				weakPickedUpdate(unique, on);
-				if (weakTicks && typeof weakTicks.bulk === "function") weakTicks.bulk(unique.map(weakTickItem), on);
-			}
-			var weakDragCommit = React.useRef(null);
-			weakDragCommit.current = weakPickItems;
 			var weakDragS = React.useState(false);
 			var weakDragging = weakDragS[0], setWeakDragging = weakDragS[1];
 			var weakDragTo = React.useRef(null);
 			var weakDragItems = React.useRef([]);
 			React.useEffect(function () {
 				function up() {
-					var names = weakDragItems.current.slice();
-					var on = weakDragTo.current;
 					weakDragItems.current = [];
 					weakDragTo.current = null;
 					setWeakDragging(false);
-					if (on !== null && names.length > 0 && typeof weakDragCommit.current === "function") weakDragCommit.current(names, on);
 				}
 				document.addEventListener("mouseup", up);
 				document.addEventListener("pointerup", up);
@@ -4757,7 +4704,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				var on = weakPicked.indexOf(name) < 0;
 				weakDragTo.current = on;
 				weakDragItems.current = [name];
-				weakPickSet(name, on, false);
+				weakPickSet(name, on);
 				setWeakDragging(true);
 				setChipOff(false);
 			}
@@ -4765,7 +4712,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				if (weakDragTo.current === null) return;
 				if (weakDragItems.current.indexOf(name) >= 0) return;
 				weakDragItems.current.push(name);
-				weakPickSet(name, weakDragTo.current, false);
+				weakPickSet(name, weakDragTo.current);
 			}
 			/* 「选前10」：一键选定当前排序下最薄的前 10 条；再点一次撤销这 10 条，防误触。 */
 			function pickRecommended(scope) {
@@ -5411,8 +5358,6 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 		exports.wbQuestionLinkPrompt = questionLinkPrompt;
 		exports.wbSelectedSessionQuestions = selectedSessionQuestions;
 		exports.wbBindSessionClient = bindSessionClient;
-		exports.wbTickPutRequest = weakTickPutRequest;
-		exports.wbTickBulkRequest = weakTickBulkRequest;
 		return module.exports;
 	}
 });
