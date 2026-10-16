@@ -6,8 +6,8 @@ import { readFileSync } from 'node:fs'
 const source = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
 const questions = [{ qid: 'q1', question: '怎么选产品？' }, { qid: 'q2', question: '产品值得信任吗？' }].map(q => ({ ...q, root: '产品', platforms: [], summary: { gap: 2, weakCount: 1 } }))
 const catalog = [
-  { name: 'sora-selection', description: '帮助用户做选型决策。当用户需要选购时触发。' },
-  { name: 'sora-trust', description: '用事实建立信任。' },
+  { name: 'sora-selection', layer: 'public', whenToUse: '', description: '帮助用户做选型决策。当用户需要选购时触发。' },
+  { name: 'sora-trust', layer: 'public', whenToUse: '', description: '用事实建立信任。' },
 ]
 function assembly({ failOpen = false, mobile = false, rows = questions } = {}) {
   let api, cursor = 0, current
@@ -32,7 +32,7 @@ function assembly({ failOpen = false, mobile = false, rows = questions } = {}) {
   const workspace = { async openWorkspace(id, beforeOpen) { if (failOpen) throw Error('offline'); beforeOpen('session-test') } }
   const instrumented = source
     .replace('return module.exports;', 'return {...module.exports, WorkbenchPage, wbCacheWorkspace, skillDesc, skillDisplay, pending: () => pendingPrompt};')
-    .replace('if (mobile) return h(MobileAssembly, {', 'if (props.capture) return props.capture({composePrompt, dispatch, addOne, minusOne, pickedEntries, pickedTotal, pickedLabel, setWeakPicked, weakPicked, weakSelectionKey, weakPickSet, weakBulkSet, weakRowDown, weakRowEnter, pickRecommended, pickTop10, setMode, setTopic, setBase, setRounds, rounds}); if (mobile) return h(MobileAssembly, {')
+    .replace('if (mobile) return h(MobileAssembly, {', 'if (props.capture) return props.capture({composePrompt, dispatch, addOne, minusOne, pickedEntries, pickedTotal, pickedLabel, setWeakPicked, weakPicked, weakSelectionKey, weakPickSet, weakBulkSet, weakRowDown, weakRowEnter, pickRecommended, pickTop10, setMode, setTopic, setBase}); if (mobile) return h(MobileAssembly, {')
   vm.runInNewContext(instrumented, {
     window: { matchMedia: query => ({ matches: query.includes('reduced-motion') || mobile }), dispatchEvent() {}, __ModuleLoader__: { load({ factory }) { api = factory(() => react) } } },
     Event,
@@ -213,33 +213,91 @@ test('round prompts preserve N=1 exactly and enforce one draft with history and 
   assert.doesNotMatch(next, /仅当用户明确说「直接入库」时例外|各类型的篇数按上面点选的数量执行/)
 })
 
-test('multi-round dispatch snapshots the complete task and registers batch id only for N>1', async () => {
+test('multi-round dispatch uses the combined skill cart and snapshots the complete task', async () => {
   const f = assembly()
-  assert.equal(f.render().rounds, 1)
-  f.render().setRounds(3); f.render().setBase('补充内容'); f.render().addOne('sora-trust')
+  f.render().setBase('补充内容')
+  f.render().addOne('sora-selection'); f.render().addOne('sora-selection'); f.render().addOne('sora-trust')
+  assert.equal(f.render().pickedTotal(), 3)
   await f.render().dispatch()
   const meta = JSON.parse(f.requests.find(r => r.url === '/api/workbench/task-meta').options.body)
   const batch = JSON.parse(f.requests.find(r => r.url === '/api/workbench/batch').options.body)
   assert.equal(meta.rounds, 3); assert.equal(meta.batch_id, batch.id)
+  assert.equal(batch.rounds, 3)
+  assert.deepEqual(meta.skills, ['sora-selection×2', 'sora-trust×1'])
   assert.equal(batch.bind.client_key, 'CUS-test')
   assert.match(batch.prompt, /补充内容/)
-  assert.match(batch.prompt, /sora-trust/)
+  assert.match(batch.prompt, /技能：sora-selection[^\n]+写 2 篇/)
+  assert.match(batch.prompt, /技能：sora-trust[^\n]+写 1 篇/)
   assert.equal(f.api.pending().batchId, batch.id)
   assert.equal(f.api.pending().sessionId, 'session-test')
 })
 
-test('desktop and mobile expose the same clamped integer rounds control next to launch', () => {
+test('empty and one-article carts dispatch the unchanged single-shot prompt without a batch', async () => {
   for (const mobile of [false, true]) {
-    const f = assembly({ mobile })
-    const tree = mobile ? f.renderMobile() : f.render(false)
-    const component = descendants(tree).find(n => typeof n.type === 'function' && n.type.name === 'RoundsInput')
-    assert.ok(component)
-    const label = component.type(component.props), input = label.props.children.find(n => n && n.type === 'input')
-    assert.equal(label.props.children[0], '轮数')
-    assert.equal(input.props.value, 1)
-    assert.equal(input.props.min, 1); assert.equal(input.props.max, 20); assert.equal(input.props.step, 1)
-    for (const [value, expected] of [['', 1], ['-1', 1], ['2.9', 2], ['100', 20], ['nope', 1]]) {
-      input.props.onChange({ target: { value } }); assert.equal(f.render().rounds, expected)
+    for (const count of [0, 1]) {
+      const f = assembly({ mobile })
+      if (count) f.render().addOne('sora-trust')
+      f.render().setBase('写 4 篇')
+      const a = f.render(), prompt = a.composePrompt()
+      assert.equal(a.pickedTotal(), count)
+      await a.dispatch()
+      assert.deepEqual(f.requests.map(r => r.url), ['/api/workbench/task-meta'])
+      const meta = JSON.parse(f.requests[0].options.body)
+      assert.equal(Object.hasOwn(meta, 'rounds'), false)
+      assert.equal(Object.hasOwn(meta, 'batch_id'), false)
+      assert.equal(Object.hasOwn(f.api.pending(), 'batchId'), false)
+      assert.equal(f.api.pending().text, prompt + '\n\n[任务编号：meta-test]')
+      assert.equal([...f.storage.keys()].some(key => key.startsWith('wb-batch-for-')), false)
     }
   }
+})
+
+test('cart-driven batch size is capped at 20 while skill quantities stay intact', async () => {
+  for (const count of [2, 20, 25]) {
+    const f = assembly()
+    for (let i = 0; i < count; i++) f.render().addOne('sora-selection')
+    assert.equal(f.render().pickedTotal(), count)
+    await f.render().dispatch()
+    const meta = JSON.parse(f.requests.find(r => r.url === '/api/workbench/task-meta').options.body)
+    const batch = JSON.parse(f.requests.find(r => r.url === '/api/workbench/batch').options.body)
+    assert.equal(meta.rounds, Math.min(count, 20))
+    assert.equal(batch.rounds, Math.min(count, 20))
+    assert.deepEqual(meta.skills, ['sora-selection×' + count])
+    assert.match(batch.prompt, new RegExp('技能：sora-selection[^\\n]+写 ' + count + ' 篇'))
+  }
+})
+
+test('desktop and mobile keep chip, badge and tag cart controls without a rounds input', async () => {
+  for (const mobile of [false, true]) {
+    const f = assembly({ mobile })
+    const nodes = () => descendants(mobile ? f.renderMobile() : f.render(false))
+    nodes().find(n => n.type === 'button' && n.props.children[0] === '用模板').props.onClick({ stopPropagation() {} })
+    const chip = () => nodes().find(n => n.props.className === (mobile ? 'wb_mChip' : 'wb_chipBtn') && n.props.key === 'sora-selection')
+    const badge = node => descendants(node).find(n => n.props.className === 'wb_skBadge')
+    const tag = () => nodes().find(n => n.props.className === 'wb_skTag' && n.props.key === 'sora-selection')
+    for (let i = 0; i < 4; i++) chip().props.onClick({ currentTarget: {} })
+    assert.equal(f.render().pickedTotal(), 4)
+    assert.equal(badge(chip()).props.children[0], '4')
+    assert.equal(badge(tag()).props.children[0], '4')
+    let stopped = false
+    badge(chip()).props.onClick({ stopPropagation() { stopped = true } })
+    assert.equal(stopped, true)
+    assert.equal(f.render().pickedTotal(), 3)
+    tag().props.onClick()
+    assert.equal(f.render().pickedTotal(), 2)
+    assert.equal(badge(chip()).props.children[0], '2')
+    assert.equal(badge(tag()).props.children[0], '2')
+    assert.equal(nodes().some(n => n.type === 'input' && n.props.type === 'number'), false)
+    assert.equal(nodes().some(n => n.props.children.includes('轮数')), false)
+    const action = nodes().find(n => n.props.className === (mobile ? 'wb_mAction wb_mAboveTabs' : 'wb_actions'))
+    assert.ok(descendants(action).some(n => n.props.className === 'wb_skTags'))
+    assert.ok(descendants(action).some(n => n.props.className === (mobile ? 'wb_mPrimary wb_mStart' : 'wb_go')))
+    if (!mobile) {
+      assert.deepEqual(action.props.children.filter(n => n?.props?.key).map(n => n.props.key), ['sktags', 'effort', 'model'])
+    }
+    await f.render().dispatch()
+    const batch = JSON.parse(f.requests.find(r => r.url === '/api/workbench/batch').options.body)
+    assert.equal(batch.rounds, 2)
+  }
+  assert.doesNotMatch(source, /RoundsInput|setRounds|roundsS|wb_rounds/)
 })
