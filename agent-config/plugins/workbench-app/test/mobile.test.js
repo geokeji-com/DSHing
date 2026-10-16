@@ -27,6 +27,16 @@ test('references still use the existing prompt parser and client key payload', (
   assert.equal(payload.client_key,'CUS-fixture')
   assert.equal(payload.refs,refs)
 })
+
+test('task metadata carries selected hierarchy IDs alongside display names', () => {
+  const { api } = load()
+  const payload = api.buildTaskMetaPayload({ client_key: 'CUS-fixture', client: '客户',
+    business_line_id: 'line-id', service_period_id: 'period-id', line: '品线', period: '服务期' })
+  assert.equal(payload.business_line_id, 'line-id')
+  assert.equal(payload.service_period_id, 'period-id')
+  assert.equal(payload.line, '品线')
+  assert.equal(payload.period, '服务期')
+})
 test('visual viewport accounts for scrolling, resizing, and pinch zoom', () => {
   assert.equal(api.wbKeyboardInset(852,{height:516,offsetTop:0,scale:1}),336)
   assert.equal(api.wbKeyboardInset(852,{height:516,offsetTop:50,scale:1}),286)

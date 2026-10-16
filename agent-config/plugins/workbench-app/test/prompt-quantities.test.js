@@ -9,7 +9,7 @@ const catalog = [
   { name: 'sora-selection', layer: 'public', whenToUse: '', description: '帮助用户做选型决策。当用户需要选购时触发。' },
   { name: 'sora-trust', layer: 'public', whenToUse: '', description: '用事实建立信任。' },
 ]
-function assembly({ failOpen = false, mobile = false, rows = questions } = {}) {
+function assembly({ failOpen = false, mobile = false, rows = questions, hierarchy = false } = {}) {
   let api, cursor = 0, current
   const states = [], requests = [], storage = new Map()
   const react = {
@@ -20,8 +20,10 @@ function assembly({ failOpen = false, mobile = false, rows = questions } = {}) {
       const at = cursor++
       if (!(at in states)) {
         let value = typeof initial === 'function' ? initial() : initial
-        if (value?.customers) value = { ...value, status: 'ready', uid: 'user-test', customers: [{ id: 'CUS-test', name: '测试客户' }] }
-        if (value?.key === '') value = { key: 'CUS-test', line: '', period: '' }
+        if (value?.customers) value = { ...value, status: 'ready', uid: 'user-test', customers: [{ id: 'CUS-test', name: '测试客户',
+          business_lines: hierarchy ? [{ id: 'line-test', name: '测试品线' }] : [],
+          service_periods: hierarchy ? [{ id: 'period-test', name: '测试服务期', business_line_id: 'line-test' }] : [] }] }
+        if (value?.key === '') value = { key: 'CUS-test', line: hierarchy ? 'line-test' : '', period: hierarchy ? 'period-test' : '' }
         if (value?.skills) value = { ...value, status: 'ready', skills: catalog }
         if (value?.questions) value = { ...value, status: 'ready', questions: rows, collectedAt: '2026-10-13' }
         states[at] = value
@@ -49,6 +51,19 @@ function assembly({ failOpen = false, mobile = false, rows = questions } = {}) {
   render()
   return { api, render, renderMobile, requests, storage }
 }
+
+test('dispatch uses hierarchy IDs from the selected customer payload', async () => {
+  const f = assembly({ hierarchy: true })
+  await f.render().dispatch()
+  const payload = JSON.parse(f.requests.find(r => r.url === '/api/workbench/task-meta').options.body)
+  const binding = JSON.parse(f.storage.get('wb-pending-bind'))
+  for (const record of [payload, binding]) {
+    assert.equal(record.business_line_id, 'line-test')
+    assert.equal(record.service_period_id, 'period-test')
+    assert.equal(record.line, '测试品线')
+    assert.equal(record.period, '测试服务期')
+  }
+})
 
 test('cart increments/decrements quantities, labels counts and dispatches them with the production client key', async () => {
   const f = assembly()

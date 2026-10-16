@@ -93,6 +93,33 @@ function denied(response, status = 403) {
   assert.deepEqual(response.body, { ok: false, error: status === 403 ? 'forbidden' : 'not-found' })
 }
 
+test('task hierarchy persists and session bindings inherit it for legacy callers', async t => {
+  const f = fixture(t), headers = f.cloud()
+  const hierarchy = { business_line_id: 'line-id', service_period_id: 'period-id', line: '品线', period: '服务期' }
+  const created = await f.request('task-meta', { method: 'POST', headers,
+    body: { client_key: 'CUS-M', client: '我的客户', ...hierarchy, batch_id: 'batch-id' } })
+  const meta = (await f.request('task-meta?id=' + created.body.id, { headers })).body
+  for (const [key, value] of Object.entries(hierarchy)) assert.equal(meta[key], value)
+  const bound = await f.request('session-client', { method: 'POST', headers,
+    body: { session_id: 'new-session', client_key: 'CUS-M', meta_id: created.body.id, round: 2 } })
+  for (const [key, value] of Object.entries(hierarchy)) assert.equal(bound.body.binding[key], value)
+  assert.equal(bound.body.binding.batch_id, 'batch-id')
+  assert.equal(bound.body.binding.round, 2)
+  const saved = JSON.parse(readFileSync(join(f.meta, 'session-client-index.json')))
+  assert.deepEqual(saved['new-session'], bound.body.binding)
+  const updated = await f.request('session-client', { method: 'POST', headers,
+    body: { session_id: 'new-session', client_key: 'CUS-M' } })
+  assert.equal(updated.body.binding.business_line_id, 'line-id')
+  const moved = await f.request('session-client', { method: 'POST', headers,
+    body: { session_id: 'new-session', client_key: 'demo', client: '演示' } })
+  assert.equal(moved.body.binding.business_line_id, undefined)
+  assert.equal(moved.body.binding.service_period_id, undefined)
+  assert.equal(moved.body.binding.round, undefined)
+  const other = await f.request('session-client', { method: 'POST', headers,
+    body: { session_id: 'other-session', client_key: 'demo', meta_id: created.body.id } })
+  assert.equal(other.body.binding.business_line_id, undefined)
+})
+
 test('legacy mode returns the entire index and preserves existing response contracts', async t => {
   const f = fixture(t)
   assert.deepEqual((await f.request('session-client')).body, { ok: true, index })
