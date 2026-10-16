@@ -10,3 +10,7 @@ plugins/dsh-workbench/
 
 # 临时文件
 *.log
+
+# Python test artifacts
+__pycache__/
+.pytest_cache/

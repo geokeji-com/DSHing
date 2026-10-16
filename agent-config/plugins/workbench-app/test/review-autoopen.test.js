@@ -67,7 +67,7 @@ test('task-bar drafts fetch depends on writes and manual refresh, never chatSnap
   const taskBar = source.slice(source.indexOf('function TaskBar(props)'), source.indexOf('var REF_STYLES'))
   const effect = taskBar.match(/fetch\(WB_API\.drafts[\s\S]*?\}, \[([^\]]+)\]\);/)
   assert.ok(effect, 'task-bar drafts effect exists')
-  assert.equal(effect[1], 'metaId, client, writeCount, rvTick')
+  assert.equal(effect[1], 'metaId, sessionId, client, writeCount, rvTick')
   assert.doesNotMatch(effect[1], /chatSnap/)
 })
 

@@ -171,3 +171,46 @@ question_context 时追加 session_id；云端保留草稿已有 assignment 链�
 云端 `DSH_ARTICLE_QUESTION_LINKS=0` 可关闭新关联。MCP keys、地址、配置、插件
 入口和路由无变化。部署时只需更新各目标 home 中的 `lib/client.js`、`lib/impl.js`；
 本次只改仓库工作树，未复制至实际 homes。
+
+## M6：文章库目录按 client_key 组织
+
+`lib/impl.js` 的 `clientLibraryDir(client_key, display_name)` 统一解析草稿、
+正式库、审核读取、硬检和确认入库目标：先用已存在的 `<root>/<client_key>`
+目录或目录软链，再兼容 `<root>/<display_name>`；新建目录只使用绑定的 key。
+读取不会创建目录，个人工作区文件布局不变，Support 仍为文章权威源。
+
+审核请求携带 `session_id` / `meta_id`，宿主从已保存的绑定解析 key 并验证原有
+ACL（含 owner 和实时 grants）。确认不再接受仅 body 中的 `client_key`。
+旧版只传名字的读取请求，优先从唯一可见会话绑定取 key，无绑定时保留授权的
+旧名字目录读取。旧名字目录仍需对应可信 ACL 名称；完成迁移后，即使绑定里的
+显示名过期，也按 key 读取。改名之前应先迁移原显示名目录。
+
+运维从 `dsh_clients` 导出 `[{"client_key":"CUS-…","display_name":"客户显示名"}]`
+到 JSON。脚本只读映射文件，不连接数据库或网关。根目录默认
+`DSH_WORKBENCH_LIBRARY_ROOT`，未设置时为 `/srv/dsh-data/文章库`。
+
+```sh
+# 默认只检查、输出计划；整份映射有冲突就拒绝，不移动任何目录。
+node scripts/migrate-library-dirs.mjs --mapping /path/to/clients.json
+# 迁前备份文章库并暂停目录写入；apply / rollback 期间保持暂停，避免并发改目录。
+# manifest 的父目录须已存在，文件必须在文章库外，且不能覆盖已有文件。
+node scripts/migrate-library-dirs.mjs --mapping /path/to/clients.json \
+  --apply --manifest /path/to/backups/library-m6.json
+# 回滚也可先预览；不加 --dry-run 的 --rollback 会直接执行。
+node scripts/migrate-library-dirs.mjs --rollback /path/to/backups/library-m6.json --dry-run
+node scripts/migrate-library-dirs.mjs --rollback /path/to/backups/library-m6.json
+```
+
+Apply 只把真实显示名目录 rename 成 key，再创建相对软链 `显示名 -> client_key`。
+已有正确软链、只有 key 的目录和不存在的客户会跳过；两个真实目录并存、文件占位、
+悬空或错误软链、重复或重叠映射均拒绝。不会合并目录、重写或删除文章。
+Manifest 在首次 rename 前记录目录身份，每个客户完成后原子更新。
+Rollback 先校验全部目录和软链，再只移除名字软链、rename 回原名；支持中断后
+仅完成 rename 的状态，保留迁移后新增的文章。目录或软链被替换时拒绝回滚，需运维核对。
+
+离线验证（全部使用临时目录和模拟 Support）：
+
+```sh
+node --test agent-config/plugins/workbench-app/test/*.test.js  # 仓库根目录
+PYTHONPATH=. python3 -m pytest -q
+```
