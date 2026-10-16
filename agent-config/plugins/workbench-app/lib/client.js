@@ -4362,6 +4362,51 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			return list.length === 0 ? "" : String(list[0].id || "");
 		}
 
+		/* M5: uid-scoped tab choice wins over the shared server preference. */
+		var wbCurrentLoad = Promise.resolve(null), wbCurrentWrites = Promise.resolve();
+		function wbCurrentKey(uid) { return "dsh:current-client:tab:" + uid; }
+		function wbStoredPick(uid) {
+			try { return JSON.parse(sessionStorage.getItem(wbCurrentKey(uid)) || "null"); } catch (e) { return null; }
+		}
+		function wbAllowedPick(customers, value) {
+			if (!value) return null;
+			var customer = customers.find(function (c) { return customerId(c) === value.client_key; });
+			if (!customer) return null;
+			var lines = customer.business_lines || [];
+			var storedPeriod = (customer.service_periods || []).find(function (p) { return String(p.id) === value.service_period_id; });
+			var line = lines.find(function (l) { return String(l.id) === value.business_line_id; })
+				|| lines.find(function (l) { return storedPeriod && String(l.id) === String(storedPeriod.business_line_id); }) || lines[0];
+			var lineId = line ? String(line.id) : "";
+			var periods = periodsFor(customer, lineId);
+			var period = periods.find(function (p) { return String(p.id) === value.service_period_id; }) || periods[0];
+			return { key: customerId(customer), line: lineId, period: period ? String(period.id) : "" };
+		}
+		function wbRestoreCurrentClient(customers, uid, apply, changed) {
+			var cancelled = false;
+			var saved = wbAllowedPick(customers, wbStoredPick(uid));
+			if (!changed()) apply(saved || wbAllowedPick(customers, { client_key: customerId(customers[0]) }));
+			wbCurrentLoad = fetch("/api/v1/me/current-client", { credentials: "same-origin", headers: { accept: "application/json" } })
+				.then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; });
+			wbCurrentLoad.then(function (body) {
+				if (cancelled || changed()) return;
+				var next = wbAllowedPick(customers, wbStoredPick(uid)) || wbAllowedPick(customers, body && body.currentClient);
+				if (next) apply(next);
+			});
+			return function () { cancelled = true; };
+		}
+		function wbRememberCurrentClient(uid, pick) {
+			var value = { client_key: pick.key, business_line_id: pick.line || null, service_period_id: pick.period || null };
+			try { sessionStorage.setItem(wbCurrentKey(uid), JSON.stringify(value)); } catch (e) { /* memory still wins */ }
+			var bootstrap = wbCurrentLoad;
+			wbCurrentWrites = wbCurrentWrites.then(function () { return bootstrap; }).then(function () {
+				var cookie = document.cookie.split(";").map(function (v) { return v.trim(); }).find(function (v) { return v.indexOf("publish_studio_web_csrf=") === 0; }) || "";
+				return fetch("/api/v1/me/current-client", { method: "POST", credentials: "same-origin",
+					headers: { "Content-Type": "application/json", "X-CSRF-Token": cookie.slice("publish_studio_web_csrf=".length) },
+					body: JSON.stringify(Object.assign({ source: "workbench" }, value)) });
+			}).catch(function () { /* preference sync must never interrupt writing */ });
+			return wbCurrentWrites;
+		}
+
 		/** 勾中的薄弱问句拼成一段交接文本（客户点「发送」时进任务）。
 		 * 上限 20 条 —— 再多模型也吃不下，而且真正要写的就是最薄的那几条。 */
 		/** 勾中的薄弱问句拼成交接清单（进装配台预填）。
@@ -4594,7 +4639,12 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			var unified = useUnifiedContext();
 			var selected = unified && unified.status === "ready" ? unified.selection : null;
 			var pick = unified ? { key: selected ? selected.clientKey : "", line: selected ? selected.businessLineId : "", period: selected ? selected.servicePeriodId : "" } : pickS[0];
-			var setPick = unified ? function () {} : pickS[1];
+			var pickedInTab = React.useRef(false);
+			var setPick = unified ? function () {} : function (next) {
+				pickedInTab.current = true;
+				pickS[1](next);
+				wbRememberCurrentClient(clients.uid || "", next);
+			};
 			var topicS = React.useState("");
 			var topic = topicS[0], setTopic = topicS[1];
 			var baseS = React.useState("");
@@ -4754,17 +4804,10 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			var sendingS = React.useState("");
 			var sending = sendingS[0], setSending = sendingS[1];
 
-			/* 默认选第一个客户 */
 			React.useEffect(function () {
-				if (clients.status !== "ready" || clients.customers.length === 0) return;
-				var first = clients.customers[0];
-				var line = (first.business_lines && first.business_lines[0]) || null;
-				setPick({
-					key: customerId(first),
-					line: line === null ? "" : String(line.id || ""),
-					period: firstPeriodId(first, line === null ? "" : String(line.id || "")),
-				});
-			}, [clients.status, clients.customers]);
+				if (unified || clients.status !== "ready" || clients.customers.length === 0) return;
+				return wbRestoreCurrentClient(clients.customers, clients.uid || "", pickS[1], function () { return pickedInTab.current; });
+			}, [!!unified, clients.status, clients.customers, clients.uid]);
 
 			var current = null;
 			for (var i = 0; i < clients.customers.length; i++) {
