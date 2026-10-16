@@ -654,6 +654,11 @@ function taskMetaRecordFromBody(parsed) {
   if (clientKey !== '') base.client_key = clientKey
   else delete base.client_key
   if (client !== '') base.client = client
+  for (const key of ['business_line_id', 'service_period_id']) {
+    const value = firstString(base[key])
+    if (value) base[key] = value
+    else delete base[key]
+  }
   base.savedAt = new Date().toISOString()
   return base
 }
@@ -695,6 +700,13 @@ function mergeSessionClientBinding(index, sessionId, entry) {
     bound_at: firstString(entry && entry.bound_at) || new Date().toISOString(),
   }
   if (prev.owner_uid) next.owner_uid = prev.owner_uid
+  const sameHierarchy = (!entry.client_key || entry.client_key === prev.client_key)
+    && (!entry.meta_id || entry.meta_id === prev.meta_id)
+  for (const key of ['business_line_id', 'service_period_id', 'line', 'period', 'batch_id']) {
+    const value = firstString(entry && entry[key], sameHierarchy && prev[key])
+    if (value) next[key] = value
+  }
+  if (entry.round != null || (sameHierarchy && prev.round != null)) next.round = entry.round ?? prev.round
   // Snapshot only explicit selection metadata, never the mutable shared ticks.
   if (Array.isArray(entry.questions)) {
     next.questions = entry.questions
@@ -1465,6 +1477,17 @@ export function create(ctx, config) {
         try {
           const index = readSessionClientIndex()
           if (Object.hasOwn(index, sessionId) && !visibleRecord(scope, index[sessionId])) { forbidden(res); return }
+          const meta = readTaskMetaRecord(firstString(parsed.meta_id))
+          const inherited = {}
+          const clientKey = firstString(parsed.client_key, ownEntry(index, sessionId)?.client_key)
+          if (meta && visibleRecord(scope, meta) && (!clientKey || clientKey === meta.client_key)) {
+            for (const key of ['business_line_id', 'service_period_id', 'line', 'period', 'batch_id']) {
+              if (meta[key]) inherited[key] = meta[key]
+            }
+          }
+          for (const key of Object.keys(inherited)) {
+            if (parsed[key] == null || parsed[key] === '') parsed[key] = inherited[key]
+          }
           const entry = stampOwner(scope, mergeSessionClientBinding(index, sessionId, parsed))
           writeSessionClientIndex(index)
           sendJson(res, { ok: true, session_id: sessionId, binding: entry })
