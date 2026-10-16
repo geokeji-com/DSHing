@@ -2374,15 +2374,24 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			var assistant = nodes.filter(function (n) { return n.kind === "assistant"; }).map(wbBatchText).join("\n");
 			var angles = Array.from(assistant.matchAll(/(?:^|\n)本轮角度[：:]\s*([^\n]+)/g));
 			if (angles.length) angle = angles[angles.length - 1][1].trim();
-			var args = {};
-			try { args = writes.length ? JSON.parse(writes[0].call.argsRaw || "{}") : {}; } catch (e) { }
-			title = String(args.title || args.file || "").replace(/\.md$/i, "");
+			var nonDraft = false;
+			writes.forEach(function (write) {
+				var args = {};
+				try { args = JSON.parse(write.call.argsRaw || "{}") || {}; } catch (e) { }
+				if (!title) title = String(args.title || args.file || "").replace(/\.md$/i, "").trim();
+				if (args.draft !== true) nonDraft = true;
+			});
 			var calls = nodes.filter(function (n) { return n.kind === "tool-result" && n.call && WB_WRITE_TOOL_RE.test(n.call.name); });
 			if (!writes.length) {
 				var error = nodes.filter(function (n) { return n.isError || n.kind === "turn-error"; }).map(wbBatchText).join(" ");
 				reason = (error || assistant || "本轮结束，未成功写入草稿").slice(0, 160);
-			} else if (calls.length !== 1) reason = "本轮 write_article 调用次数不是一次";
-			else if (!title || args.draft !== true) reason = "写入结果缺少标题或 draft:true";
+			} else if (!title) reason = "写入结果缺少标题";
+			else {
+				// Error results and retries also count as calls; a titled successful write keeps the round successful.
+				if (calls.length !== 1) console.warn("[dsh-workbench] 本轮 write_article 结果数不是一次（含错误/重试）：" + calls.length + "；已有成功写入，保留成功状态");
+				if (writes.length > 1) console.warn("[dsh-workbench] 本轮 write_article 成功写入多次：" + writes.length + "；保留首个可用标题：" + title);
+				if (nonDraft) console.warn("[dsh-workbench] 本轮 write_article 存在 draft !== true；已有成功写入，保留成功状态");
+			}
 			return Object.assign({}, row, { title: title, angle: angle, status: reason ? "failed" : "ok", reason: reason });
 		}
 		var wbBatches = Object.create(null);
