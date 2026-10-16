@@ -30,7 +30,7 @@
  */
 
 
-import { mkdirSync, realpathSync, readFileSync, writeFileSync, readdirSync, statSync, existsSync, renameSync, unlinkSync } from 'node:fs'
+import { mkdirSync, realpathSync, readFileSync, writeFileSync, readdirSync, statSync, lstatSync, existsSync, renameSync, unlinkSync } from 'node:fs'
 import { join, dirname, basename, resolve } from 'node:path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
@@ -60,6 +60,34 @@ const personalWorkspacePath = () => process.env.DSH_WORKBENCH_PERSONAL_WORKSPACE
   || (process.env.DSH_HOME ? join(process.env.DSH_HOME, 'workspaces', 'default') : null)
 const workspaceRoot = () => process.env.DSH_WORKBENCH_WORKSPACE_ROOT || personalWorkspacePath()
 const libraryRoot = () => process.env.DSH_WORKBENCH_LIBRARY_ROOT || '/srv/dsh-data/文章库'
+
+/** All library paths pass here. Callers authorize the stored binding first.
+ * Reads never create directories; writers explicitly opt in. Empty keys are
+ * supported only for read-only, name-based callers during the migration. */
+export function clientLibraryDir(client_key, display_name, { create = false } = {}) {
+  const key = firstString(client_key)
+  const name = clientPathName(display_name)
+  const valid = value => value && value !== '.' && value !== '..' && !/[/\\\x00-\x1f]/.test(value)
+  if (key && !valid(key)) throw new Error('invalid client_key directory')
+  if (!key && (create || !valid(name))) throw new Error('missing client_key or invalid display_name')
+  function directory(path) {
+    let entry
+    try { entry = lstatSync(path) } catch (error) {
+      if (error.code === 'ENOENT') return false
+      throw error
+    }
+    if (!entry.isDirectory() && !entry.isSymbolicLink()) throw new Error('library path is not a directory')
+    if (!statSync(path).isDirectory()) throw new Error('library link is not a directory')
+    return true
+  }
+  const keyed = key ? join(libraryRoot(), key) : null
+  if (keyed && directory(keyed)) return keyed
+  const legacy = valid(name) ? join(libraryRoot(), name) : null
+  if (legacy && directory(legacy)) return legacy
+  const path = keyed || legacy
+  if (create) mkdirSync(path, { recursive: true })
+  return path
+}
 
 /* ---- 薄弱问句（2026-10-10 接外部接口）---------------------------------
  * 数据来自「对外客户问句差额和信源渠道 API」（交付文档见仓库
@@ -211,10 +239,14 @@ function requestScope(req) {
   }
   const namesHeader = headers['x-dsh-allowed-clients']
   const names = new Set()
+  const namesByKey = new Map()
   for (const entry of jsonArray(namesHeader) || []) {
-    if (entry && allowed.has(entry.key) && typeof entry.name === 'string' && entry.name !== '') names.add(clientPathName(entry.name))
+    if (entry && allowed.has(entry.key) && typeof entry.name === 'string' && entry.name !== '') {
+      names.add(clientPathName(entry.name))
+      namesByKey.set(entry.key, clientPathName(entry.name))
+    }
   }
-  return { cloud, uid, allowed, names, needsNames: namesHeader === undefined }
+  return { cloud, uid, allowed, names, namesByKey, needsNames: namesHeader === undefined }
 }
 
 function authorizedClient(scope, value) {
@@ -751,12 +783,12 @@ function visibleBatch(scope, batch) {
  * body 可带 session_id / meta_id / client_key / client。
  * @returns {{ client_key: string, client: string, source: string }|null}
  */
-function resolveBoundClientForConfirm(body, scope) {
+function resolveBoundClientForConfirm(body, scope, storedIndex) {
   const parsed = body !== null && typeof body === 'object' && !Array.isArray(body) ? body : {}
   const sessionId = firstString(parsed.session_id, parsed.session)
   const metaId = firstString(parsed.meta_id, parsed.metaId)
   if (sessionId !== '') {
-    const index = readSessionClientIndex()
+    const index = storedIndex || readSessionClientIndex()
     const entry = ownEntry(index, sessionId)
     if (entry !== undefined && !visibleRecord(scope, entry)) return { forbidden: true }
     if (entry !== null && typeof entry === 'object') {
@@ -764,7 +796,7 @@ function resolveBoundClientForConfirm(body, scope) {
       if (key !== '') {
         return {
           client_key: key,
-          client: firstString(entry.client, parsed.client),
+          client: firstString(entry.client),
           source: 'session-client',
         }
       }
@@ -776,7 +808,7 @@ function resolveBoundClientForConfirm(body, scope) {
         if (key2 !== '') {
           return {
             client_key: key2,
-            client: firstString(meta && meta.client, entry.client, parsed.client),
+            client: firstString(meta && meta.client, entry.client),
             source: 'session-task-meta',
           }
         }
@@ -790,17 +822,9 @@ function resolveBoundClientForConfirm(body, scope) {
     if (key !== '') {
       return {
         client_key: key,
-        client: firstString(meta && meta.client, parsed.client),
+        client: firstString(meta && meta.client),
         source: 'task-meta',
       }
-    }
-  }
-  const bodyKey = firstString(parsed.client_key)
-  if (bodyKey !== '') {
-    return {
-      client_key: bodyKey,
-      client: firstString(parsed.client),
-      source: 'body',
     }
   }
   return null
@@ -810,7 +834,7 @@ function resolveBoundClientForConfirm(body, scope) {
  * body 声明的 client / client_key 必须与会话绑定一致。
  * @returns {{ ok:true }|{ ok:false, error:string, detail?:string }}
  */
-function assertConfirmClientMatch(bound, body) {
+function assertConfirmClientMatch(bound, body, scope) {
   if (bound === null || typeof bound !== 'object' || firstString(bound.client_key) === '') {
     return { ok: false, error: 'client-unbound', detail: '会话未绑定 client_key，无法确认入库' }
   }
@@ -822,7 +846,9 @@ function assertConfirmClientMatch(bound, body) {
   if (reqKey !== '' && reqKey !== boundKey) {
     return { ok: false, error: 'client-mismatch', detail: `body.client_key=${reqKey} ≠ bound=${boundKey}` }
   }
-  if (reqClient !== '' && boundClient !== '' && reqClient !== boundClient && reqClient !== boundKey) {
+  // A matching stable key (or its trusted current name) survives display renames.
+  if (reqClient !== '' && boundClient !== '' && reqClient !== boundClient && reqClient !== boundKey
+      && reqKey !== boundKey && scope?.namesByKey.get(boundKey) !== clientPathName(reqClient)) {
     return { ok: false, error: 'client-mismatch', detail: `body.client=${reqClient} ≠ bound.client=${boundClient}` }
   }
   return { ok: true }
@@ -891,7 +917,59 @@ export function create(ctx, config) {
     const called = await callTool(hostCtx, resolved.server, resolved.tool, {})
     if (!called.ok) return
     for (const customer of normalize(called.value) || []) {
-      if (scope.allowed.has(customer.id)) scope.names.add(clientPathName(customer.name))
+      if (scope.allowed.has(customer.id)) {
+        scope.names.add(clientPathName(customer.name))
+        scope.namesByKey.set(customer.id, clientPathName(customer.name))
+      }
+    }
+  }
+
+  async function libraryClient(parsed, scope, res, requireBound = false) {
+    await loadClientNames(scope)
+    let bound = resolveBoundClientForConfirm(parsed, scope)
+    // Older read callers send only a name. Recover a key only from a unique,
+    // visible stored binding, never by treating their selector as a key.
+    if (!bound && !requireBound && !parsed.session_id && !parsed.session && !parsed.meta_id && !parsed.metaId
+        && !parsed.client_key && parsed.client) {
+      const name = clientPathName(parsed.client)
+      if (!authorizedClient(scope, name)) { forbidden(res); return null }
+      const candidates = new Map()
+      const index = readSessionClientIndex()
+      for (const [session_id, entry] of Object.entries(index)) {
+        if (!visibleRecord(scope, entry)) continue
+        const candidate = resolveBoundClientForConfirm({ session_id }, scope, index)
+        if (candidate?.client_key && (clientPathName(candidate.client) === name
+            || scope.namesByKey.get(candidate.client_key) === name)) candidates.set(candidate.client_key, candidate)
+      }
+      if (candidates.size > 1) { sendJson(res, { ok: false, error: 'ambiguous-client-binding' }, 400); return null }
+      bound = candidates.values().next().value || null
+    }
+    if (bound?.forbidden || (bound && scope.cloud && !scope.allowed.has(bound.client_key))) {
+      forbidden(res); return null
+    }
+    if (!bound) {
+      const name = clientPathName(parsed.client)
+      if (!authorizedClient(scope, name)) { forbidden(res); return null }
+      if (requireBound || parsed.session_id || parsed.session || parsed.meta_id || parsed.metaId
+          || parsed.client_key || /^CUS-/.test(name) || (scope.cloud && !scope.names.has(name))) {
+        sendJson(res, { ok: false, error: 'client-unbound' }, 400); return null
+      }
+    } else {
+      const match = assertConfirmClientMatch(bound, parsed, scope)
+      if (!match.ok) { sendJson(res, match, 400); return null }
+    }
+    const client = bound || { client_key: '', client: clientPathName(parsed.client) }
+    try {
+      const dir = clientLibraryDir(client.client_key, client.client)
+      // Writable metadata is not a grant for a legacy display-name directory.
+      // Once keyed, only the stable key matters, even if the saved name is old.
+      if (scope.cloud && client.client_key && dir !== join(libraryRoot(), client.client_key)
+          && scope.namesByKey.get(client.client_key) !== clientPathName(client.client)) {
+        forbidden(res); return null
+      }
+      return client
+    } catch {
+      sendJson(res, { ok: false, error: 'invalid-library-path' }, 400); return null
     }
   }
 
@@ -1501,24 +1579,21 @@ export function create(ctx, config) {
     }
 
     /* ---- 任务进程的客观卡点（2026-09-23）--------------------------
-     * 按客户名探测两个位置：工作区目录（产物）与文章库（入库）。
+     * 工作区探测保持原样；文章库优先使用绑定的 client_key。
      * 只报事实：目录是否存在 / 文件数 / 最近 24h 新增数。 */
     handlers[TASK_STATUS_PATH] = async (req, res, scope) => {
       if (req.method !== 'GET') { methodNotAllowed(res); return }
       const url = new URL(req.url, 'http://localhost')
-      const client = String(url.searchParams.get('client') ?? '').replace(/[/\\]/g, '')
-      await loadClientNames(scope)
-      if (!authorizedClient(scope, client)) { forbidden(res); return }
-      if (!client) { sendJson(res, { ok: false, error: 'no-client' }); return }
+      const bound = await libraryClient(Object.fromEntries(url.searchParams), scope, res)
+      if (!bound) return
       /* 2026-09-24：卡点按「本任务」算 —— since = 任务发起时刻（meta.savedAt）。
        * 不传 since 才退回 24h 窗口。上一单的入库不再冒充本任务的进度。 */
       const sinceRaw = url.searchParams.get('since') ?? ''
       const sinceParsed = Date.parse(sinceRaw)
       const since = Number.isFinite(sinceParsed) && sinceParsed > 0 ? sinceParsed : Date.now() - 24 * 3600 * 1000
-      function probe(root) {
+      function probe(dir) {
         try {
-          if (!root) return { exists: false, files: 0, recent: 0, list: [] }
-          const dir = join(root, client)
+          if (!dir) return { exists: false, files: 0, recent: 0, list: [] }
           const entries = readdirSync(dir, { withFileTypes: true })
           const files = entries.filter(e => e.isFile()).map(e => e.name)
           let recent = 0
@@ -1531,13 +1606,16 @@ export function create(ctx, config) {
           return { exists: false, files: 0, recent: 0, list: [] }
         }
       }
-      sendJson(res, { ok: true, workspace: probe(workspaceRoot()), library: probe(libraryRoot()) })
+      sendJson(res, { ok: true,
+        workspace: probe(workspaceRoot() ? join(workspaceRoot(), clientPathName(bound.client)) : null),
+        library: probe(clientLibraryDir(bound.client_key, bound.client)),
+      })
     }
 
     /* ---- 草稿区（2026-09-24）：write(draft:true) 落「文章库/<客户>/草稿/」，
      * 人在工作台预览 → 确认 → 宿主把文件挪到正式位置（rename，查重幂等）。
      * 卷共享，入库动作不经过 MCP 容器。 */
-    const draftDir = client => join(libraryRoot(), String(client).replace(/[/\\]/g, ''), '草稿')
+    const draftDir = bound => join(clientLibraryDir(bound.client_key, bound.client), '草稿')
     const safeFile = name => {
       const s = String(name ?? '')
       if (!s || s.includes('/') || s.includes('\\') || s.includes('..')) throw new Error('bad file name')
@@ -1546,14 +1624,12 @@ export function create(ctx, config) {
     handlers[DRAFTS_PATH] = async (req, res, scope) => {
       if (req.method !== 'GET') { methodNotAllowed(res); return }
       const url = new URL(req.url, 'http://localhost')
-      const client = String(url.searchParams.get('client') ?? '').replace(/[/\\]/g, '')
-      await loadClientNames(scope)
-      if (!authorizedClient(scope, client)) { forbidden(res); return }
-      if (!client) { sendJson(res, { ok: false, error: 'no-client' }); return }
+      const bound = await libraryClient(Object.fromEntries(url.searchParams), scope, res)
+      if (!bound) return
       const localDrafts = []
       const localReady = []
       try {
-        const dir = draftDir(client)
+        const dir = draftDir(bound)
         for (const name of readdirSync(dir)) {
           if (!name.toLowerCase().endsWith('.md')) continue
           const st = statSync(join(dir, name))
@@ -1561,7 +1637,7 @@ export function create(ctx, config) {
         }
       } catch { /* 本地草稿目录不存在时继续查 Support */ }
       try {
-        const libDir = join(libraryRoot(), client)
+        const libDir = clientLibraryDir(bound.client_key, bound.client)
         for (const name of readdirSync(libDir)) {
           if (!name.toLowerCase().endsWith('.md')) continue
           const st = statSync(join(libDir, name))
@@ -1573,7 +1649,7 @@ export function create(ctx, config) {
       let mcpArticles = []
       const resolved = resolveTool(hostCtx, libraryServer, libraryServers, articlesTool, [/^list_articles$/i, /^list/i])
       if (resolved.tool !== '') {
-        const called = await callTool(hostCtx, resolved.server, resolved.tool, { client })
+        const called = await callTool(hostCtx, resolved.server, resolved.tool, { client: bound.client_key || bound.client })
         if (called.ok) {
           const normalized = normalizeLibraryArticles(called.value)
           if (normalized !== null) mcpArticles = normalized
@@ -1585,14 +1661,12 @@ export function create(ctx, config) {
     handlers[DRAFT_PATH] = async (req, res, scope) => {
       if (req.method !== 'GET') { methodNotAllowed(res); return }
       const url = new URL(req.url, 'http://localhost')
-      const client = String(url.searchParams.get('client') ?? '').replace(/[/\\]/g, '')
-      await loadClientNames(scope)
-      if (!authorizedClient(scope, client)) { forbidden(res); return }
-      if (!client) { sendJson(res, { ok: false, error: 'not-found' }, 404); return }
+      const bound = await libraryClient(Object.fromEntries(url.searchParams), scope, res)
+      if (!bound) return
       const title = firstString(url.searchParams.get('title'))
       try {
         const file = safeFile(title)
-        const text = readFileSync(join(draftDir(client), file), 'utf8')
+        const text = readFileSync(join(draftDir(bound), file), 'utf8')
         res.writeHead(200, { 'content-type': 'text/markdown; charset=utf-8', 'cache-control': 'no-store' })
         res.end(text)
         return
@@ -1600,7 +1674,7 @@ export function create(ctx, config) {
       try {
         const resolved = resolveTool(hostCtx, libraryServer, libraryServers, 'read_article', [/read_article/i, /read/i])
         if (title === '' || resolved.tool === '') throw new Error('article-missing')
-        const called = await callTool(hostCtx, resolved.server, resolved.tool, { client, title })
+        const called = await callTool(hostCtx, resolved.server, resolved.tool, { client: bound.client_key || bound.client, title })
         if (!called.ok) throw new Error('article-missing')
         const text = articleContent(called.value)
         if (text === null) throw new Error('article-missing')
@@ -1622,24 +1696,12 @@ export function create(ctx, config) {
           return
         }
         /* WB-SUP P2：绑死会话 client_key；跨客户确认失败关闭。 */
-        await loadClientNames(scope)
-        const bound = resolveBoundClientForConfirm(parsed, scope)
-        if (bound && (bound.forbidden || (scope.cloud && !scope.allowed.has(bound.client_key)))) { forbidden(res); return }
-        const displayClient = firstString(bound && bound.client, parsed.client, bound && bound.client_key)
-        if (bound && !authorizedClient(scope, displayClient)) { forbidden(res); return }
-        const match = assertConfirmClientMatch(bound, parsed)
-        if (!match.ok) {
-          sendJson(res, { ok: false, error: match.error, detail: match.detail || '' }, 400)
-          return
-        }
+        const bound = await libraryClient(parsed, scope, res, true)
+        if (!bound) return
+        const displayClient = firstString(bound.client, bound.client_key)
         const boundKey = bound.client_key
         const fileName = safeFile(title)
-        /* 草稿目录仍按显示名（现网 write draft:true 落盘约定）；再试 client_key 目录。 */
-        let src = join(draftDir(displayClient), fileName)
-        if (!existsSync(src) && displayClient !== boundKey) {
-          const alt = join(draftDir(boundKey), fileName)
-          if (existsSync(alt)) src = alt
-        }
+        const src = join(draftDir(bound), fileName)
         const localSource = existsSync(src)
         let content = null
         if (localSource) {
@@ -1662,7 +1724,7 @@ export function create(ctx, config) {
             return
           }
         }
-        const dst = join(libraryRoot(), String(displayClient).replace(/[/\\]/g, ''), fileName)
+        const dst = join(clientLibraryDir(boundKey, bound.client), fileName)
         /* 先远端 write_article(draft:false) 用绑死的 client_key，再挪本地文件。 */
         const writeResolved = resolveTool(hostCtx, libraryServer, libraryServers, 'write_article', [/write_article/i, /write/i])
         let article = null
@@ -1710,7 +1772,7 @@ export function create(ctx, config) {
           try { unlinkSync(src) } catch { /* 远端已 ready，草稿删不掉不挡 */ }
           movedTo = dst
         } else {
-          mkdirSync(dirname(dst), { recursive: true })
+          clientLibraryDir(boundKey, bound.client, { create: true })
           renameSync(src, dst)
           movedTo = dst
         }
@@ -1737,18 +1799,17 @@ export function create(ctx, config) {
       await new Promise(resolve => req.on('end', resolve))
       try {
         const parsed = JSON.parse(body || '{}')
-        const client = String(parsed.client ?? '').replace(/[/\\]/g, '')
         const titles = (Array.isArray(parsed.titles) ? parsed.titles : []).slice(0, 50)
-        await loadClientNames(scope)
-        if (!client || titles.length === 0) { sendJson(res, { ok: false, error: 'no-client-or-titles' }); return }
-        if (!authorizedClient(scope, client)) { forbidden(res); return }
+        const bound = await libraryClient(parsed, scope, res)
+        if (!bound) return
+        if (titles.length === 0) { sendJson(res, { ok: false, error: 'no-client-or-titles' }); return }
         const files = []
         for (const raw of titles) {
           try {
             const safe = safeFile(raw)
-            const draft = join(draftDir(client), safe)
+            const draft = join(draftDir(bound), safe)
             if (existsSync(draft)) { files.push(draft); continue }
-            const lib = join(libraryRoot(), client, safe)
+            const lib = join(clientLibraryDir(bound.client_key, bound.client), safe)
             if (existsSync(lib)) files.push(lib)
           } catch { /* bad names are ignored */ }
         }

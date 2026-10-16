@@ -2729,6 +2729,12 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			 * body 下没有这层，浮层定位稳定。左=草稿列表，右=正文 + 确认入库。 */
 			var WbCtx = null; /* apply 时赋值：TaskBar 自动弹侧栏用 */
 
+			function wbLibraryQuery(client, sessionId, metaId) {
+				return "?client=" + encodeURIComponent(client || "")
+					+ "&session_id=" + encodeURIComponent(sessionId || "")
+					+ "&meta_id=" + encodeURIComponent(metaId || "");
+			}
+
 			function wbOpenReview(client, onChanged, clientKey, sessionId, metaId) {
 				var old = document.getElementById("wb-review-overlay");
 				if (old) old.remove();
@@ -2781,7 +2787,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				}
 				function loadDrafts() {
 					if (!listEl.children.length) wbShowSkeleton(listEl, "草稿列表加载中…");
-					fetch(WB_API.drafts + "?client=" + encodeURIComponent(client), { headers: { accept: "application/json" } })
+					fetch(WB_API.drafts + wbLibraryQuery(client, resolvedSessionId, resolvedMetaId), { headers: { accept: "application/json" } })
 						.then(function (r) { return r.json(); })
 						.then(function (b) {
 							listEl.innerHTML = "";
@@ -2804,7 +2810,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					currentTitle = title; ensureMain();
 					mainTitle.textContent = title;
 					wbShowSkeleton(mainText, "加载中…"); mainFoot.style.display = "none";
-					fetch(WB_API.draft + "?client=" + encodeURIComponent(client) + "&title=" + encodeURIComponent(title), { headers: { accept: "text/markdown" } })
+					fetch(WB_API.draft + wbLibraryQuery(client, resolvedSessionId, resolvedMetaId) + "&title=" + encodeURIComponent(title), { headers: { accept: "text/markdown" } })
 						.then(function (r) { return r.text(); })
 						.then(function (text) { mainText.textContent = text; mainFoot.style.display = "flex"; })
 						.catch(function (e) { mainText.textContent = "读取失败：" + String(e); });
@@ -3538,7 +3544,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					fetch(WB_API.check, {
 						method: "POST",
 						headers: { "content-type": "application/json" },
-						body: JSON.stringify({ client: client, titles: titles }),
+						body: JSON.stringify({ client: client, session_id: sessionId, meta_id: metaId, titles: titles }),
 					}).then(function (r) { return r.json(); }).then(function (b) {
 						var rs = b && b.ok === true ? (b.results || []) : [];
 						var map = {};
@@ -3574,7 +3580,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					if (!client) { setL(function (p) { return Object.assign({}, p, { drafts: null, sel: "", body: "", checked: {}, done: {} }); }); return; }
 					var alive = true, retryTimer = null, retry = 0;
 					function loadDrafts() {
-						fetch(WB_API.drafts + "?client=" + encodeURIComponent(client), { headers: { accept: "application/json" } })
+						fetch(WB_API.drafts + wbLibraryQuery(client, sessionId, metaId), { headers: { accept: "application/json" } })
 						.then(function (r) { return r.json(); })
 						.then(function (b) {
 							if (!alive || !b || b.ok !== true) return;
@@ -3606,7 +3612,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					}
 					loadDrafts();
 					return function () { alive = false; clearTimeout(retryTimer); };
-				}, [client, at, writeCount, rvTick]);   /* at / writeCount / 手动刷新 回来要重拉重过滤 */
+				}, [client, sessionId, metaId, at, writeCount, rvTick]);   /* at / writeCount / 手动刷新 回来要重拉重过滤 */
 
 				React.useEffect(function () {
 					if (props.unifiedPanel && drafts && drafts.length && !sel) openDraft(drafts[0].title);
@@ -3666,7 +3672,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				function openDraft(title) {
 					WB_PICK.view = title; wbPickEmit();   // 联动：消息流 chips 高亮正在看的篇
 					setL(function (p) { return Object.assign({}, p, { sel: title, body: "加载中…", editing: false, editText: "", readError: false }); });
-					fetch(WB_API.draft + "?client=" + encodeURIComponent(client) + "&title=" + encodeURIComponent(title), { headers: { accept: "text/markdown" } })
+					fetch(WB_API.draft + wbLibraryQuery(client, sessionId, metaId) + "&title=" + encodeURIComponent(title), { headers: { accept: "text/markdown" } })
 						.then(function (r) { if(props.unifiedPanel && !r.ok) throw new Error("草稿读取失败，请重试"); return r.text(); })
 						.then(function (text) {
 							setL(function (p) { return props.unifiedPanel && p.sel !== title ? p : Object.assign({}, p, { body: text, readError: false }); });
@@ -3711,7 +3717,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					var s = st[0];
 					if (s.editing === true || s.sel === "" || client === "") return;
 					var alive = true;
-					fetch(WB_API.draft + "?client=" + encodeURIComponent(client) + "&title=" + encodeURIComponent(s.sel), { headers: { accept: "text/markdown" } })
+					fetch(WB_API.draft + wbLibraryQuery(client, sessionId, metaId) + "&title=" + encodeURIComponent(s.sel), { headers: { accept: "text/markdown" } })
 						.then(function (r) { return r.text(); })
 						.then(function (text) {
 							if (!alive) return;
@@ -4142,23 +4148,23 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				React.useEffect(function () {
 					if (meta === null || typeof meta !== "object" || !meta.client) return;
 					var alive = true;
-					fetch(WB_API.taskStatus + "?client=" + encodeURIComponent(meta.client) + "&since=" + encodeURIComponent(String(meta.savedAt || "")), { headers: { accept: "application/json" } })
+					fetch(WB_API.taskStatus + wbLibraryQuery(meta.client, sessionId, metaId) + "&since=" + encodeURIComponent(String(meta.savedAt || "")), { headers: { accept: "application/json" } })
 						.then(function (r) { return r.json(); })
 						.then(function (body) {
 							if (alive && body && body.ok === true) setSt({ ws: body.workspace || null, lib: body.library || null });
 						})
 						.catch(function () { });
 					return function () { alive = false; };
-				}, [metaId, meta && meta.client]);
+				}, [metaId, sessionId, meta && meta.client]);
 				React.useEffect(function () {
 					refreshStatusRef.current = function () {
 						if (meta === null || typeof meta !== "object" || !meta.client) return;
-						fetch(WB_API.taskStatus + "?client=" + encodeURIComponent(meta.client) + "&since=" + encodeURIComponent(String(meta.savedAt || "")), { headers: { accept: "application/json" } })
+						fetch(WB_API.taskStatus + wbLibraryQuery(meta.client, sessionId, metaId) + "&since=" + encodeURIComponent(String(meta.savedAt || "")), { headers: { accept: "application/json" } })
 							.then(function (r) { return r.json(); })
 							.then(function (body) { if (body && body.ok === true) setSt({ ws: body.workspace || null, lib: body.library || null }); })
 							.catch(function () { });
 					};
-				}, [metaId, meta && meta.client]);
+				}, [metaId, sessionId, meta && meta.client]);
 
 				/* 只由本轮实时 write 触发；草稿目录和 task-meta 均不在打开路径上。 */
 				var autoRef = React.useRef({ previous: null, opened: {}, timer: null });
@@ -4206,7 +4212,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				React.useEffect(function () {
 					if (!client) return;
 					var alive = true;
-					fetch(WB_API.drafts + "?client=" + encodeURIComponent(client), { headers: { accept: "application/json" } })
+					fetch(WB_API.drafts + wbLibraryQuery(client, sessionId, metaId), { headers: { accept: "application/json" } })
 						.then(function (r) { return r.json(); })
 						.then(function (b) {
 							if (alive && b && b.ok === true) {
@@ -4218,7 +4224,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 						})
 						.catch(function () { });
 					return function () { alive = false; };
-				}, [metaId, client, writeCount, rvTick]);
+				}, [metaId, sessionId, client, writeCount, rvTick]);
 				if (meta === null || typeof meta !== "object") {
 					return h("div", { className: "wb_task" },
 						h("span", { className: "wb_taskTitle" }, (wbNavState.renames[sessionId] && wbNavState.renames[sessionId].title) || wbSessionTitle(wbNavState.map[sessionId] || wbNavState.bindings[sessionId], {displayTitle:title}, meta)),

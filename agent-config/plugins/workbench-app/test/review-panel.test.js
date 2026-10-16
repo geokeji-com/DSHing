@@ -18,7 +18,7 @@ test('task bar has an explicit 文章审核 open/refresh button wired to the rev
   assert.match(source, /文章审核 ›/)
   assert.match(source, /openTab\("wb-review", \{ params: \{ client: meta\.client, meta: metaId \} \}\)/)
   assert.match(source, /wb:review-refresh/)
-  assert.match(source, /\[client, at, writeCount, rvTick\]/)
+  assert.match(source, /\[client, sessionId, metaId, at, writeCount, rvTick\]/)
 })
 
 test('both review confirmation requests carry session and client binding fields', () => {

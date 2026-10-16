@@ -37,6 +37,7 @@ function host({ env = { DSH_HOME: '/opt/dsh/homes/alice' }, rows = [], aliases =
       return files.get(name).map(name => ({ name, isFile: () => true }))
     },
     statSync: () => ({ mtimeMs: Date.now() }),
+    lstatSync: () => { throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }) },
     readFileSync: forbidden, writeFileSync: forbidden, existsSync: () => false,
     renameSync: forbidden, unlinkSync: forbidden,
   }

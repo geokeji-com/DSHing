@@ -272,9 +272,14 @@ test('confirm rejects invisible metadata and owners before fallback or mismatch 
   assert.equal(f.calls.length, 0)
 })
 
-test('authorized confirmation keeps session, metadata and body-only workflows', async t => {
+test('authorized confirmation requires a stored session or metadata binding', async t => {
   const f = fixture(t), headers = f.cloud(['CUS-Y'])
-  for (const body of [{ session_id: 'y' }, { meta_id: 'wbtm-y' }, { client_key: 'CUS-Y', client: '猿编程' }]) {
+  const unbound = await f.request('confirm-draft', { method: 'POST', headers,
+    body: { client_key: 'CUS-Y', client: '猿编程', title: 'x' } })
+  assert.equal(unbound.status, 400)
+  assert.equal(unbound.body.error, 'client-unbound')
+  assert.equal(f.calls.length, 0)
+  for (const body of [{ session_id: 'y' }, { meta_id: 'wbtm-y' }]) {
     f.put(f.draft, 'Private Y draft')
     const response = await f.request('confirm-draft', { method: 'POST', headers, body: { ...body, title: 'x' } })
     assert.equal(response.status, 200)
@@ -283,7 +288,7 @@ test('authorized confirmation keeps session, metadata and body-only workflows', 
     assert.equal(readFileSync(join(f.library, '猿编程', 'x.md'), 'utf8'), 'Private Y draft')
   }
   const writes = f.calls.filter(c => c.name.endsWith('__write_article'))
-  assert.equal(writes.length, 3)
+  assert.equal(writes.length, 2)
   assert.ok(writes.every(c => c.arguments.client === 'CUS-Y' && c.arguments.draft === false))
 })
 
