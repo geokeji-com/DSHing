@@ -170,7 +170,7 @@ test('two tabs claim only one next turn, and navigation cancels a pending send',
   assert.equal(a.sends.length + b.sends.length, 1)
 })
 
-test('unconfirmed send is skipped on resume and invalid multi-write/direct-library results fail', async t => {
+test('unconfirmed send is skipped on resume', async t => {
   const server = host(t)
   let batch = await make(server)
   batch.records[0] = { ...batch.records[0], status: 'sending', sent_at: 100 }
@@ -180,8 +180,49 @@ test('unconfirmed send is skipped on resume and invalid multi-write/direct-libra
   assert.equal(f.entry.batch.records[0].status, 'failed')
   assert.match(f.entry.batch.records[0].reason, /发送未确认/)
   assert.equal(f.sends.length, 0)
-  assert.equal(f.api.wbBatchResult([write('A'), write('B')], batch.records[0]).status, 'failed')
-  assert.equal(f.api.wbBatchResult([write('A', { draft: false })], batch.records[0]).status, 'failed')
+})
+
+test('titled successful writes stay ok with warnings for extra results or missing draft:true', async t => {
+  const server = host(t), batch = await make(server), f = client(server, batch)
+  const warn = t.mock.method(console, 'warn', () => {})
+  const error = { ...write('失败标题'), isError: true, content: '写入失败' }
+  const cases = [
+    { name: 'multiple successful writes', nodes: [write('A'), write('B')], warning: /成功写入多次/ },
+    { name: 'success then error', nodes: [write('A'), error], warning: /结果数不是一次/ },
+    { name: 'error then successful retry', nodes: [error, write('A')], warning: /结果数不是一次/ },
+    { name: 'draft false', nodes: [write('A', { draft: false })], warning: /draft !== true/ },
+    { name: 'draft absent', nodes: [write('A', { draft: undefined })], warning: /draft !== true/ },
+    { name: 'later write has draft false', nodes: [write('A'), write('B', { draft: false })], warning: /draft !== true/ },
+    { name: 'later successful write has the first usable title', nodes: [write(''), write('A')], warning: /成功写入多次/ },
+  ]
+  for (const { name, nodes, warning } of cases) {
+    warn.mock.resetCalls()
+    const result = f.api.wbBatchResult([...nodes, assistant('本轮角度：选购与对比')], batch.records[0])
+    assert.equal(result.status, 'ok', name)
+    assert.equal(result.title, 'A', name)
+    assert.equal(result.angle, '选购与对比', name)
+    assert.equal(result.reason, '', name)
+    assert.ok(warn.mock.calls.some(call => warning.test(call.arguments.join(' '))), name)
+    assert.deepEqual(Object.keys(f.api.wbBatchTitles({ records: [result] }, {})), ['A'], name)
+  }
+})
+
+test('rounds without successful writes or a usable title still fail', async t => {
+  const server = host(t), batch = await make(server), f = client(server, batch)
+  const cases = [
+    { name: 'empty turn', nodes: [], reason: '本轮结束，未成功写入草稿' },
+    { name: 'tool error with a title', nodes: [{ ...write('失败标题'), isError: true, content: '写入失败' }], reason: '写入失败' },
+    { name: 'turn error', nodes: [{ kind: 'turn-error', message: '服务端限流' }], reason: '服务端限流' },
+    { name: 'assistant failure', nodes: [assistant('缺少资料')], reason: '缺少资料' },
+    { name: 'missing title', nodes: [write('')], reason: '写入结果缺少标题' },
+    { name: 'whitespace title', nodes: [write('   ')], reason: '写入结果缺少标题' },
+  ]
+  for (const { name, nodes, reason } of cases) {
+    const result = f.api.wbBatchResult(nodes, batch.records[0])
+    assert.equal(result.status, 'failed', name)
+    assert.equal(result.title, '', name)
+    assert.equal(result.reason, reason, name)
+  }
 })
 
 test('ordinary N=1 mounts call no batch APIs; owner/session cache keys cannot cross sessions', async t => {
