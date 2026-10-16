@@ -24,6 +24,7 @@
  *   GET /api/workbench/articles?client=NAME → { ok, articles:[{id,title}] }
  *   GET /api/workbench/mcp                  → 诊断：这台 Host 挂了哪些 MCP、各有哪些工具
  *   POST/GET /api/workbench/task-meta       → 装配参数；POST 持久化 client_key(CUS-*) + display client
+ *   POST/GET /api/workbench/batch           → 多轮生文状态（uid/session 隔离，revision 防重复发送）
  *   GET/POST /api/workbench/session-client  → session_id ↔ client_key 索引
  *   POST /api/workbench/confirm-draft       → 绑死 client_key → write_article(draft:false) + 本地草稿挪正式
  */
@@ -43,6 +44,7 @@ const SKILLS_PATH = '/api/workbench/skills'
 const ARTICLES_PATH = '/api/workbench/articles'
 const MCP_INFO_PATH = '/api/workbench/mcp'
 const TASK_META_PATH = '/api/workbench/task-meta'
+const BATCH_PATH = '/api/workbench/batch'
 // Test overrides are resolved at use time; production storage stays in place.
 const taskMetaDir = () => process.env.DSH_WORKBENCH_META_DIR || '/home/dsh/.dsh/workbench-meta'
 const TASK_STATUS_PATH = '/api/workbench/task-status'
@@ -722,6 +724,16 @@ function readTaskMetaRecord(metaId) {
   return null
 }
 
+const batchDir = () => join(taskMetaDir(), 'batches')
+const validBatchId = id => /^wbb-[a-z0-9-]{1,100}$/.test(id)
+function readBatch(id) {
+  if (!validBatchId(id)) return null
+  try { return JSON.parse(readFileSync(join(batchDir(), id + '.json'), 'utf8')) } catch { return null }
+}
+function visibleBatch(scope, batch) {
+  return batch && visibleRecord(scope, batch) && (!scope.cloud || (scope.uid && batch.owner_uid === scope.uid))
+}
+
 /**
  * 确认入库绑死客户：优先 session-client 索引，其次 task-meta。
  * body 可带 session_id / meta_id / client_key / client。
@@ -1314,6 +1326,94 @@ export function create(ctx, config) {
         return
       }
       methodNotAllowed(res)
+    }
+
+    /* Batches use the same trusted uid/client scope as task-meta. Revision CAS
+     * makes claiming a round atomic across both relay slots and browser tabs. */
+    handlers[BATCH_PATH] = async (req, res, scope) => {
+      if (!['GET', 'POST'].includes(req.method)) { methodNotAllowed(res); return }
+      await loadClientNames(scope)
+      if (scope.cloud && !scope.uid) { forbidden(res); return }
+      if (req.method === 'GET') {
+        const url = new URL(req.url, 'http://localhost')
+        const id = url.searchParams.get('id') || ''
+        const session = url.searchParams.get('session_id') || ''
+        let batch = id ? readBatch(id) : null
+        if (!id && session) {
+          let files = []
+          try { files = readdirSync(batchDir()) } catch { /* no batches yet */ }
+          batch = files.filter(file => file.endsWith('.json')).map(file => readBatch(file.slice(0, -5)))
+            .filter(item => visibleBatch(scope, item) && item.session_id === session)
+            .sort((a, b) => b.savedAt.localeCompare(a.savedAt))[0]
+        }
+        const binding = batch && ownEntry(readSessionClientIndex(), batch.session_id)
+        if (!visibleBatch(scope, batch) || (session && batch.session_id !== session)
+          || (binding && !visibleRecord(scope, binding))) {
+          sendJson(res, { ok: false, error: 'not-found' }, 404); return
+        }
+        sendJson(res, { ok: true, batch }); return
+      }
+      let raw = ''
+      req.on('data', chunk => { raw += chunk })
+      await new Promise(resolve => req.on('end', resolve))
+      let body
+      try { body = JSON.parse(raw) } catch { body = null }
+      if (!body || !validBatchId(body.id || '')) { sendJson(res, { ok: false, error: 'bad-id' }, 400); return }
+      const prev = readBatch(body.id)
+      if (prev && !visibleBatch(scope, prev)) { forbidden(res); return }
+      const session = firstString(body.session_id, prev && prev.session_id)
+      const binding = ownEntry(readSessionClientIndex(), session)
+      if ((binding && !visibleRecord(scope, binding)) || !authorizedBinding(scope, prev || body)) { forbidden(res); return }
+      if (prev && prev.session_id && body.session_id !== undefined && body.session_id !== prev.session_id) {
+        sendJson(res, { ok: false, error: 'session-mismatch' }, 409); return
+      }
+      // Stop wins over an in-flight claim; stale updates cannot restart a batch.
+      if (prev && body.op !== 'stop' && body.revision !== prev.revision) {
+        sendJson(res, { ok: false, error: 'revision-conflict', batch: prev }, 409); return
+      }
+      let record
+      if (!prev) {
+        const rounds = Math.max(1, Math.min(20, Math.floor(Number(body.rounds) || 1)))
+        if (rounds < 2 || !firstString(body.prompt)) { sendJson(res, { ok: false, error: 'bad-batch' }, 400); return }
+        record = stampOwner(scope, {
+          id: body.id, session_id: session, client_key: firstString(body.client_key), client: firstString(body.client),
+          rounds, prompt: body.prompt, meta_id: firstString(body.meta_id), bind: body.bind || {}, model: body.model || null,
+          questions: Array.isArray(body.questions) ? body.questions : [], status: 'running', review_opened: false,
+          records: Array.from({ length: rounds }, (_, i) => ({ round: i + 1, title: '', angle: '', status: 'pending' })),
+        })
+      } else {
+        record = { ...prev, session_id: session }
+        if (body.op === 'stop') record.status = 'stopped'
+        else {
+          if (body.records !== undefined) {
+            const rows = body.records
+            if (!Array.isArray(rows) || rows.length !== prev.rounds || rows.some((row, i) => !row || row.round !== i + 1
+              || !['pending', 'sending', 'ok', 'failed'].includes(row.status)
+              || typeof row.title !== 'string' || typeof row.angle !== 'string'
+              || (['ok', 'failed'].includes(prev.records[i].status) && JSON.stringify(row) !== JSON.stringify(prev.records[i]))
+              || (prev.status !== 'running' && prev.records[i].status === 'pending' && row.status !== 'pending')
+              || (prev.records[i].status === 'sending' && row.status === 'pending'))) {
+              sendJson(res, { ok: false, error: 'bad-rounds' }, 400); return
+            }
+            record.records = rows
+          }
+          if (prev.status === 'running' && ['done', 'failed_partial'].includes(body.status)) {
+            if (record.records.some(row => !['ok', 'failed'].includes(row.status))) {
+              sendJson(res, { ok: false, error: 'rounds-incomplete' }, 400); return
+            }
+            record.status = record.records.some(row => row.status === 'failed') ? 'failed_partial' : 'done'
+          }
+          if (body.review_opened === true) record.review_opened = true
+        }
+      }
+      record.revision = (prev ? prev.revision : 0) + 1
+      record.savedAt = new Date().toISOString()
+      try {
+        writeSessionClientIndex(record, join(batchDir(), record.id + '.json'))
+        sendJson(res, { ok: true, batch: record })
+      } catch (error) {
+        sendJson(res, { ok: false, error: 'save-failed', detail: String(error.message || error) }, 500)
+      }
     }
 
     /* ---- session ↔ client 索引（WB-SUP P1）--------------------------

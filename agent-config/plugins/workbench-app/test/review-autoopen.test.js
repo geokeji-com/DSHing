@@ -4,7 +4,7 @@ import vm from 'node:vm'
 import { readFileSync } from 'node:fs'
 
 const source = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
-const instrumented = source.replace('return module.exports;', 'return { ...module.exports, wbReviewAutoOpenDecision, wbIsSuccessfulWrite, WB_WRITE_TOOL_RE, TaskBar, ReviewTabBody, wbNavState, WB_PICK };')
+const instrumented = source.replace('return module.exports;', 'return { ...module.exports, wbReviewAutoOpenDecision, wbIsSuccessfulWrite, WB_WRITE_TOOL_RE, TaskBar, ReviewTabBody, wbNavState, WB_PICK, wbBatches, wbBatchKey };')
 let api
 vm.runInNewContext(instrumented, {
   window: { __ModuleLoader__: { load({ factory }) { api = factory(() => ({})) } } },
@@ -249,4 +249,32 @@ test('missing-title retries stop after two attempts and are cancelled on unmount
     assert.equal(f.timers.size, 0)
     f.dispose()
   }
+})
+
+test('active batch suppresses per-write auto-open while retaining refresh and single-turn behavior', () => {
+  assert.deepEqual(decision(snapshot(), snapshot({ writeCount: 1, batchActive: true })), { open: false, refresh: true })
+  assert.deepEqual(decision(snapshot({ writeCount: 1 }), snapshot({ writeCount: 2, running: false, batchActive: true })), { open: false, refresh: true })
+  assert.deepEqual(decision(snapshot(), snapshot({ writeCount: 1, batchActive: false })), { open: true, refresh: true })
+})
+
+test('batch marker suppresses review before its persisted record finishes loading', () => {
+  const f = harness({ binding: { client: '客户 A' } })
+  const batchUser = { kind: 'user', content: [{ type: 'text', text: '[生文批次：wbb-test；第 1/3 轮]' }] }
+  f.render({ nodes: [batchUser] })
+  f.render({ nodes: [batchUser, write()] })
+  assert.equal(f.opens.length, 0)
+  f.dispose()
+})
+
+
+test('review includes every persisted successful batch title even when chat history is truncated', async () => {
+  const f = harness({ component: 'ReviewTabBody', fetchBody: async url => url.startsWith('/api/workbench/drafts?')
+    ? { ok: true, drafts: [{ title: '第一篇' }, { title: '第三篇' }, { title: '其他会话文章' }], library: [] }
+    : { ok: true } })
+  f.api.wbBatches[f.api.wbBatchKey('session-a')] = { batch: { status: 'failed_partial', records: [
+    { round: 1, status: 'ok', title: '第一篇' }, { round: 2, status: 'failed', title: '' }, { round: 3, status: 'ok', title: '第三篇' },
+  ] } }
+  f.render({ nodes: [], running: false }); await f.settle()
+  assert.deepEqual(Array.from(f.api.WB_PICK.drafts, d => d.title), ['第一篇', '第三篇'])
+  f.dispose()
 })

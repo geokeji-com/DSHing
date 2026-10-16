@@ -32,12 +32,12 @@ function assembly({ failOpen = false, mobile = false, rows = questions } = {}) {
   const workspace = { async openWorkspace(id, beforeOpen) { if (failOpen) throw Error('offline'); beforeOpen('session-test') } }
   const instrumented = source
     .replace('return module.exports;', 'return {...module.exports, WorkbenchPage, wbCacheWorkspace, skillDesc, skillDisplay, pending: () => pendingPrompt};')
-    .replace('if (mobile) return h(MobileAssembly, {', 'if (props.capture) return props.capture({composePrompt, dispatch, addOne, minusOne, pickedEntries, pickedTotal, pickedLabel, setWeakPicked, weakPicked, weakSelectionKey, weakPickSet, weakBulkSet, weakRowDown, weakRowEnter, pickRecommended, pickTop10, setMode, setTopic, setBase}); if (mobile) return h(MobileAssembly, {')
+    .replace('if (mobile) return h(MobileAssembly, {', 'if (props.capture) return props.capture({composePrompt, dispatch, addOne, minusOne, pickedEntries, pickedTotal, pickedLabel, setWeakPicked, weakPicked, weakSelectionKey, weakPickSet, weakBulkSet, weakRowDown, weakRowEnter, pickRecommended, pickTop10, setMode, setTopic, setBase, setRounds, rounds}); if (mobile) return h(MobileAssembly, {')
   vm.runInNewContext(instrumented, {
     window: { matchMedia: query => ({ matches: query.includes('reduced-motion') || mobile }), dispatchEvent() {}, __ModuleLoader__: { load({ factory }) { api = factory(() => react) } } },
     Event,
     sessionStorage: { setItem: (k, v) => storage.set(k, v), getItem: k => storage.get(k) ?? null, removeItem: k => storage.delete(k) },
-    fetch: async (url, options) => { requests.push({ url, options }); return { json: async () => ({ ok: true, id: 'meta-test' }) } },
+    fetch: async (url, options) => { requests.push({ url, options }); return { json: async () => url === '/api/workbench/batch' ? ({ ok: true, batch: { ...JSON.parse(options.body), status: 'running', revision: 1 } }) : ({ ok: true, id: 'meta-test' }) } },
   })
   api.wbCacheWorkspace({ workspace: { personal: { id: 'personal-test', path: '/personal/test' }, legacySharedIds: [] } })
   function render(capture = true) {
@@ -196,4 +196,50 @@ test('mobile weak-mode supplementary textarea feeds the same send payload and pr
   assert.equal(payload.base, base)
   assert.ok(mobile.api.pending().text.includes('补充要求：' + base.trim()))
   assert.deepEqual(JSON.parse(mobile.storage.get('wb-pending-bind')).questions, [{ qid: 'q2', question: questions[1].question, client_key: 'CUS-test' }])
+})
+
+
+test('round prompts preserve N=1 exactly and enforce one draft with history and structured metadata', () => {
+  const f = assembly(); let a = f.render()
+  a.addOne('sora-selection'); a.addOne('sora-selection'); a.addOne('sora-trust')
+  a.setWeakPicked(['怎么选产品？', '产品值得信任吗？']); a.setBase('写 4 篇，保留参数')
+  a = f.render()
+  const original = a.composePrompt()
+  assert.equal(a.composePrompt({ rounds: 1 }), original)
+  const batch = { rounds: 3, id: 'wbb-test', session_id: 'sid', questions: [{ qid: 'q1' }], records: [{ round: 1, title: '原有标题', angle: '家庭选购', status: 'ok' }] }
+  const next = a.composePrompt(batch, 2)
+  for (const text of ['第 2/3 轮', '原有标题', '家庭选购', 'sora-selection', 'sora-trust', '写 1 篇', '本轮只调用一次 write_article', 'draft:true', '本轮角度：', '"article_no":1', '"batch_id":"wbb-test"', '"round":2', '"session_id":"sid"', 'assignment', 'mcp__sora-knowledge__*', 'mcp__sora-articles__*', '行为守则', '怎么选产品？', '补充要求：写 4 篇，保留参数']) assert.ok(next.includes(text), text)
+  assert.doesNotMatch(next, /技能：[^\n]+写 [2-9] 篇/)
+  assert.doesNotMatch(next, /仅当用户明确说「直接入库」时例外|各类型的篇数按上面点选的数量执行/)
+})
+
+test('multi-round dispatch snapshots the complete task and registers batch id only for N>1', async () => {
+  const f = assembly()
+  assert.equal(f.render().rounds, 1)
+  f.render().setRounds(3); f.render().setBase('补充内容'); f.render().addOne('sora-trust')
+  await f.render().dispatch()
+  const meta = JSON.parse(f.requests.find(r => r.url === '/api/workbench/task-meta').options.body)
+  const batch = JSON.parse(f.requests.find(r => r.url === '/api/workbench/batch').options.body)
+  assert.equal(meta.rounds, 3); assert.equal(meta.batch_id, batch.id)
+  assert.equal(batch.bind.client_key, 'CUS-test')
+  assert.match(batch.prompt, /补充内容/)
+  assert.match(batch.prompt, /sora-trust/)
+  assert.equal(f.api.pending().batchId, batch.id)
+  assert.equal(f.api.pending().sessionId, 'session-test')
+})
+
+test('desktop and mobile expose the same clamped integer rounds control next to launch', () => {
+  for (const mobile of [false, true]) {
+    const f = assembly({ mobile })
+    const tree = mobile ? f.renderMobile() : f.render(false)
+    const component = descendants(tree).find(n => typeof n.type === 'function' && n.type.name === 'RoundsInput')
+    assert.ok(component)
+    const label = component.type(component.props), input = label.props.children.find(n => n && n.type === 'input')
+    assert.equal(label.props.children[0], '轮数')
+    assert.equal(input.props.value, 1)
+    assert.equal(input.props.min, 1); assert.equal(input.props.max, 20); assert.equal(input.props.step, 1)
+    for (const [value, expected] of [['', 1], ['-1', 1], ['2.9', 2], ['100', 20], ['nope', 1]]) {
+      input.props.onChange({ target: { value } }); assert.equal(f.render().rounds, expected)
+    }
+  }
 })
