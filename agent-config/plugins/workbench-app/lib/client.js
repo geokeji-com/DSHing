@@ -369,7 +369,7 @@ window.__ModuleLoader__.load({
 						h('div',{className:'wb_mChips wb_mStyles'},REF_STYLES.map(function(s){return chip(s,p.refStyle===s,function(){p.setRefStyle(s);});})))
 					:h('div',{className:'wb_mSkills',key:'skill'},p.skills.status==='loading'?h(WbSkeleton,{label:'技能加载中…'}):p.skills.status==='error'?h('p',null,'技能暂时无法加载，请稍后重试'):p.skills.skills.length===0?h('p',null,'还没有可用模板'):layers.map(function(layer){var list=p.skills.skills.filter(function(s){return skillLayer(s)===layer[0];});return list.length?h('section',{key:layer[0]},h('small',null,layer[1]),h('div',{className:'wb_mChips'},list.map(function(s){var n=p.counts[s.name]||0;return h('button',{type:'button',key:s.name,className:'wb_mChip','aria-pressed':n>0,title:s.description,onClick:function(e){p.addOne(s.name,e.currentTarget);}},skillDisplay(s.name),n>0?h('span',{className:'wb_skBadge',role:'button',tabIndex:0,'aria-label':'减少 '+skillDisplay(s.name)+' 1 篇',onClick:function(e){e.stopPropagation();p.minusOne(s.name);},onKeyDown:function(e){if(e.key==='Enter'||e.key===' '){e.preventDefault();e.stopPropagation();p.minusOne(s.name);}}},String(n)):null);}))):null;})),
 					h('button',{type:'button',className:'wb_mExtra',onClick:function(){editor[1]('base');}},h('b',null,'补充要求'),h('span',{className:'wb_mGrow'},p.base||'选填'),wbIcon('next'))),
-				h('div',{className:'wb_mAction wb_mAboveTabs'},p.pickedTotal>0?h('span',{className:'wb_skTags'},p.pickedEntries.map(function(s){return h('button',{type:'button',key:s.name,className:'wb_skTag',title:'点一下减 1 篇',onClick:function(){p.minusOne(s.name);}},skillDisplay(s.name),h('span',{className:'wb_skBadge'},String(s.count)));})):null,h(RoundsInput,p),p.sending?h('p',{role:'status'},p.sending):null,h('button',{type:'button',className:'wb_mPrimary wb_mStart',disabled:!p.clientName||!!p.sending,onClick:p.dispatch},wbIcon('star'),'开始生文')),
+				h('div',{className:'wb_mAction wb_mAboveTabs'},p.pickedTotal>0?h('span',{className:'wb_skTags'},p.pickedEntries.map(function(s){return h('button',{type:'button',key:s.name,className:'wb_skTag',title:'点一下减 1 篇',onClick:function(){p.minusOne(s.name);}},skillDisplay(s.name),h('span',{className:'wb_skBadge'},String(s.count)));})):null,p.sending?h('p',{role:'status'},p.sending):null,h('button',{type:'button',className:'wb_mPrimary wb_mStart',disabled:!p.clientName||!!p.sending,onClick:p.dispatch},wbIcon('star'),'开始生文')),
 				h(WbPresence,null,sheet[0]?h(MobileModal,{title:'写给谁',close:function(){sheet[1](false);}},
 					h('small',{className:'wb_mCaption'},'客户'),p.clients.status==='loading'?h(WbSkeleton,{label:'客户加载中…'}):empty?h('div',{className:'wb_mEmpty'},'还没有分配给你的客户 · 联系管理员'):h('div',{role:'radiogroup','aria-label':'客户'},p.clients.customers.map(function(c){var on=customerId(c)===p.pick.key;var bits=[];if(typeof c.files==='number')bits.push('知识库 '+c.files+' 条');if(on&&p.articles.status==='ready')bits.push('文章库 '+p.articles.articles.length+' 篇');return h('button',{type:'button',role:'radio','aria-checked':on,key:customerId(c),className:'wb_mClient',onClick:function(){setClient(c);}},h('span',{className:'wb_mAvatar'},customerName(c).slice(0,1)),h('span',{className:'wb_mGrow'},h('b',null,customerName(c)),h('small',null,bits.join(' · ')||'\u00a0')),h('span',{className:'wb_mRadio','data-on':on?'1':'0'},on?'✓':''));})),
 					!empty?h(React.Fragment,null,h('small',{className:'wb_mCaption'},'产品线'),h('div',{className:'wb_mChips'},p.lines.length?p.lines.map(function(l){return chip(l.name||l.id,p.pick.line===String(l.id),function(){p.onLine({target:{value:String(l.id)}});},l.id);}):h('p',null,'暂无产品线')),h('small',{className:'wb_mCaption'},'期数'),h('div',{className:'wb_mChips'},p.periods.length?p.periods.map(function(v){return chip(v.name||v.id,p.pick.period===String(v.id),function(){p.setPick({key:p.pick.key,line:p.pick.line,period:String(v.id)});},v.id);}):h('p',null,'暂无期数'))):null,
@@ -1358,8 +1358,6 @@ html[data-wb-mobile] [class*='_userStack'] *{color:inherit;background:transparen
 html[data-wb-mobile] [data-slot='conversation.chat.node'] pre{overflow:auto;max-width:100%}
 html[data-wb-mobile] .wb_grip{display:none}
 html[data-wb-mobile]:has(.impersonation-banner){--wb-notice-h:36px}
-.wb_rounds{display:inline-flex;align-items:center;gap:6px;white-space:nowrap;font:13px var(--wb-font)}
-.wb_rounds input{width:58px;padding:6px;border:1px solid var(--wb-line);border-radius:6px;color:inherit;background:var(--wb-bg)}
 .wb_batch{position:fixed;z-index:100;bottom:100px;right:24px;max-width:min(420px,90vw);padding:12px;display:flex;flex-wrap:wrap;gap:10px;background:var(--wb-bg);color:var(--dsh-ink-1,#25252b);border:1px solid var(--wb-line);border-radius:10px;box-shadow:0 4px 18px #0002}
 .wb_batch ul{flex-basis:100%;margin:0;padding-left:20px;max-height:180px;overflow:auto}
 html[data-wb-mobile] .wb_mRename{width:100%;min-height:48px;border:1px solid var(--wb-line);border-radius:12px;padding:10px}
@@ -2307,12 +2305,6 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 		function wbClampRounds(value) {
 			var n = Number(value);
 			return Number.isFinite(n) ? Math.max(1, Math.min(20, Math.floor(n))) : 1;
-		}
-		function RoundsInput(p) {
-			return h("label", { className: "wb_rounds" }, "轮数", h("input", {
-				type: "number", min: 1, max: 20, step: 1, value: p.rounds, disabled: !!p.sending,
-				onChange: function (e) { p.setRounds(wbClampRounds(e.target.value)); },
-			}));
 		}
 		function wbRoundMarker(batch, round) { return "[生文批次：" + batch.id + "；第 " + round + "/" + batch.rounds + " 轮]"; }
 		function wbRoundPrompt(text, batch, round) {
@@ -4754,7 +4746,6 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			var sort = sortS[0], setSort = sortS[1];
 			var heightS = React.useState(null);
 			var workHeight = heightS[0], setWorkHeight = heightS[1];
-			var roundsS = React.useState(1), rounds = roundsS[0], setRounds = roundsS[1];
 			var sendingS = React.useState("");
 			var sending = sendingS[0], setSending = sendingS[1];
 
@@ -4955,7 +4946,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				 * 编号追加在预填消息尾部 + 记进 sessionStorage —— 会话页顶部
 				 * 的任务条凭编号读回参数。登记失败不挡发送（任务条显示兜底）。 */
 				var metaId = "", batch = null;
-				var totalRounds = wbClampRounds(rounds);
+				var totalRounds = wbClampRounds(pickedTotal() || 1);
 				var batchId = totalRounds > 1 ? "wbb-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10) : "";
 				var selectedQuestions = mode === "weak" ? selectedSessionQuestions(weakGaps.questions, weakTicks.ticks, weakPicked, pick.key) : [];
 				setSending("正在登记任务参数…");
@@ -5326,7 +5317,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				onClient: onClient, onLine: onLine, mode: mode, setMode: setMode, topic: topic, setTopic: setTopic,
 				refTab: refTab, setRefTab: setRefTab, refs: refs, refText: refText, setRefText: setRefText,
 				refCount: refCount, refStyle: refStyle, setRefStyle: setRefStyle, skills: skills, counts: counts, pickedEntries: pickedEntries(), pickedTotal: pickedTotal(),
-				addOne: addOne, minusOne: minusOne, base: base, setBase: setBase, sending: sending, dispatch: dispatch, rounds: rounds, setRounds: setRounds,
+				addOne: addOne, minusOne: minusOne, base: base, setBase: setBase, sending: sending, dispatch: dispatch,
 				weakGaps: weakGaps, weakPicked: weakPicked, weakRows: weakRows, pickSet: weakPickSet,
 				bulkSet: weakBulkSet, rowDown: weakRowDown, rowEnter: weakRowEnter, unified: !!unified, recommend: pickRecommended,
 				selectedCount: weakPicked.length,
@@ -5545,7 +5536,6 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 											onClick: function () { minusOne(s.name); },
 										}, skillDisplay(s.name), h("span", { className: "wb_skBadge" }, String(s.count)));
 									})) : null,
-								h(RoundsInput, { rounds: rounds, setRounds: setRounds, sending: sending }),
 								h("span", { key: "effort", className: "wb_fsel", style: { marginLeft: "auto" } },
 									h("button", {
 										type: "button", className: "wb_modelSel", "data-on": selEffort !== "__default__" ? "1" : "0",
