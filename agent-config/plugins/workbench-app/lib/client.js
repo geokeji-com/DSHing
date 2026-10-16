@@ -369,7 +369,7 @@ window.__ModuleLoader__.load({
 						h('div',{className:'wb_mChips wb_mStyles'},REF_STYLES.map(function(s){return chip(s,p.refStyle===s,function(){p.setRefStyle(s);});})))
 					:h('div',{className:'wb_mSkills',key:'skill'},p.skills.status==='loading'?h(WbSkeleton,{label:'技能加载中…'}):p.skills.status==='error'?h('p',null,'技能暂时无法加载，请稍后重试'):p.skills.skills.length===0?h('p',null,'还没有可用模板'):layers.map(function(layer){var list=p.skills.skills.filter(function(s){return skillLayer(s)===layer[0];});return list.length?h('section',{key:layer[0]},h('small',null,layer[1]),h('div',{className:'wb_mChips'},list.map(function(s){var n=p.counts[s.name]||0;return h('button',{type:'button',key:s.name,className:'wb_mChip','aria-pressed':n>0,title:s.description,onClick:function(e){p.addOne(s.name,e.currentTarget);}},skillDisplay(s.name),n>0?h('span',{className:'wb_skBadge',role:'button',tabIndex:0,'aria-label':'减少 '+skillDisplay(s.name)+' 1 篇',onClick:function(e){e.stopPropagation();p.minusOne(s.name);},onKeyDown:function(e){if(e.key==='Enter'||e.key===' '){e.preventDefault();e.stopPropagation();p.minusOne(s.name);}}},String(n)):null);}))):null;})),
 					h('button',{type:'button',className:'wb_mExtra',onClick:function(){editor[1]('base');}},h('b',null,'补充要求'),h('span',{className:'wb_mGrow'},p.base||'选填'),wbIcon('next'))),
-				h('div',{className:'wb_mAction wb_mAboveTabs'},p.pickedTotal>0?h('span',{className:'wb_skTags'},p.pickedEntries.map(function(s){return h('button',{type:'button',key:s.name,className:'wb_skTag',title:'点一下减 1 篇',onClick:function(){p.minusOne(s.name);}},skillDisplay(s.name),h('span',{className:'wb_skBadge'},String(s.count)));})):null,p.sending?h('p',{role:'status'},p.sending):null,h('button',{type:'button',className:'wb_mPrimary wb_mStart',disabled:!p.clientName||!!p.sending,onClick:p.dispatch},wbIcon('star'),'开始生文')),
+				h('div',{className:'wb_mAction wb_mAboveTabs'},p.pickedTotal>0?h('span',{className:'wb_skTags'},p.pickedEntries.map(function(s){return h('button',{type:'button',key:s.name,className:'wb_skTag',title:'点一下减 1 篇',onClick:function(){p.minusOne(s.name);}},skillDisplay(s.name),h('span',{className:'wb_skBadge'},String(s.count)));})):null,h(RoundsInput,p),p.sending?h('p',{role:'status'},p.sending):null,h('button',{type:'button',className:'wb_mPrimary wb_mStart',disabled:!p.clientName||!!p.sending,onClick:p.dispatch},wbIcon('star'),'开始生文')),
 				h(WbPresence,null,sheet[0]?h(MobileModal,{title:'写给谁',close:function(){sheet[1](false);}},
 					h('small',{className:'wb_mCaption'},'客户'),p.clients.status==='loading'?h(WbSkeleton,{label:'客户加载中…'}):empty?h('div',{className:'wb_mEmpty'},'还没有分配给你的客户 · 联系管理员'):h('div',{role:'radiogroup','aria-label':'客户'},p.clients.customers.map(function(c){var on=customerId(c)===p.pick.key;var bits=[];if(typeof c.files==='number')bits.push('知识库 '+c.files+' 条');if(on&&p.articles.status==='ready')bits.push('文章库 '+p.articles.articles.length+' 篇');return h('button',{type:'button',role:'radio','aria-checked':on,key:customerId(c),className:'wb_mClient',onClick:function(){setClient(c);}},h('span',{className:'wb_mAvatar'},customerName(c).slice(0,1)),h('span',{className:'wb_mGrow'},h('b',null,customerName(c)),h('small',null,bits.join(' · ')||'\u00a0')),h('span',{className:'wb_mRadio','data-on':on?'1':'0'},on?'✓':''));})),
 					!empty?h(React.Fragment,null,h('small',{className:'wb_mCaption'},'产品线'),h('div',{className:'wb_mChips'},p.lines.length?p.lines.map(function(l){return chip(l.name||l.id,p.pick.line===String(l.id),function(){p.onLine({target:{value:String(l.id)}});},l.id);}):h('p',null,'暂无产品线')),h('small',{className:'wb_mCaption'},'期数'),h('div',{className:'wb_mChips'},p.periods.length?p.periods.map(function(v){return chip(v.name||v.id,p.pick.period===String(v.id),function(){p.setPick({key:p.pick.key,line:p.pick.line,period:String(v.id)});},v.id);}):h('p',null,'暂无期数'))):null,
@@ -1358,6 +1358,10 @@ html[data-wb-mobile] [class*='_userStack'] *{color:inherit;background:transparen
 html[data-wb-mobile] [data-slot='conversation.chat.node'] pre{overflow:auto;max-width:100%}
 html[data-wb-mobile] .wb_grip{display:none}
 html[data-wb-mobile]:has(.impersonation-banner){--wb-notice-h:36px}
+.wb_rounds{display:inline-flex;align-items:center;gap:6px;white-space:nowrap;font:13px var(--wb-font)}
+.wb_rounds input{width:58px;padding:6px;border:1px solid var(--wb-line);border-radius:6px;color:inherit;background:var(--wb-bg)}
+.wb_batch{position:fixed;z-index:100;bottom:100px;right:24px;max-width:min(420px,90vw);padding:12px;display:flex;flex-wrap:wrap;gap:10px;background:var(--wb-bg);color:var(--dsh-ink-1,#25252b);border:1px solid var(--wb-line);border-radius:10px;box-shadow:0 4px 18px #0002}
+.wb_batch ul{flex-basis:100%;margin:0;padding-left:20px;max-height:180px;overflow:auto}
 html[data-wb-mobile] .wb_mRename{width:100%;min-height:48px;border:1px solid var(--wb-line);border-radius:12px;padding:10px}
 html[data-wb-mobile] .wb_mQuick{display:flex;gap:8px;margin:0 0 10px;font:14px/20px var(--wb-font)}
 html[data-wb-mobile][data-wb-keyboard] .wb_mQuick{display:none}
@@ -1418,7 +1422,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			var increase = !!(prev && prev.sessionId === next.sessionId && next.turnKey > 0
 				&& next.turnKey >= prev.turnKey && next.writeCount > (sameTurn ? prev.writeCount : 0)
 				&& (next.running || (sameTurn && prev.running)));
-			return { open: increase && prev.openedTurn !== next.turnKey, refresh: increase };
+			return { open: !next.batchActive && increase && prev.openedTurn !== next.turnKey, refresh: increase };
 		}
 		var WB_API = {
 			clients: "/api/workbench/clients",
@@ -1427,6 +1431,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			clientMap: "/api/workbench/client-map",
 			assignGroup: "/api/workbench/assign-client-group",
 			taskMeta: "/api/workbench/task-meta",
+			batch: "/api/workbench/batch",
 			taskStatus: "/api/workbench/task-status",
 			sessionClient: "/api/workbench/session-client",
 			drafts: "/api/workbench/drafts",
@@ -2208,7 +2213,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 
 		function buildTaskMetaPayload(opts) {
 			opts = opts || {};
-			return {
+			var payload = {
 				client_key: String(opts.client_key || ""),
 				client: String(opts.client || ""),
 				line: String(opts.line || ""),
@@ -2219,6 +2224,8 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				skills: opts.skills,
 				base: opts.base,
 			};
+			if (wbClampRounds(opts.rounds) > 1) { payload.rounds = wbClampRounds(opts.rounds); if (opts.batch_id) payload.batch_id = opts.batch_id; }
+			return payload;
 		}
 
 		function selectedSessionQuestions(questions, ticks, picked, clientKey) {
@@ -2296,6 +2303,281 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				props.loading ? h(WbSkeleton, {}) : null);
 		}
 
+		/* 多轮编排：持久化后再发送；轮次标记与宿主会话状态用于恢复和推进。 */
+		function wbClampRounds(value) {
+			var n = Number(value);
+			return Number.isFinite(n) ? Math.max(1, Math.min(20, Math.floor(n))) : 1;
+		}
+		function RoundsInput(p) {
+			return h("label", { className: "wb_rounds" }, "轮数", h("input", {
+				type: "number", min: 1, max: 20, step: 1, value: p.rounds, disabled: !!p.sending,
+				onChange: function (e) { p.setRounds(wbClampRounds(e.target.value)); },
+			}));
+		}
+		function wbRoundMarker(batch, round) { return "[生文批次：" + batch.id + "；第 " + round + "/" + batch.rounds + " 轮]"; }
+		function wbRoundPrompt(text, batch, round) {
+			if (!batch || wbClampRounds(batch.rounds) === 1) return text;
+			round = round || 1;
+			text = text.replace(/^(\d+\. 技能：[^\n]+，写 )\d+( 篇。)$/gm, function (_, before, after) { return before + "1" + after; })
+				.replace("以上技能的篇数以装配台点选为准；补充要求里明确说了不同的篇数时，以补充要求为准。", "本轮合计写 1 篇；保留所选技能，结合适用规则完成同一篇文章，不按技能分别产稿。")
+				.replace("各类型的篇数按上面点选的数量执行；补充要求里另有安排时，以补充要求为准。", "分配表只能有第 1 篇一行，合并覆盖问句；本轮总共写 1 篇。")
+				.replace("，仅当用户明确说「直接入库」时例外", "");
+			var history = (batch.records || []).filter(function (r) { return r.round < round; }).map(function (r) {
+				return "第 " + r.round + " 轮｜标题：" + (r.title || "未产出") + "｜角度：" + (r.angle || "未提供") + "｜" + r.status;
+			}).join("\n") || "无（首轮）";
+			return text + "\n\n" + wbRoundMarker(batch, round) + "\n前轮标题与角度（仅供避重）：\n" + history
+				+ "\n本轮重新完整执行以上生文流程，沿用同一客户、问句、补充要求、技能与参考材料。选择与前轮明显不同的写作角度和文章结构，不重复标题、论点组织或段落，不覆盖已有文章。"
+				+ "\n本轮数量硬规则优先于技能正文、点选篇数和补充要求中的数量：写 1 篇，且只产出一篇草稿。本轮只调用一次 write_article，必须 draft:true，不得直接入库。依赖不足则报告失败原因，不能编造；不要审核。"
+				+ "\nwrite_article 的 schema 支持 question_context 时必须包含 " + JSON.stringify({ session_id: batch.session_id, batch_id: batch.id, round: round, article_no: 1 })
+				+ "；有选题分配表时另带 assignment:[{article_no:1,qids:[明确覆盖问句的qid]}]，不猜测映射。问句清单：" + JSON.stringify(batch.questions || [])
+				+ "。schema 不支持时不传 question_context。\n结束时在汇报最后单独写一行：本轮角度：…（概括本轮视角与结构）。";
+		}
+		function wbBatchText(node) {
+			if (!node) return "";
+			if (node.kind === "turn-error") return String(node.message || "本轮生成失败");
+			if (typeof node.content === "string") return node.content;
+			var blocks = Array.isArray(node.blocks) ? node.blocks : Array.isArray(node.content) ? node.content : [];
+			return blocks.filter(function (b) { return b && (b.kind === "text" || b.type === "text"); }).map(function (b) { return b.text || ""; }).join("\n");
+		}
+		function wbBatchHint(nodes) {
+			for (var i = 0; i < nodes.length; i++) {
+				var m = nodes[i].kind === "user" && wbBatchText(nodes[i]).match(/\[生文批次：(wbb-[a-z0-9-]+)；第 \d+\/\d+ 轮\]/);
+				if (m) return m[1];
+				var context = wbWriteContext(nodes[i]);
+				if (context && /^wbb-[a-z0-9-]+$/.test(context.batch_id || "")) return context.batch_id;
+			}
+			return "";
+		}
+		function wbWriteContext(node) {
+			if (wbIsSuccessfulWrite(node)) {
+				try { return JSON.parse(node.call.argsRaw || "{}").question_context; } catch (e) { }
+			}
+			return null;
+		}
+		function wbBatchTurn(nodes, batch, round) {
+			var start = nodes.findIndex(function (n) { return n.kind === "user" && wbBatchText(n).includes(wbRoundMarker(batch, round)); });
+			if (start >= 0) start++;
+			else {
+				// A reloaded history window may start after the user prompt.
+				start = nodes.findIndex(function (n) {
+					var q = wbWriteContext(n);
+					return q && q.session_id === batch.session_id && q.batch_id === batch.id && q.round === round;
+				});
+				if (start < 0) return null;
+			}
+			var end = start;
+			while (end < nodes.length && nodes[end].kind !== "user") end++;
+			return nodes.slice(start, end);
+		}
+		function wbBatchResult(nodes, row) {
+			var writes = nodes.filter(wbIsSuccessfulWrite), title = "", angle = "", reason = "";
+			var assistant = nodes.filter(function (n) { return n.kind === "assistant"; }).map(wbBatchText).join("\n");
+			var angles = Array.from(assistant.matchAll(/(?:^|\n)本轮角度[：:]\s*([^\n]+)/g));
+			if (angles.length) angle = angles[angles.length - 1][1].trim();
+			var args = {};
+			try { args = writes.length ? JSON.parse(writes[0].call.argsRaw || "{}") : {}; } catch (e) { }
+			title = String(args.title || args.file || "").replace(/\.md$/i, "");
+			var calls = nodes.filter(function (n) { return n.kind === "tool-result" && n.call && WB_WRITE_TOOL_RE.test(n.call.name); });
+			if (!writes.length) {
+				var error = nodes.filter(function (n) { return n.isError || n.kind === "turn-error"; }).map(wbBatchText).join(" ");
+				reason = (error || assistant || "本轮结束，未成功写入草稿").slice(0, 160);
+			} else if (calls.length !== 1) reason = "本轮 write_article 调用次数不是一次";
+			else if (!title || args.draft !== true) reason = "写入结果缺少标题或 draft:true";
+			return Object.assign({}, row, { title: title, angle: angle, status: reason ? "failed" : "ok", reason: reason });
+		}
+		var wbBatches = Object.create(null);
+		var wbBatchViews = Object.create(null);
+		function wbBatchKey(sessionId) {
+			var uid = (window.dshUnified && window.dshUnified.store && window.dshUnified.store.state && window.dshUnified.store.state.uid) || wbNavState.uid || "";
+			return JSON.stringify([uid, sessionId]);
+		}
+		function wbBatchFor(sessionId) { var entry = wbBatches[wbBatchKey(sessionId)]; return entry && entry.batch; }
+		function wbBatchEmit() { window.dispatchEvent(new Event("wb:batch-change")); }
+		function wbBatchTitles(batch, titles) {
+			if (batch) batch.records.forEach(function (r) { if (r.status === "ok" && r.title) titles[r.title] = true; });
+			return titles;
+		}
+		async function wbBatchPost(body) {
+			var response = await fetch(WB_API.batch, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+			var result = await response.json();
+			if (!result.ok) { var error = new Error(result.detail || result.error || "批次保存失败"); error.batch = result.batch; throw error; }
+			return result.batch;
+		}
+		async function wbBatchSave(entry, patch) {
+			try {
+				var saved = await wbBatchPost(Object.assign({ id: entry.batch.id, revision: entry.batch.revision }, patch));
+				if (saved.revision >= entry.batch.revision) entry.batch = saved;
+				entry.error = ""; wbBatchEmit(); return true;
+			} catch (e) {
+				if (e.batch) { if (e.batch.revision >= entry.batch.revision) entry.batch = e.batch; }
+				else entry.error = "批次保存失败，将重试：" + e.message;
+				wbBatchEmit(); return false;
+			}
+		}
+		function wbStopGeneration() {
+			var buttons = document.querySelectorAll("button");
+			for (var i = 0; i < buttons.length; i++) {
+				var label = (buttons[i].textContent || "") + " " + (buttons[i].getAttribute("aria-label") || "") + " " + (buttons[i].getAttribute("title") || "");
+				if (label.includes("停止生成") && !buttons[i].disabled) { buttons[i].click(); return true; }
+			}
+			return false;
+		}
+		function wbBatchStop(entry, sessionId) {
+			entry.stopping = true; entry.finished = false;
+			if (pendingPrompt && pendingPrompt.sessionId === sessionId) pendingPrompt = null;
+			wbStopGeneration();
+			var saved = wbBatchSave(entry, { op: "stop" }); wbBatchEmit();
+			return saved;
+		}
+		async function wbBatchSend(entry, actions, text, alive) {
+			var batch = entry.batch, row = batch.records.find(function (r) { return r.status !== "ok" && r.status !== "failed"; });
+			if (!row || row.status !== "pending" || batch.status !== "running" || entry.stopping || !alive()) return;
+			var rows = batch.records.map(function (r) { return r === row ? Object.assign({}, r, { status: "sending", sent_at: Date.now() }) : r; });
+			if (!await wbBatchSave(entry, { records: rows })) return;
+			if (!alive() || entry.stopping || entry.batch.status !== "running") return;
+			try { actions.setDraft(wbRoundPrompt(text, entry.batch, row.round)); await actions.submit(); }
+			catch (e) {
+				rows[row.round - 1] = Object.assign({}, rows[row.round - 1], { status: "failed", reason: "发送失败：" + String(e.message || e).slice(0, 120) });
+				await wbBatchSave(entry, { records: rows });
+			}
+		}
+		async function wbBatchTick(entry, view) {
+			if (entry.busy || entry.relayPending || !view.alive()) return;
+			entry.busy = true;
+			try {
+				// Revalidate owner/session and observe a stop from another tab before any send.
+				var response = await fetch(WB_API.batch + "?id=" + encodeURIComponent(entry.batch.id) + (entry.batch.session_id ? "&session_id=" + encodeURIComponent(view.sessionId) : ""));
+				var body = await response.json();
+				if (!body.ok) throw new Error(body.error || "批次读取失败");
+				if (!view.alive()) return;
+				if (body.batch.revision >= entry.batch.revision) entry.batch = body.batch;
+				if (entry.batch.session_id && entry.batch.session_id !== view.sessionId) return;
+				if (!entry.batch.session_id && !await wbBatchSave(entry, { session_id: view.sessionId })) return;
+				var batch = entry.batch, row = batch.records.find(function (r) { return r.status !== "ok" && r.status !== "failed"; });
+				if (entry.stopping && batch.status !== "stopped") { await wbBatchSave(entry, { op: "stop" }); return; }
+				if (view.running()) { entry.idleSince = 0; if (batch.status === "stopped") wbStopGeneration(); return; }
+				var nodes = view.nodes(), turn = row && wbBatchTurn(nodes, batch, row.round);
+				if (row && (row.status === "sending" || turn)) {
+					// Allow the host's final snapshot to settle; never advance between tool calls.
+					var signature = JSON.stringify(nodes);
+					if (entry.signature !== signature) { entry.signature = signature; entry.idleSince = 0; }
+					if (!entry.idleSince) entry.idleSince = Date.now();
+					if (Date.now() - entry.idleSince < 1500) return;
+					if ((!turn || !turn.length) && Date.now() - row.sent_at < 15000) return;
+					var result = wbBatchResult(turn || [], row);
+					if (!turn) result.reason = "发送未确认，已跳过以避免重复生文";
+					var rows = batch.records.slice(); rows[row.round - 1] = result;
+					await wbBatchSave(entry, { records: rows }); return;
+				}
+				if (batch.status === "running" && row) {
+					if (!view.actions || entry.stopping) return;
+					if (row.round === 1) {
+						// First turn always takes the existing workspace → PromptRelay path.
+						if (!pendingPrompt) {
+							pendingPrompt = { text: batch.prompt, sessionId: view.sessionId, batchId: batch.id };
+							sessionStorage.setItem("wb-pending-bind", JSON.stringify(batch.bind));
+							if (batch.model) sessionStorage.setItem(WB_KEY.modelPending, JSON.stringify(batch.model));
+							if (batch.meta_id) sessionStorage.setItem("wb-pending-meta", batch.meta_id);
+							window.dispatchEvent(new Event("wb-prompt-set"));
+						}
+					} else await wbBatchSend(entry, view.actions, batch.prompt, view.alive);
+					return;
+				}
+				if (batch.status === "running") {
+					await wbBatchSave(entry, { status: batch.records.some(function (r) { return r.status === "failed"; }) ? "failed_partial" : "done" }); return;
+				}
+				if (!batch.review_opened || entry.reviewPending) {
+					var titles = Object.keys(wbBatchTitles(batch, {})), ctrl = WbCtx && WbCtx.sidebarRight;
+					if (titles.length && !WB_MOBILE.matches && !window.dshUnified && (!ctrl || !ctrl.openTab)) return;
+					if (!batch.review_opened) {
+						if (!await wbBatchSave(entry, { review_opened: true })) return;
+						entry.reviewPending = true;
+					}
+					if (!view.alive()) return;
+					if (titles.length) {
+						window.dispatchEvent(new CustomEvent("wb:review-refresh", { detail: { sessionId: view.sessionId, batch: true } }));
+						if (WB_MOBILE.matches) window.dispatchEvent(new CustomEvent("wb:batch-review", { detail: { sessionId: view.sessionId } }));
+						else if (window.dshUnified) window.dispatchEvent(new Event("dsh:review-available"));
+						else ctrl.openTab("wb-review", { params: { client: batch.client, client_key: batch.client_key, meta: batch.meta_id } });
+					}
+					entry.reviewPending = false;
+				}
+				entry.finished = true;
+			} catch (e) { entry.error = "批次暂未继续：" + e.message; }
+			finally { entry.busy = false; wbBatchEmit(); }
+		}
+		function BatchRelay(props) {
+			var snap = typeof props.useChat === "function" ? props.useChat(function (s) { return s; }) : null;
+			var session = typeof props.useSession === "function" ? props.useSession(function (s) { return s; }) : null;
+			var tick = React.useState(0), live = React.useRef(null), key = wbBatchKey(props.sessionId);
+			var seat = React.useRef({});
+			var nodes = snap && snap.legacy && snap.legacy.nodes;
+			var hint = wbBatchHint(Array.isArray(nodes) ? nodes : []);
+			try { hint = hint || sessionStorage.getItem("wb-batch-for-" + key) || ""; } catch (e) { }
+			var mounted = React.useRef(false);
+			live.current = { snap: snap, session: session, props: props, key: key };
+			React.useEffect(function () {
+				mounted.current = true;
+				var active = true;
+				(wbBatchViews[key] || (wbBatchViews[key] = [])).push(seat.current);
+				function alive() {
+					return active && mounted.current && live.current.key === key && wbBatchKey(props.sessionId) === key
+						&& (!live.current.session || live.current.session.sessionId === props.sessionId);
+				}
+				async function run() {
+					if (!alive() || !hint) return;
+					var entry = wbBatches[key];
+					if (!entry) {
+						entry = wbBatches[key] = { loading: true };
+						try {
+							var r = await fetch(WB_API.batch + "?id=" + encodeURIComponent(hint)); var b = await r.json();
+							if (!alive() || !b.ok || (b.batch.session_id && b.batch.session_id !== props.sessionId)) { delete wbBatches[key]; return; }
+							entry.batch = b.batch;
+						} catch (e) { delete wbBatches[key]; return; }
+						finally { entry.loading = false; }
+					}
+					if (!entry.batch || entry.finished) return;
+					await wbBatchTick(entry, { sessionId: props.sessionId, actions: live.current.props.inputActions, alive: alive,
+						nodes: function () { var s = live.current.snap; return s && s.legacy && Array.isArray(s.legacy.nodes) ? s.legacy.nodes : []; },
+						running: function () {
+							var s = live.current.snap, l = s && s.legacy;
+							var session = live.current.session;
+							// Session lifecycle is authoritative, including history loading and gaps between tools.
+							if (session && (session.sessionId !== props.sessionId || session.openState !== "open" || session.removed
+								|| session.running || session.awaitingFirstTurn || (session.pendingSubmissions && session.pendingSubmissions.length)
+								|| (session.queue && session.queue.length))) return true;
+							if (!l || !Array.isArray(l.nodes)) return true;
+							return l.partial != null || !!(l.runningCalls && l.runningCalls.length)
+								|| !!document.querySelector('[data-slot="main.conversation"][data-wb-running="1"]');
+						} });
+				}
+				function changed() { if (active) tick[1](function (v) { return v + 1; }); }
+				window.addEventListener("wb:batch-change", changed);
+				wbNavSubs.push(changed);
+				changed();
+				run(); var timer = setInterval(run, 1000);
+				return function () {
+					active = false; mounted.current = false; clearInterval(timer); window.removeEventListener("wb:batch-change", changed);
+					wbNavSubs = wbNavSubs.filter(function (fn) { return fn !== changed; });
+					wbBatchViews[key] = (wbBatchViews[key] || []).filter(function (view) { return view !== seat.current; });
+					wbBatchEmit();
+				};
+			}, [key, hint]);
+			var entry = wbBatches[key], batch = entry && entry.batch;
+			if (!batch || !wbBatchViews[key] || wbBatchViews[key][0] !== seat.current) return null;
+			var row = batch.records.find(function (r) { return r.status !== "ok" && r.status !== "failed"; });
+			function stop() {
+				if (!mounted.current || live.current.key !== key || wbBatchKey(props.sessionId) !== key
+					|| (live.current.session && live.current.session.sessionId !== props.sessionId)) return;
+				wbBatchStop(entry, props.sessionId);
+			}
+			return createPortal(h("div", { className: "wb_batch", role: "status" },
+				h("span", null, batch.status === "running" ? "第 " + (row ? row.round : batch.rounds) + "/" + batch.rounds + " 轮" : batch.status === "stopped" ? "本批已停止" : "本批已结束"),
+				batch.status === "running" ? h("button", { type: "button", onClick: stop, disabled: !!entry.stopping }, "停止本批") : null,
+				entry.error ? h("span", null, entry.error) : null,
+				batch.status !== "running" ? h("ul", null, batch.records.filter(function (r) { return r.status === "failed"; }).map(function (r) { return h("li", { key: r.round }, "第 " + r.round + " 轮：" + r.reason); })) : null), document.body);
+		}
+
 		/* 会话域接力：装配台（root 域）拿不到 inputActions，发不了消息。
 		 * 这里挂在会话的 composer dock 上，把装配台留下的提示词塞进草稿并提交。
 		 * 一次性：取走即清，避免重开渲染时重复发送。
@@ -2313,6 +2595,12 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 		function PromptRelay(props) {
 			var actions = props.inputActions;
 			var useChat = props.useChat;
+			var relayLive = React.useRef(null);
+			relayLive.current = { sessionId: props.sessionId, key: wbBatchKey(props.sessionId) };
+			React.useEffect(function () {
+				relayLive.current = { sessionId: props.sessionId, key: wbBatchKey(props.sessionId) };
+				return function () { relayLive.current = null; };
+			}, [props.sessionId]);
 
 			/* 当前会话的消息节点数：0 = 空白。selector 返回数字，
 			 * snapshot 相等性比较才稳定，不会引发多余的 effect。 */
@@ -2344,6 +2632,10 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					return;
 				}
 				var text = pendingPrompt.text;
+				var batchEntry = pendingPrompt.batchId && wbBatches[wbBatchKey(props.sessionId)];
+				if (pendingPrompt.batchId && (!batchEntry || !batchEntry.batch || batchEntry.stopping || batchEntry.batch.status !== "running")) return;
+				if (batchEntry) batchEntry.relayPending = true;
+				var relayKey = wbBatchKey(props.sessionId);
 				var questionBinding = Promise.resolve(null);
 				pendingPrompt = null;
 				/* 把任务参数编号绑定到这个会话 —— C1 任务条按 sessionId 取。
@@ -2377,7 +2669,15 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					var modelRaw = sessionStorage.getItem(WB_KEY.modelPending) || "";
 					if (modelRaw !== "") { sessionStorage.removeItem(WB_KEY.modelPending); pendingModel = JSON.parse(modelRaw); }
 				} catch (error) { pendingModel = null; }
-				function submitDraft() { questionBinding.then(function () { actions.setDraft(text); actions.submit(); }); }
+				function submitDraft() {
+					if (!batchEntry) { questionBinding.then(function () { actions.setDraft(text); actions.submit(); }); return; }
+					questionBinding.then(async function () {
+						function alive() { return relayLive.current && relayLive.current.sessionId === props.sessionId && relayLive.current.key === relayKey && wbBatchKey(props.sessionId) === relayKey; }
+						if (!alive()) return;
+						if (!batchEntry.batch.session_id && !await wbBatchSave(batchEntry, { session_id: props.sessionId })) return;
+						await wbBatchSend(batchEntry, actions, text, alive);
+					}).finally(function () { batchEntry.relayPending = false; });
+				}
 				var sessions = props.wbCtx && typeof props.wbCtx.get === "function" ? props.wbCtx.get("sessions") : null;
 				if (pendingModel && sessions && typeof sessions.selectModel === "function" && props.sessionId) {
 					var req = { sessionId: props.sessionId, provider: String(pendingModel.provider || ""), model: String(pendingModel.model || "") };
@@ -2916,6 +3216,11 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			function ReviewTabBody(props) {
 				var mobile = useWbMobile() && !props.unifiedPanel;
 				var mobileReview = React.useState(false);
+				React.useEffect(function () {
+					function openBatch(e) { if (props.mobileInline && e.detail && e.detail.sessionId === props.sessionId) mobileReview[1](true); }
+					window.addEventListener("wb:batch-review", openBatch);
+					return function () { window.removeEventListener("wb:batch-review", openBatch); };
+				}, [props.sessionId, props.mobileInline]);
 				var sessionId = props.sessionId;
 				var useChat = props.useChat;
 				var initialBinding = sessionId && wbNavState.bindings ? wbNavState.bindings[sessionId] : null;
@@ -2970,7 +3275,9 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 						}
 					}
 				}
-				if (mobile) { writeCount = 0; for (var wtk in writeTitles) writeCount++; }
+				var reviewBatch = wbBatchFor(sessionId);
+				wbBatchTitles(reviewBatch, writeTitles);
+				if (mobile || reviewBatch) { writeCount = 0; for (var wtk in writeTitles) writeCount++; }
 				var list = (metaId === "" && Array.isArray(legacyNodes)) ? legacyNodes : null;
 				for (var i = 0; list !== null && i < list.length; i++) {
 					var node = list[i];
@@ -3273,7 +3580,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 								retryTimer = setTimeout(loadDrafts, [400, 1200][retry++]);
 							}
 							setL(function (p) {
-								var scope = at ? (b.drafts || []).filter(function (d) { return d.updatedAt >= at; }) : (b.drafts || []);
+								var scope = at ? (b.drafts || []).filter(function (d) { return d.updatedAt >= at || (reviewBatch && writeTitles[d.title]); }) : (b.drafts || []);
 								/* 会话归属：消息流里有 write 调用 → 只显示本会话写的那几篇。
 								 * 没有（还没开写 / 已终止）→ 列表为空，别的会话的产物不串进来。 */
 								if (writeCount > 0) scope = scope.filter(function (d) { return writeTitles[d.title] === true; });
@@ -3760,6 +4067,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 						} catch (e) { }
 					}
 				}
+				wbBatchTitles(wbBatchFor(sessionId), writeTitles);
 				var writeDone = writeCount;
 				var running = !!(chatSnap && chatSnap.legacy && (chatSnap.legacy.partial != null
 					|| (chatSnap.legacy.runningCalls && chatSnap.legacy.runningCalls.length > 0)));
@@ -3854,7 +4162,10 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				}, [sessionId, turnKey]);
 				React.useEffect(function () {
 					var auto = autoRef.current, key = sessionId + "/" + turnKey;
-					var next = { sessionId: sessionId, turnKey: turnKey, writeCount: turnWriteCount, running: running };
+					var batch = wbBatchFor(sessionId);
+					var lastUser = list.filter(function (n) { return n.kind === "user"; }).slice(-1);
+					var batchActive = (batch && batch.status === "running") || !!wbBatchHint(lastUser);
+					var next = { sessionId: sessionId, turnKey: turnKey, writeCount: turnWriteCount, running: running, batchActive: batchActive };
 					var prev = auto.previous && Object.assign({}, auto.previous, { openedTurn: auto.opened[key] ? turnKey : null });
 					var decision = wbReviewAutoOpenDecision(prev, next);
 					auto.previous = next;
@@ -3881,10 +4192,10 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				/* 手动刷新另计 tick；实时写入已通过 writeCount 触发同一次拉取。 */
 				var rvTickS = React.useState(0), rvTick = rvTickS[0];
 				React.useEffect(function () {
-					function onRefresh(e) { if (!e.detail || !e.detail.sessionId) rvTickS[1](function (n) { return n + 1; }); }
+					function onRefresh(e) { if (!e.detail || !e.detail.sessionId || (e.detail.batch && e.detail.sessionId === sessionId)) rvTickS[1](function (n) { return n + 1; }); }
 					window.addEventListener("wb:review-refresh", onRefresh);
 					return function () { window.removeEventListener("wb:review-refresh", onRefresh); };
-				}, []);
+				}, [sessionId]);
 				/* 草稿目录只随客户 / 写入 / 手动刷新变化，不随流式 delta 重拉。 */
 				React.useEffect(function () {
 					if (!client) return;
@@ -4434,6 +4745,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			var sort = sortS[0], setSort = sortS[1];
 			var heightS = React.useState(null);
 			var workHeight = heightS[0], setWorkHeight = heightS[1];
+			var roundsS = React.useState(1), rounds = roundsS[0], setRounds = roundsS[1];
 			var sendingS = React.useState("");
 			var sending = sendingS[0], setSending = sendingS[1];
 
@@ -4552,7 +4864,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			}
 
 			/* 拼提示词：只写用户真的选了的，没选的不编。 */
-			function composePrompt() {
+			function composePrompt(roundInfo, round) {
 				/* 预填规则（2026-09-23 用户定的粗糙版）：装配台内容从上到下罗列成
 				 * 指令式初始上下文，直接可见不隐藏，每条写明"走什么工具"。
 				 * 拼装顺序/措辞/隐藏式注入，等整体功能通了再细调。
@@ -4615,7 +4927,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 
 				lines.splice(0, 0, "工具分工：客户知识库、文章的读写都走 MCP 工具（mcp__sora-knowledge__*、mcp__sora-articles__*）；只有下面列出的 sora-* 写作技能走技能工具（skill），其他名字不是技能。新文章用文章库的 write_article 写入，必须带 draft:true，进入草稿区等待人工确认，仅当用户明确说「直接入库」时例外。技能正文（get_skill 返回的内容）已包含该技能的完整规则与提示词，写作以其为准；技能的子文件与附属文件（如 xxx/prompts/xxx.md 这种带路径的名字）不在调用范围内，无需读取。工具返回过大被转存为本地文件时，用文件读取工具直接读取该路径；网页获取仅适用于公网 http/https 地址，本机地址与 file: 协议不在其适用范围。");
 				/* lines 里各条已自带序号（step 加的），这里直接拼，别再加一遍（9-23 实测出现 1.1.）。 */
-				return "【装配台预填 · 初始上下文】\n" + lines.join("\n");
+				return wbRoundPrompt("【装配台预填 · 初始上下文】\n" + lines.join("\n"), roundInfo, round);
 			}
 
 			async function dispatch() {
@@ -4633,7 +4945,9 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				/* C1 数据源：先把装配参数登记到宿主（POST task-meta）拿编号，
 				 * 编号追加在预填消息尾部 + 记进 sessionStorage —— 会话页顶部
 				 * 的任务条凭编号读回参数。登记失败不挡发送（任务条显示兜底）。 */
-				var metaId = "";
+				var metaId = "", batch = null;
+				var totalRounds = wbClampRounds(rounds);
+				var batchId = totalRounds > 1 ? "wbb-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10) : "";
 				var selectedQuestions = mode === "weak" ? selectedSessionQuestions(weakGaps.questions, weakTicks.ticks, weakPicked, pick.key) : [];
 				setSending("正在登记任务参数…");
 				try {
@@ -4642,7 +4956,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 						headers: { "content-type": "application/json", accept: "application/json" },
 						body: JSON.stringify(buildTaskMetaPayload({
 							client_key: pick.key,
-							client: clientName,
+							client: clientName, rounds: totalRounds, batch_id: batchId,
 							line: lineName, period: periodName,
 							mode: mode, topic: topic,
 							refs: { urls: refs.urls, body: refs.body, style: refStyle },
@@ -4667,10 +4981,23 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 							sessionStorage.setItem(WB_KEY.modelPending, JSON.stringify({ provider: selModel === "__default__" ? "deepseek-official" : mp[0], model: selModel === "__default__" ? "deepseek-flash" : mp[1], effort: selEffort === "__default__" ? "" : selEffort }));
 						}
 					} catch (error) { /* storage unavailable */ }
+					if (batchId) {
+						var batchModel = null;
+						try { batchModel = JSON.parse(sessionStorage.getItem(WB_KEY.modelPending) || "null"); } catch (e) { }
+						batch = await wbBatchPost({ id: batchId, rounds: totalRounds, prompt: text, meta_id: metaId,
+							client: clientName, client_key: pick.key, questions: selectedQuestions, model: batchModel,
+							bind: { client_key: pick.key, client: clientName, topic: topic, meta_id: metaId, questions: selectedQuestions,
+								capture_period: weakGaps.capturePeriod || weakClientId || "", capture_task_id: weakGaps.taskId || "", collected_at: weakGaps.collectedAt || "" } });
+					}
 					var openedSession = false;
 					var rememberPending = function (sessionId) {
 						openedSession = true;
 						pendingPrompt = { text: text, sessionId: sessionId };
+						if (batch) {
+							pendingPrompt.batchId = batch.id;
+							wbBatches[wbBatchKey(sessionId)] = { batch: batch };
+							try { sessionStorage.setItem("wb-batch-for-" + wbBatchKey(sessionId), batch.id); } catch (e) { }
+						}
 						try {
 							if (metaId !== "") {
 								sessionStorage.setItem("wb-task-meta-id", metaId);
@@ -4990,7 +5317,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				onClient: onClient, onLine: onLine, mode: mode, setMode: setMode, topic: topic, setTopic: setTopic,
 				refTab: refTab, setRefTab: setRefTab, refs: refs, refText: refText, setRefText: setRefText,
 				refCount: refCount, refStyle: refStyle, setRefStyle: setRefStyle, skills: skills, counts: counts, pickedEntries: pickedEntries(), pickedTotal: pickedTotal(),
-				addOne: addOne, minusOne: minusOne, base: base, setBase: setBase, sending: sending, dispatch: dispatch,
+				addOne: addOne, minusOne: minusOne, base: base, setBase: setBase, sending: sending, dispatch: dispatch, rounds: rounds, setRounds: setRounds,
 				weakGaps: weakGaps, weakPicked: weakPicked, weakRows: weakRows, pickSet: weakPickSet,
 				bulkSet: weakBulkSet, rowDown: weakRowDown, rowEnter: weakRowEnter, unified: !!unified, recommend: pickRecommended,
 				selectedCount: weakPicked.length,
@@ -5209,6 +5536,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 											onClick: function () { minusOne(s.name); },
 										}, skillDisplay(s.name), h("span", { className: "wb_skBadge" }, String(s.count)));
 									})) : null,
+								h(RoundsInput, { rounds: rounds, setRounds: setRounds, sending: sending }),
 								h("span", { key: "effort", className: "wb_fsel", style: { marginLeft: "auto" } },
 									h("button", {
 										type: "button", className: "wb_modelSel", "data-on": selEffort !== "__default__" ? "1" : "0",
@@ -5400,14 +5728,14 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					name: "conversation.composer.dock",
 					id: "workbench-prompt-relay",
 					order: 90,
-				}, function (props) { return h(PromptRelay, Object.assign({}, props, { wbCtx: ctx })); });
+				}, function (props) { return h(React.Fragment, null, h(PromptRelay, Object.assign({}, props, { wbCtx: ctx })), h(BatchRelay, props)); });
 			});
 			ctx.slots.inject("conversation.input.dock", function () {
 				return ctx.slots.register({
 					name: "conversation.input.dock",
 					id: "workbench-prompt-relay-hero",
 					order: 90,
-				}, function (props) { return h(PromptRelay, Object.assign({}, props, { wbCtx: ctx })); });
+				}, function (props) { return h(React.Fragment, null, h(PromptRelay, Object.assign({}, props, { wbCtx: ctx })), h(BatchRelay, props)); });
 			});
 			ctx.slots.inject("conversation.input.dock", function () {
 				return ctx.slots.register({

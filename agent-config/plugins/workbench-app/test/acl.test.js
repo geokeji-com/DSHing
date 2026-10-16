@@ -388,3 +388,45 @@ test('browser list reads turn 403 and 404 into empty data without parsing error 
     assert.deepEqual(JSON.parse(JSON.stringify(body)), { ok: true, index: {}, map: {}, customers: [] })
   }
 })
+
+test('batch CRUD persists rounds, binds one session and isolates cloud owners and grants', async t => {
+  const f = fixture(t), headers = f.cloud()
+  const post = body => f.request('batch', { method: 'POST', headers, body })
+  const made = await post({ id: 'wbb-test', rounds: 25, prompt: '完整装配稿', client_key: 'CUS-M', owner_uid: 'bob' })
+  assert.equal(made.body.batch.rounds, 20)
+  assert.equal(made.body.batch.owner_uid, 'alice')
+  const attached = (await post({ id: 'wbb-test', revision: 1, session_id: 'own' })).body.batch
+  assert.equal(attached.session_id, 'own')
+  assert.deepEqual((await f.request('batch?session_id=own', { headers })).body.batch, attached)
+  assert.deepEqual(JSON.parse(readFileSync(join(f.meta, 'batches/wbb-test.json'))), attached)
+  denied(await f.request('batch?id=wbb-test&session_id=other', { headers }), 404)
+  denied(await f.request('batch?id=wbb-test', { headers: f.cloud(undefined, { 'x-dsh-uid': 'bob' }) }), 404)
+  denied(await f.request('batch?session_id=own', { headers: f.cloud([]) }), 404)
+  denied(await f.request('batch', { method: 'POST', headers: f.cloud(undefined, { 'x-dsh-uid': 'bob' }), body: { id: 'wbb-test', revision: 2 } }))
+  denied(await post({ id: 'wbb-other', rounds: 2, prompt: 'x', client_key: 'CUS-M', session_id: 'other' }))
+  denied(await post({ id: 'wbb-denied', rounds: 2, prompt: 'x', client_key: 'CUS-Y' }))
+  assert.equal((await post({ id: 'wbb-test', revision: 2, session_id: 'm' })).body.error, 'session-mismatch')
+  assert.equal((await post({ id: '../escape', rounds: 2, prompt: 'x' })).status, 400)
+  assert.equal((await post({ id: 'wbb-one', rounds: 1, prompt: 'x' })).status, 400)
+})
+
+test('batch revision claims, immutable completed rounds, atomic stop and review acknowledgement', async t => {
+  const f = fixture(t), headers = f.cloud()
+  const post = body => f.request('batch', { method: 'POST', headers, body })
+  let batch = (await post({ id: 'wbb-cas', rounds: 2, prompt: 'x', session_id: 'own', client_key: 'CUS-M' })).body.batch
+  let rows = batch.records.map((r, i) => i ? r : { ...r, status: 'sending', sent_at: 100 })
+  const claims = await Promise.all([1, 2].map(() => post({ id: batch.id, revision: batch.revision, records: rows })))
+  assert.deepEqual(claims.map(r => r.status).sort(), [200, 409])
+  batch = claims.find(r => r.status === 200).body.batch
+  rows[0] = { ...rows[0], status: 'ok', title: '第一篇', angle: '选购', reason: '' }
+  batch = (await post({ id: batch.id, revision: batch.revision, records: rows })).body.batch
+  const reset = rows.map((r, i) => i ? r : { ...r, status: 'pending' })
+  assert.equal((await post({ id: batch.id, revision: batch.revision, records: reset })).body.error, 'bad-rounds')
+  const stopped = (await post({ id: batch.id, revision: 1, op: 'stop' })).body.batch
+  assert.equal(stopped.status, 'stopped', 'stop wins even with a stale version')
+  assert.equal((await post({ id: batch.id, revision: batch.revision, status: 'done' })).status, 409)
+  batch = (await post({ id: batch.id, revision: stopped.revision, status: 'running', review_opened: true })).body.batch
+  assert.equal(batch.status, 'stopped')
+  assert.equal(batch.review_opened, true)
+  assert.equal(batch.records[0].title, '第一篇')
+})
