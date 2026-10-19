@@ -129,6 +129,22 @@ window.__ModuleLoader__.load({
 			status = status || wbRunStatus();
 			return Object.assign({}, status, {label:status.kind === 'done' ? '已完成 · 未查看' : status.label});
 		}
+		function wbNeedsViewCount(statuses) {
+			return statuses.filter(function (status) { return ['done', 'failed', 'attention'].includes(status.kind); }).length;
+		}
+		function wbGroupStatus(statuses, open) {
+			if (open) return null;
+			var priority = ['attention', 'running', 'failed', 'review', 'done'];
+			return statuses.reduce(function (best, status) {
+				var rank = priority.indexOf(status.kind);
+				return rank >= 0 && (!best || rank < priority.indexOf(best.kind)) ? status : best;
+			}, null);
+		}
+		function wbTabTitleState(title, count, previous) {
+			// Only recapture when the host changes the title; our own writes keep the exact base.
+			var base = !previous || title !== previous.title ? title.replace(/^\(\d+\) /, '') : previous.base;
+			return {base:base, title:(count > 0 ? '(' + count + ') ' : '') + base};
+		}
 		/* Pure transition: the first observation is a baseline, including completed.
 		 * Remember that bit too so an acknowledged, stale completed flag cannot rearm. */
 		function wbUnreadNext(state, byId, current, now) {
@@ -176,6 +192,10 @@ window.__ModuleLoader__.load({
 			return h('span', {className:'wb_runSlot' + (p.mobile ? ' wb_mStatus' : ''), 'aria-hidden':true},
 				p.status.kind === 'running' ? h('span', {className:'wb_ldrSpin wb_runSpin'})
 				: p.status.tone ? h('span', {className:'wb_runDot', 'data-tone':p.status.tone}) : null);
+		}
+		function WbGroupIndicator(p) {
+			var status = wbGroupStatus(p.open ? [] : p.items.map(function (it) { return wbNavStatus(it.id); }), p.open);
+			return status ? h('span', {className:'wb_groupStatus', role:'img', title:status.label, 'aria-label':status.label}, h(WbRunIndicator, {status:status})) : null;
 		}
 		function wbSessionTitle(rec, summary, meta) {
 			var title = summary && !summary.blank && summary.displayTitle;
@@ -372,9 +392,17 @@ window.__ModuleLoader__.load({
 		}
 		function MobileTopBar(p) {
 			return h('header',{className:'wb_mTop'},
-				h('button',{type:'button',className:'wb_mIcon','aria-label':p.back?'返回':'打开会话抽屉',onClick:p.back || function(){wbNavState.drawer=true;wbNavEmit();}},wbIcon(p.back?'back':'menu')),
+				p.back ? h('button',{type:'button',className:'wb_mIcon','aria-label':'返回',onClick:p.back},wbIcon('back')) : h(MobileDrawerEntry,{icon:true}),
 				h('div',{className:'wb_mHeading'},h('b',null,p.title),p.sub?h('small',null,p.sub):null),
 				p.more?h('button',{type:'button',className:'wb_mIcon','aria-label':'会话更多操作',onClick:p.more},'⋯'):null);
+		}
+		function MobileDrawerEntry(p) {
+			var count = useWbNeedsViewCount(), label = p.icon ? '打开会话抽屉' : '会话列表';
+			return h('button', {type:'button', className:p.icon ? 'wb_mIcon' : 'wb_mMenuRow',
+				'aria-label':label + (count > 0 ? '，有 ' + count + ' 个会话需要查看' : ''),
+				onClick:function () { if (p.beforeOpen) p.beforeOpen(); wbNavState.drawer = true; wbNavEmit(); }},
+				h('span', {className:'wb_mBadgeAnchor'}, p.icon ? wbIcon('menu') : label,
+					count > 0 ? h('span', {className:'wb_mEntryDot', 'aria-hidden':true}) : null));
 		}
 		function MobileModal(p) {
 			var ref=React.useRef(null);
@@ -472,7 +500,7 @@ window.__ModuleLoader__.load({
 				h('aside',{className:'wb_mDrawer',ref:ref,tabIndex:-1,role:'dialog','aria-modal':true,'aria-label':'会话列表',onTouchStart:function(e){start.current=e.touches[0].clientX;},onTouchEnd:function(e){if(start.current-e.changedTouches[0].clientX>70)p.close();}},
 					h('div',{className:'wb_mDrawerHead'},h('b',null,'生文 Agent'),h('button',{type:'button',className:'wb_mIcon','aria-label':'关闭会话抽屉',onClick:p.close},wbIcon('close'))),
 					h('div',{className:'wb_mDrawerTools'},h('button',{type:'button',className:'wb_mPrimary',onClick:p.compose},wbIcon('plus'),'新建任务'),h('label',{className:'wb_mSearch'},wbIcon('search'),h('input',{type:'search','aria-label':'搜索会话',placeholder:'搜索会话',value:wbNavState.q,onChange:function(e){wbNavState.q=e.target.value;wbNavEmit();}}))),
-					h('div',{className:'wb_mTree'},p.names.map(function(name){var open=wbNavState.open[name]!==false;return h('section',{key:name},h('button',{type:'button',className:'wb_mGroup','aria-expanded':open,onClick:function(){wbNavState.open[name]=!open;wbNavEmit();}},h('span',{className:'wb_mAvatar'},name.slice(0,1)),h('b',null,name),h('small',null,p.groups[name].length),wbIcon(open?'down':'next')),h(WbCollapse,{open:open},p.groups[name].map(function(it){var run=wbNavStatus(it.id),status=wbSessionStatus(run),day=it.at?collectedDay(it.at).slice(5,10).replace('-','月')+'日':'';return h('button',{key:it.id,type:'button',className:'wb_mSession','data-unread':run.unread,title:run.label,'aria-label':[it.title,run.label].filter(Boolean).join(' · '),'aria-current':it.id===wbNavState.current,onClick:function(){p.openSession(it.id);}},h(WbRunIndicator,{status:run,mobile:true}),h('span',{className:'wb_mGrow'},h('b',null,it.title),h('small',null,day,day&&status.label?' · ':'',h('span',{'data-tone':status.tone},status.label))));})));}),p.names.length===0?h('p',{className:'wb_mEmpty'},wbNavState.q?'没有匹配的会话':'还没有会话，点上方新建任务'):null),
+					h('div',{className:'wb_mTree'},p.names.map(function(name){var open=wbNavState.open[name]!==false;return h('section',{key:name},h('button',{type:'button',className:'wb_mGroup','aria-expanded':open,onClick:function(){wbNavState.open[name]=!open;wbNavEmit();}},h('span',{className:'wb_mAvatar'},name.slice(0,1)),h('b',null,name),h('small',null,p.groups[name].length),h(WbGroupIndicator,{open:open,items:p.groups[name]}),wbIcon(open?'down':'next')),h(WbCollapse,{open:open},p.groups[name].map(function(it){var run=wbNavStatus(it.id),status=wbSessionStatus(run),day=it.at?collectedDay(it.at).slice(5,10).replace('-','月')+'日':'';return h('button',{key:it.id,type:'button',className:'wb_mSession','data-unread':run.unread,title:run.label,'aria-label':[it.title,run.label].filter(Boolean).join(' · '),'aria-current':it.id===wbNavState.current,onClick:function(){p.openSession(it.id);}},h(WbRunIndicator,{status:run,mobile:true}),h('span',{className:'wb_mGrow'},h('b',null,it.title),h('small',null,day,day&&status.label?' · ':'',h('span',{'data-tone':status.tone},status.label))));})));}),p.names.length===0?h('p',{className:'wb_mEmpty'},wbNavState.q?'没有匹配的会话':'还没有会话，点上方新建任务'):null),
 					h('div',{className:'wb_mAccount'},h('span',{className:'wb_mAvatar'},p.me.label.slice(0,1)),h('div',null,h('b',null,p.me.label),p.me.sub?h('small',null,p.me.sub):null)))),document.body);
 		}
 		function MobileQuickPrompts(p) {
@@ -523,7 +551,7 @@ window.__ModuleLoader__.load({
 			return h('div',{className:'wb_mChat',ref:chatRef},h(MobileTopBar,{title:title,sub:sub,back:function(){var layout=WbCtx&&WbCtx.get?WbCtx.get('layout'):null;if(layout)layout.selectPanel(WORKBENCH_KEY);},more:function(){menu[1](true);}}),
 				h('div',{className:'wb_mPinned'},rows.length?h('details',{className:'wb_mProgress'},h('summary',null,h('span',null,'任务进度'),h('small',null,completed+'/'+rows.length),wbIcon('down')),h('div',{className:'wb_mChecklist'},rows.map(function(row,i){return h('div',{className:'wb_trow',key:i},h('span',{className:'wb_ticon','data-s':row[0]},row[0]==='done'?'✓':row[0]==='run'?'◷':'○'),h('span',null,row[1]));}))):null,
 					h(ReviewTabBody,Object.assign({},p.reviewProps,{mobileInline:true}))),
-				h(WbPresence,null,menu[0]?h(MobileModal,{title:'会话操作',close:function(){menu[1](false);}},wbCanRename(p.sessionId)?h('button',{type:'button',className:'wb_mMenuRow',onClick:function(){menu[1](false);newTitle[1](title);renameError[1]('');rename[1](true);}},'重命名'):null,h('button',{type:'button',className:'wb_mMenuRow',onClick:function(){menu[1](false);preset[1](true);}},'这次发起时的预设'),h('button',{type:'button',className:'wb_mMenuRow',onClick:function(){menu[1](false);wbNavState.drawer=true;wbNavEmit();}},'会话列表'),h('button',{type:'button',className:'wb_mMenuRow',onClick:function(){menu[1](false);preset[1]('desktop');}},'在电脑上打开')):null),
+				h(WbPresence,null,menu[0]?h(MobileModal,{title:'会话操作',close:function(){menu[1](false);}},wbCanRename(p.sessionId)?h('button',{type:'button',className:'wb_mMenuRow',onClick:function(){menu[1](false);newTitle[1](title);renameError[1]('');rename[1](true);}},'重命名'):null,h('button',{type:'button',className:'wb_mMenuRow',onClick:function(){menu[1](false);preset[1](true);}},'这次发起时的预设'),h(MobileDrawerEntry,{beforeOpen:function(){menu[1](false);}}),h('button',{type:'button',className:'wb_mMenuRow',onClick:function(){menu[1](false);preset[1]('desktop');}},'在电脑上打开')):null),
 				h(WbPresence,null,rename[0]?h(MobileModal,{title:'重命名',close:function(){rename[1](false);}},h('input',{className:'wb_mRename',value:newTitle[0],maxLength:40,autoFocus:true,disabled:renaming[0],'aria-label':'会话名称',onFocus:function(e){e.target.select();},onChange:function(e){newTitle[1](wbClampTitle(e.target.value));},onKeyDown:function(e){wbTitleKey(e,saveTitle,function(){rename[1](false);});}}),renameError[0]?h('p',{role:'alert'},renameError[0]):null,h('button',{type:'button',className:'wb_mPrimary',disabled:renaming[0],onClick:saveTitle},'保存')):null),
 				h(WbPresence,null,preset[0]?h(MobileModal,{title:preset[0]==='desktop'?'在电脑上打开':'这次发起时的预设',close:function(){preset[1](false);}},h('div',{className:'wb_mPreset'},preset[0]==='desktop'?'在电脑上登录同一账号，从会话列表打开「'+title+'」。':[meta.client,meta.line,meta.period,meta.topic,meta.refs&&meta.refs.style,(meta.skills||[]).map(skillDisplay).join('、'),meta.base].filter(Boolean).join('\n')||'此会话没有装配台预设')):null));
 		}
@@ -957,15 +985,16 @@ window.__ModuleLoader__.load({
 			".wb_nvSearch{border:1px solid #e5e7eb;border-radius:8px;padding:6px 10px;font-size:12.5px;outline:none;background:#fff;}",
 			".wb_nvTree{flex:1 1 auto;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:2px;}",
 			".wb_nvHint{padding:10px 6px;font-size:12px;color:#9ca3af;}",
-			".wb_nvGroupName{width:100%;border:none;background:none;text-align:left;font-size:12.5px;font-weight:600;color:#374151;cursor:pointer;padding:6px 6px;border-radius:6px;}",
+			".wb_nvGroupName{display:flex;align-items:center;gap:6px;width:100%;border:none;background:none;text-align:left;font-size:12.5px;font-weight:600;color:#374151;cursor:pointer;padding:6px 6px;border-radius:6px;}",
 			".wb_nvGroupName:hover{background:#eef2f7;}",
+			".wb_groupStatus{display:inline-flex;flex:none;margin-left:auto;}",
 			".wb_nvItem{display:flex;align-items:center;gap:6px;width:100%;border:none;background:none;text-align:left;font-size:12.5px;color:#4b5563;cursor:pointer;padding:6px 6px 6px 18px;border-radius:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}",
 			".wb_nvItem:hover{background:#eef2f7;color:#111827;}",
 			".wb_nvLabel{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;}.wb_nvItem[data-unread=true] .wb_nvLabel{font-weight:600;}",
 			".wb_nvExtra{flex:none;font-size:11.5px;font-variant-numeric:tabular-nums;}",
 			".wb_runSlot{display:inline-flex;align-items:center;justify-content:center;flex:0 0 14px;width:14px;height:14px;}.wb_ldrSpin.wb_runSpin{width:12px;height:12px;flex:0 0 12px;}",
 			".wb_runDot{width:6px;height:6px;border-radius:50%;corner-shape:round;background:currentColor;}.wb_runDot[data-tone=ok]{box-shadow:0 0 0 2px rgba(18,160,106,.18);}",
-			".wb_nv [data-tone=klein],.wb_mSession [data-tone=klein]{color:var(--wb-klein);}.wb_nv [data-tone=ok],.wb_mSession [data-tone=ok]{color:var(--wb-ok);}.wb_nv [data-tone=bad],.wb_mSession [data-tone=bad]{color:var(--wb-bad);}.wb_nv [data-tone=warn],.wb_mSession [data-tone=warn]{color:var(--wb-warn);}",
+			".wb_nv [data-tone=klein],.wb_mSession [data-tone=klein],.wb_groupStatus [data-tone=klein]{color:var(--wb-klein);}.wb_nv [data-tone=ok],.wb_mSession [data-tone=ok],.wb_groupStatus [data-tone=ok]{color:var(--wb-ok);}.wb_nv [data-tone=bad],.wb_mSession [data-tone=bad],.wb_groupStatus [data-tone=bad]{color:var(--wb-bad);}.wb_nv [data-tone=warn],.wb_mSession [data-tone=warn],.wb_groupStatus [data-tone=warn]{color:var(--wb-warn);}",
 			".wb_nvRename{width:100%;box-sizing:border-box;padding:5px 8px;border:1px solid #93c5fd;border-radius:6px;font:inherit;}",
 			".wb_nvRenameError{display:block;padding:2px 8px;color:#b91c1c;font-size:12px;}",
 			".wb_nvMenu{position:fixed;z-index:10000;min-width:132px;padding:4px;background:#fff;border:1px solid #e5e7eb;border-radius:8px;box-shadow:0 4px 16px #0002;}",
@@ -1293,6 +1322,8 @@ html[data-wb-mobile] .wb_mHeading{flex:1;min-width:0;display:flex;flex-direction
 html[data-wb-mobile] .wb_mHeading b{font-size:20px;line-height:28px;font-weight:750;white-space:nowrap;text-overflow:ellipsis;overflow:hidden}
 html[data-wb-mobile] .wb_mHeading small{font-size:13px;line-height:16px;white-space:nowrap;text-overflow:ellipsis;overflow:hidden;color:var(--wb-dim2)}
 html[data-wb-mobile] .wb_mIcon{border:0;background:transparent;flex:0 0 44px;width:44px;height:44px;display:grid;place-items:center;padding:0;border-radius:12px;font-size:24px!important}
+html[data-wb-mobile] .wb_mBadgeAnchor{position:relative;display:inline-flex;align-items:center}
+html[data-wb-mobile] .wb_mEntryDot{position:absolute;right:-3px;top:-3px;width:8px;height:8px;border-radius:50%;corner-shape:round;background:var(--wb-bad);box-shadow:0 0 0 1.5px #fff;pointer-events:none}
 html[data-wb-mobile] .wb_mForm{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;padding:16px 16px 96px}
 html[data-wb-mobile] .wb_mForm h3{font-size:17px;line-height:24px;margin:24px 4px 10px;font-weight:700}
 html[data-wb-mobile] .wb_mContext{display:flex;align-items:center;gap:12px;width:100%;text-align:left;border:0;background:var(--dsh-card,#fff);border-radius:var(--dsh-r-m,14px);padding:16px;box-shadow:var(--dsh-shadow-1,0 1px 2px #0e14300f)}
@@ -3122,6 +3153,36 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					batchFailureRead:wbBatchWasSeen(batch, state.seenBatches[id]),
 					batchDriven:current && batch && (wbBatchViews[wbBatchKey(id)] || []).some(function (view) { return view.batchId === batch.id && view.driving; })});
 			}
+			function wbNavNeedsViewCount() {
+				// Search and collapsed groups do not acknowledge sessions or hide their reminders.
+				return wbNeedsViewCount(Object.keys(wbNavState.map).map(wbNavStatus));
+			}
+			function useWbNeedsViewCount() {
+				var count = React.useState(wbNavNeedsViewCount);
+				React.useEffect(function () {
+					function changed() { count[1](wbNavNeedsViewCount()); }
+					wbNavSubs.push(changed); changed();
+					return function () { wbNavSubs = wbNavSubs.filter(function (fn) { return fn !== changed; }); };
+				}, []);
+				return count[0];
+			}
+			function wbNavWatchTitle() {
+				var state;
+				function update() {
+					state = wbTabTitleState(document.title, wbNavNeedsViewCount(), state);
+					if (document.title !== state.title) document.title = state.title;
+				}
+				// Observe the head so host replacement of the title element is handled too.
+				var observer = new MutationObserver(function () { if (document.title !== state.title) update(); });
+				update();
+				observer.observe(document.head, {childList:true, subtree:true, characterData:true});
+				wbNavSubs.push(update);
+				return function () {
+					observer.disconnect();
+					wbNavSubs = wbNavSubs.filter(function (fn) { return fn !== update; });
+					if (document.title === state.title) document.title = state.base;
+				};
+			}
 			function wbNavRememberBatch(id) {
 				var state = wbNavRunState(), batch = wbNavBatch(id), seen = state.seenBatches[id];
 				if (batch && batch.status === 'failed_partial' && (!seen || seen.batchId !== batch.id)
@@ -3360,6 +3421,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 
 			function SidebarNav(props) {
 				var st = React.useState(0);
+				React.useEffect(wbNavWatchTitle, []);
 				React.useEffect(function () {
 					function changed() { st[1](function (x) { return x + 1; }); }
 					wbNavSubs.push(changed);
@@ -3533,11 +3595,12 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 									var open = wbNavState.open[name] !== false;
 									return h("div", { key: name, className: "wb_nvGroup" },
 										h("button", {
-											type: "button", className: "wb_nvGroupName",
+											type: "button", className: "wb_nvGroupName", 'aria-expanded': open,
 											onClick: function () {
 												wbNavState.open[name] = !open; wbNavEmit();
 											},
-										}, (open ? "▾ " : "▸ ") + name + "（" + groups[name].length + "）"),
+										}, h('span', {className:'wb_nvLabel'}, (open ? "▾ " : "▸ ") + name + "（" + groups[name].length + "）"),
+											h(WbGroupIndicator, {open:open, items:groups[name]})),
 										h(WbCollapse, { open: open }, groups[name].map(function (it) {
 											return h(WbSessionRow, { key: String(it.id), item: it, ctx: ctx, open: openSession });
 										})));
