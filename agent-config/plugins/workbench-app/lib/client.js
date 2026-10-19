@@ -64,6 +64,107 @@ window.__ModuleLoader__.load({
 			}, []);
 			return st[0];
 		}
+		function wbReviewListSize(value, containerWidth) {
+			/* Below 392px the two minima cannot fit; keep them and allow scrolling. */
+			var max = Math.max(112, Math.min(420, Math.floor(containerWidth) - 280));
+			var width = Number(value);
+			if (value == null || String(value).trim() === '' || !Number.isFinite(width)) width = 152;
+			return { min: 112, max: max, width: Math.max(112, Math.min(max, Math.round(width))) };
+		}
+		function wbReviewListKey(width, key, shift, containerWidth) {
+			var size = wbReviewListSize(width, containerWidth), step = shift ? 32 : 8;
+			switch (key) {
+				case 'ArrowLeft': width = size.width - step; break;
+				case 'ArrowRight': width = size.width + step; break;
+				case 'Home': width = size.min; break;
+				case 'End': width = size.max; break;
+				case 'Enter': width = 152; break;
+				default: return null;
+			}
+			return wbReviewListSize(width, containerWidth).width;
+		}
+		/* Shared by the React review columns (including UnifiedReviewPortal) and
+		 * the legacy DOM overlay. Own only the divider, never the article children. */
+		function wbMountReviewSplitter(cols) {
+			var key = 'wb-review-list-w', width = 152, bar = null, drag = null, resize = null;
+			var root = document.documentElement, body = document.body;
+			function save(reset) {
+				try {
+					if (reset) window.localStorage.removeItem(key);
+					else window.localStorage.setItem(key, String(width));
+				} catch (e) {}
+			}
+			function apply(value) {
+				var size = wbReviewListSize(value, cols.clientWidth);
+				width = size.width;
+				cols.style.setProperty('--wb-review-list-width', width + 'px');
+				bar.setAttribute('aria-valuenow', width);
+				bar.setAttribute('aria-valuemin', size.min);
+				bar.setAttribute('aria-valuemax', size.max);
+			}
+			function finish(ev) {
+				if (!drag || (ev && ev.pointerId != null && ev.pointerId !== drag.id)) return;
+				var prev = drag; drag = null;
+				bar.classList.remove('is-dragging');
+				if (!prev.bodyClass) body.classList.remove('wb_reviewResizing');
+				if (bar.hasPointerCapture(prev.id)) bar.releasePointerCapture(prev.id);
+				if (width !== prev.width) save(false);
+			}
+			function reset() { finish(); apply(152); save(true); }
+			function detach() {
+				if (!bar) return;
+				finish();
+				if (resize) resize.disconnect();
+				window.removeEventListener('blur', finish);
+				bar.remove(); bar = null;
+				cols.classList.remove('wb_reviewSplit');
+				cols.style.removeProperty('--wb-review-list-width');
+			}
+			function sync() {
+				/* The unified shell (.review-mount) stacks a card strip above the preview: no vertical divider there. */
+				if (WB_MOBILE.matches || root.hasAttribute('data-wb-mobile') || (cols.closest && cols.closest('.review-mount'))) { detach(); return; }
+				if (bar) return;
+				try { width = window.localStorage.getItem(key); } catch (e) { width = 152; }
+				bar = document.createElement('div'); bar.className = 'wb_reviewSplitter'; bar.tabIndex = 0;
+				bar.setAttribute('role', 'separator');
+				bar.setAttribute('aria-orientation', 'vertical');
+				bar.setAttribute('aria-label', '调整文章列表宽度');
+				cols.insertBefore(bar, cols.querySelector('.wb_reviewMain'));
+				cols.classList.add('wb_reviewSplit');
+				apply(width);
+				bar.addEventListener('pointerdown', function (ev) {
+					if (ev.button !== 0 || ev.isPrimary === false || drag) return;
+					ev.preventDefault(); bar.focus();
+					bar.setPointerCapture(ev.pointerId);
+					drag = { id: ev.pointerId, x: ev.clientX, width: width, bodyClass: body.classList.contains('wb_reviewResizing') };
+					bar.classList.add('is-dragging'); body.classList.add('wb_reviewResizing');
+				});
+				bar.addEventListener('pointermove', function (ev) {
+					if (drag && ev.pointerId === drag.id) apply(drag.width + ev.clientX - drag.x);
+				});
+				['pointerup', 'pointercancel', 'lostpointercapture'].forEach(function (name) { bar.addEventListener(name, finish); });
+				bar.addEventListener('dblclick', reset);
+				bar.addEventListener('keydown', function (ev) {
+					var next = wbReviewListKey(width, ev.key, ev.shiftKey, cols.clientWidth);
+					if (next === null) return;
+					ev.preventDefault();
+					if (ev.key === 'Enter') reset();
+					else { apply(next); save(false); }
+				});
+				resize = new ResizeObserver(function () { apply(width); }); resize.observe(cols);
+				window.addEventListener('blur', finish);
+			}
+			var mobileObserver = new MutationObserver(sync);
+			mobileObserver.observe(root, { attributes: true, attributeFilter: ['data-wb-mobile'] });
+			WB_MOBILE.addEventListener('change', sync);
+			sync();
+			return function () { mobileObserver.disconnect(); WB_MOBILE.removeEventListener('change', sync); detach(); };
+		}
+		function WbReviewColumns(p) {
+			var ref = React.useRef(null);
+			React.useLayoutEffect(function () { return wbMountReviewSplitter(ref.current); }, []);
+			return h('div', { className: 'wb_rvCols', ref: ref }, p.children);
+		}
 		function wbKeyboardInset(height, viewport) {
 			return !viewport || viewport.scale !== 1 ? 0 : Math.max(0, height - viewport.height - viewport.offsetTop);
 		}
@@ -1126,6 +1227,17 @@ window.__ModuleLoader__.load({
 			".wb_rvEmpty2{padding:20px 14px;color:#9ca3af;font-size:12.5px;}",
 			".wb_rvCols{flex:1;display:flex;min-height:0;border-top:1px solid #eef0f3;}",
 			".wb_rv .wb_reviewList{flex:0 0 152px;width:152px;max-width:152px;min-height:0;overflow-y:auto;padding:0;gap:0;border-right:1px solid #eef0f3;background:#fafbfc;}",
+			/* Splitter mounts only in the native DSHing review panel (never inside the unified .review-mount strip). */
+			"html:not([data-wb-mobile]) .wb_reviewSplit{display:flex;flex-direction:row;overflow-x:auto;}",
+			"html:not([data-wb-mobile]) .wb_reviewSplit>.wb_reviewList{box-sizing:border-box;display:block;flex:0 0 var(--wb-review-list-width,152px);width:var(--wb-review-list-width,152px);max-width:var(--wb-review-list-width,152px);max-height:none;overflow-x:hidden;overflow-y:auto;padding:0;border-right:0;}",
+			"html:not([data-wb-mobile]) .wb_reviewSplit>.wb_reviewList>.wb_ri{min-width:0;max-width:100%;}",
+			"html:not([data-wb-mobile]) .wb_reviewSplit>.wb_reviewMain{box-sizing:border-box;flex:1 1 0;min-width:280px;}",
+			".wb_reviewSplitter{position:relative;z-index:1;flex:0 0 8px;width:8px;margin:0 -4px;align-self:stretch;cursor:col-resize;touch-action:none;user-select:none;outline:none;}",
+			".wb_reviewSplitter::after{content:'';position:absolute;top:0;bottom:0;left:50%;transform:translateX(-50%);width:1px;background:#eef0f3;transition:background-color var(--wb-motion,200ms) var(--wb-ease),width var(--wb-motion,200ms) var(--wb-ease);}",
+			".wb_reviewSplitter:hover::after,.wb_reviewSplitter:focus::after,.wb_reviewSplitter.is-dragging::after{width:2px;background:var(--wb-klein);}",
+			".wb_reviewSplitter:focus-visible{outline:2px solid var(--wb-klein);outline-offset:-2px;}",
+			"body.wb_reviewResizing,body.wb_reviewResizing *{cursor:col-resize!important;user-select:none!important;-webkit-user-select:none!important;}body.wb_reviewResizing .wb_reviewMain iframe{pointer-events:none!important;}",
+			"html[data-wb-mobile] .wb_reviewSplitter{display:none;}",
 			".wb_rv .wb_reviewItem{display:none;}",
 			".wb_ri{display:flex;align-items:center;gap:6px;width:100%;text-align:left;padding:6px 8px;font-size:11.5px;color:#4b5563;cursor:pointer;border-bottom:1px solid #f1f2f4;}",
 			".wb_ri:hover{background:#f3f4f6;color:#111827;}",
@@ -2978,7 +3090,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 
 			function wbOpenReview(client, onChanged, clientKey, sessionId, metaId) {
 				var old = document.getElementById("wb-review-overlay");
-				if (old) old.remove();
+				if (old) { if (old.wbDisposeSplitter) old.wbDisposeSplitter(); old.remove(); }
 				var wrap = document.createElement("div");
 				wrap.id = "wb-review-overlay";
 				wrap.className = "wb_reviewWrap";
@@ -2991,6 +3103,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				closeBtn.type = "button"; closeBtn.className = "wb_reviewClose"; closeBtn.textContent = "关闭";
 				function closeReview() {
 					if (wrap.hasAttribute("data-wb-leave")) return;
+					wrap.wbDisposeSplitter();
 					wrap.setAttribute("data-wb-leave", "1"); wrap.inert = true;
 					wbAfterMotion(function () { wrap.remove(); });
 				}
@@ -3007,6 +3120,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				wrap.appendChild(card);
 				wrap.addEventListener("click", function (e) { if (e.target === wrap) closeReview(); });
 				document.body.appendChild(wrap);
+				wrap.wbDisposeSplitter = wbMountReviewSplitter(bodyEl);
 
 				var mainTitle = null, mainText = null, mainFoot = null, msgEl = null, currentTitle = "";
 				var resolvedSessionId = typeof sessionId === "string" ? sessionId : "";
@@ -4267,7 +4381,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					msg ? h("div", { className: "wb_reviewMsg" }, msg) : null,
 					n === 0
 						? (drafts === null ? h(WbSkeleton, { label: "草稿列表加载中…" }) : h("div", { className: "wb_rvEmpty2" }, "草稿区是空的 —— agent 写完会出现在这里"))
-						: h("div", { className: "wb_rvCols" },
+						: h(WbReviewColumns, null,
 							h("div", { className: "wb_reviewList" },
 								pending.map(function (d, idx) {
 									var picked = checked[d.title] === true;
@@ -6287,6 +6401,8 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 		exports.wbRequestedTotal = wbRequestedTotal;
 		exports.wbWriteProgress = wbWriteProgress;
 		exports.wbMergeBatchStatus = wbMergeBatchStatus;
+		exports.wbReviewListSize = wbReviewListSize;
+		exports.wbReviewListKey = wbReviewListKey;
 		/* Small pure helpers are exported for the browser-package contract tests. */
 		exports.wbUseUnifiedContext = useUnifiedContext;
 		exports.UnifiedReviewPortal = UnifiedReviewPortal;
