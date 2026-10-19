@@ -202,3 +202,30 @@ test('observer reconnects even if host DOM changes unexpectedly during a scan', 
   assert.equal(observer.connected, true)
   dispose()
 })
+
+test('loader renders inline as the last item of the chat flow column and stays last without loops', () => {
+  const f = fixture()
+  const flow = f.el('div', '', { 'data-chat-flow': '' }); f.root.appendChild(flow)
+  flow.appendChild(f.el('div', 'I will start by loading the skill', { 'data-chat-anchor-key': 'a1' }))
+  flow.appendChild(f.el('div', 'Skill · sora-single-brand'))
+  const stop = f.el('button', '', { 'aria-label': '停止生成' }); f.root.appendChild(stop)
+  const dispose = f.api.wbInstallConversation(), observer = f.observers[0]
+  const ldr = f.root.querySelector('.wb_ldr')
+  assert.equal(ldr.parentNode, flow, 'inside the message column, not the slot root')
+  assert.equal(flow.children[flow.children.length - 1], ldr)
+  assert.equal(f.root.getAttribute('data-wb-running'), '1')
+  // host appends a new tool line after our row → one guarded move back to the end
+  flow.appendChild(f.el('div', 'Skill · 知识库 · 列文件清单'))
+  f.trace.length = 0; observer.callback(); f.flush(); assertGuarded(f.trace)
+  assert.equal(flow.children[flow.children.length - 1], ldr)
+  const inserts = f.trace.filter(t => t.op === 'insert').length
+  assert.ok(inserts <= 1, 'at most one move per host change')
+  // a quiet tick (no change) writes nothing that moves the row
+  f.trace.length = 0; observer.callback(); f.flush()
+  assert.equal(f.trace.filter(t => t.op === 'insert' || t.op === 'remove').length, 0)
+  // run ends → row and running flag gone
+  f.root.removeChild(stop); observer.callback(); f.flush()
+  assert.equal(f.root.querySelector('.wb_ldr'), null)
+  assert.equal(f.root.hasAttribute('data-wb-running'), false)
+  dispose()
+})

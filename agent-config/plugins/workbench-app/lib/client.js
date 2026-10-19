@@ -730,9 +730,14 @@ window.__ModuleLoader__.load({
 			"[data-slot='main.conversation'][data-wb-running] [data-chat-flow-kind='reasoning']{display:none !important;}",
 			/* Direct child of the unpadded conversation slot: reserve a full inset
 			 * inside its scroll/clip boundary, without changing the host overflow. */
-			".wb_ldr{box-sizing:border-box;display:flex;flex:0 0 auto;align-items:center;gap:10px;background:#fff;border:1px solid #e7e9ee;border-radius:13px;padding:11px 16px;margin:8px 16px;max-width:min(640px,calc(100% - 32px));min-width:0;overflow:visible;color:#565c6b;font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;font-size:13px;box-shadow:0 2px 8px rgba(0,47,167,.05);animation:wbEnter var(--wb-motion) var(--wb-ease);}",
-			".wb_ldrSpin{display:inline-block;box-sizing:border-box;width:18px;height:18px;flex:0 0 18px;border:0;border-radius:50%;corner-shape:round;background:conic-gradient(from 0deg,rgba(0,47,167,.15) 0deg 90deg,var(--wb-klein) 270deg 360deg);-webkit-mask:radial-gradient(farthest-side,transparent calc(100% - 2px),#000 calc(100% - 1.5px));mask:radial-gradient(farthest-side,transparent calc(100% - 2px),#000 calc(100% - 1.5px));animation:wbSpin .8s linear infinite;}",
-			".wb_ldrT{min-width:0;overflow-wrap:anywhere;}",
+			/* Inline run status (Ant Design X Bubble loading / ThoughtChain pending): a muted row in the
+			 * message column right after the latest message; no card, no floating bar. */
+			".wb_ldr{box-sizing:border-box;display:inline-flex;flex:none;align-self:flex-start;align-items:center;gap:8px;height:26px;margin:0;padding:0;max-width:100%;min-width:0;border:0;background:none;box-shadow:none;color:#8a909c;font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;font-size:13px;line-height:20px;animation:wbEnter var(--wb-motion) var(--wb-ease);}",
+			".wb_ldrSpin{display:inline-block;box-sizing:border-box;width:12px;height:12px;flex:0 0 12px;border:0;border-radius:50%;corner-shape:round;background:conic-gradient(from 0deg,rgba(0,47,167,.12) 0deg 90deg,var(--wb-klein) 270deg 360deg);-webkit-mask:radial-gradient(farthest-side,transparent calc(100% - 1.75px),#000 calc(100% - 1.25px));mask:radial-gradient(farthest-side,transparent calc(100% - 1.75px),#000 calc(100% - 1.25px));animation:wbSpin .8s linear infinite;}",
+			".wb_ldrT{min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;background:linear-gradient(90deg,#8a909c 0%,#8a909c 40%,#c9cdd5 50%,#8a909c 60%,#8a909c 100%);background-size:200% 100%;-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;animation:wbLdrShimmer 2.4s linear infinite;}",
+			"@keyframes wbLdrShimmer{from{background-position:100% 0}to{background-position:-100% 0}}",
+			/* Our row replaces the host's own turn status line while both exist (no double indicator). */
+			"[data-chat-flow]:has(> .wb_ldr) > [class*='_turnStatus_']{display:none !important;}",
 			"@keyframes wbSpin{to{transform:rotate(360deg)}}",
 			/* —— 进行中思考淡化 —— */
 			"[data-slot='main.conversation'] [data-chat-flow-kind='reasoning']{opacity:.55;}",
@@ -2209,14 +2214,17 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 		function wbRemoveLoader(ldr) {
 			if (!ldr) return;
 			clearInterval(ldr._wbLi);
-			if (ldr.parentNode) {
-				wbConvAttr(ldr.parentNode, "data-wb-running", null);
-				ldr.parentNode.removeChild(ldr);
-			}
+			var slot = ldr.closest ? ldr.closest("[data-slot='main.conversation']") : null;
+			if (slot) wbConvAttr(slot, "data-wb-running", null);
+			if (ldr.parentNode) ldr.parentNode.removeChild(ldr);
+		}
+		function wbConvInside(root, node) {
+			for (var n = node; n; n = n.parentNode) if (n === root) return true;
+			return false;
 		}
 		function wbConvTick(update, previousLoader) {
 			var root = document.querySelector("[data-slot='main.conversation']");
-			if (previousLoader && (!root || previousLoader.parentNode !== root)) wbRemoveLoader(previousLoader);
+			if (previousLoader && (!root || !wbConvInside(root, previousLoader))) wbRemoveLoader(previousLoader);
 			if (!root) return null;
 			var items = root.querySelectorAll("[data-chat-anchor-key]");
 			for (var i = items.length - 1; i >= 0; i--) {
@@ -2279,7 +2287,11 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				if (label.indexOf("停止生成") !== -1) { running = true; break; }
 			}
 			wbConvAttr(root, "data-wb-running", running ? "1" : null);
-			var ldr = root.querySelector(":scope > .wb_ldr");
+			/* Inline status row: last item of the chat flow column (after the latest message / tool line),
+			 * falling back to the slot root. Written inside update() (observer disconnected) and only
+			 * moved when it is not already the last child, so host appends cost at most one move. */
+			var flow = root.querySelector("[data-chat-flow]") || root;
+			var ldr = root.querySelector(".wb_ldr");
 			if (running && !ldr) {
 				ldr = document.createElement("div"); ldr.className = "wb_ldr";
 				ldr.setAttribute("role", "status"); ldr.setAttribute("aria-label", "Agent 正在处理"); ldr.setAttribute("aria-live", "off");
@@ -2296,8 +2308,9 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 						wbConvText(lb, "Agent " + phrases[pi]);
 					});
 				}, 2200);
-				root.appendChild(ldr);
+				flow.appendChild(ldr);
 			} else if (!running && ldr) { wbRemoveLoader(ldr); ldr = null; }
+			if (ldr && (ldr.parentNode !== flow || flow.children[flow.children.length - 1] !== ldr)) flow.appendChild(ldr);
 			if(window.dshUnified && ldr){clearInterval(ldr._wbLi);wbConvText(ldr.querySelector(".wb_ldrT"), "Agent 正在码字");}
 			/* Preserve the raw tools in the injected prompt, including split tails. */
 			var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false), tn;
