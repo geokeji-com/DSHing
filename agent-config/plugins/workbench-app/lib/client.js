@@ -1019,6 +1019,8 @@ window.__ModuleLoader__.load({
 			".wb_pkDot.green{background:#e8f6ee;}",
 			".wb_pkDot.green::after{background:#22a06b;}",
 			".wb_pkDot:disabled{opacity:.4;cursor:default;}",
+			".wb_pkDot.idle{background:#f2f3f5;}",
+			".wb_pkDot.idle::after{background:#bfc4cc;}",
 			"/* 挑篇条并入输入卡（desktop）：同一张卡的 header 行，无独立外框；手机端不变 */",
 			"html:not([data-wb-mobile]) .wb_pkRow{box-sizing:border-box;width:calc(100% - 2 * var(--dsh-composer-side-clearance,16px));max-width:var(--dsh-composer-card-max-width,none);margin:0 auto calc(0px - var(--dsh-composer-stack-gap,6px));padding:10px 16px 8px;gap:8px;border:0;border-radius:22px 22px 0 0;background:var(--dsw-specific-input-major,#fff);box-shadow:var(--dsw-elevation-soft,0 0 0 .5px rgba(0,0,0,.1));clip-path:inset(-32px -32px 0 -32px);overflow:visible}",
 			"html:not([data-wb-mobile]) .wb_pkRow::after{content:\"\";position:absolute;left:16px;right:16px;bottom:0;height:1px;background:#f0f1f4}",
@@ -3406,7 +3408,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 							h("span", { className: "wb_pkDot" + (badN > 0 ? " red" : " green") }),
 							h("span", { className: "wb_pkHcT" }, badN + " 篇有问题"))
 						: h("span", { className: "wb_pkHc", title: "还没跑机器检查 —— 右侧「文章审核」里点「开始检查」" },
-							h("span", { className: "wb_pkDot green" }),
+							h("span", { className: "wb_pkDot idle" }),
 							h("span", { className: "wb_pkHcT" }, "未检查")));
 			}
 
