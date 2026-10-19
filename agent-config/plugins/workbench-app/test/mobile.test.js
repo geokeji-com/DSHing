@@ -63,10 +63,10 @@ test('mobile progress uses the latest todo list, not earlier success or failed w
   const cleared={kind:'tool-result',call:{name:'todo_write',argsRaw:'{"todos":[]}'}}
   assert.equal(api.wbMobileProgress([todo('completed'),cleared],null,[],{}).length,0)
 })
-test('mobile progress counts unique written articles without treating template count as a quota', () => {
+test('mobile progress counts unique written articles and omits an unknown requested total', () => {
   const write={kind:'tool-result',call:{name:'mcp__articles__write_article',argsRaw:'{"title":"Article"}'}}
   const rows=api.wbMobileProgress([write,write],{partial:null,runningCalls:[]},[{title:'Article'}],{Article:true})
-  assert.equal(rows[0][1],'本会话已写 1 篇文章')
+  assert.equal(rows[0][1],'写作中 · 已写 1 篇（草稿区待审）')
   assert.equal(rows[1][1],'已入库 1 篇')
 })
 
