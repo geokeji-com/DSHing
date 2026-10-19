@@ -58,5 +58,13 @@ test('light process cards, pills, loader and wrapping markdown tables retain the
   assert.match(api.CSS, /table\{table-layout:auto; width:100%; max-width:100%/)
   assert.match(api.CSS, /white-space:normal !important; word-break:break-word; overflow-wrap:anywhere/)
   assert.match(api.CSS, /th\{border-bottom:2px solid #cfdcff; background:#eef3ff/)
-  assert.match(api.CSS, /\[data-wb-pref-tail\]\{display:none !important/)
+})
+
+test('desktop and mobile leave the injected prompt to the harness with no prefill fold styles', () => {
+  assert.doesNotMatch(api.CSS, /data-wb-prefold|data-wb-pref-tail|data-wb-open|wb_prefoldHead|wb_pf(?:T|Tag|C)/)
+  assert.doesNotMatch(source, /function wbPrefoldSummary\b|function wbConvStatusRow\b|liveTails|_wbSync/)
+  const mobileChat = api.CSS.match(/html\[data-wb-mobile\] \[data-slot='conversation\.chat\.node'\]\{([^}]+)\}/)[1]
+  assert.doesNotMatch(mobileChat, /display:none|max-height|overflow:hidden|line-clamp|white-space/)
+  assert.match(mobileChat, /font-size:16px;line-height:26px/)
+  assert.match(source, /!String\(title\)\.trim\(\)\.startsWith\('【装配台预填'\)/, 'session-title fallback still recognizes the prefix')
 })
