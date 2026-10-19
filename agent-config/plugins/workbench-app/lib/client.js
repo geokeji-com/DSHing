@@ -102,10 +102,11 @@ window.__ModuleLoader__.load({
 			if (input.attention) return status('attention', 'warn', input.attention, input.attention);
 			var row = batch && (batch.records || []).find(function (r) { return r.status !== 'ok' && r.status !== 'failed'; });
 			var round = batch && Math.min(batch.rounds, Math.max(1, batch.round || (row && row.round) || batch.rounds));
-			if (batch && batch.status === 'running' && !summary.running && !input.batchDriven) {
+			var serverRunning = batch && batch.driver === 'server' && batch.status === 'running';
+			if (batch && batch.status === 'running' && !serverRunning && !summary.running && !input.batchDriven) {
 				return status('attention', 'warn', '待继续 第 ' + round + '/' + batch.rounds + ' 轮', '待继续 ' + round + '/' + batch.rounds);
 			}
-			if (summary.running) {
+			if (summary.running || serverRunning) {
 				var extra = '';
 				if (batch && batch.status === 'running' && batch.rounds > 0) {
 					extra = round + '/' + batch.rounds + ' 轮';
@@ -1515,6 +1516,8 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			assignGroup: "/api/workbench/assign-client-group",
 			taskMeta: "/api/workbench/task-meta",
 			batch: "/api/workbench/batch",
+			serverBatch: "/api/v1/workbench/batch",
+			batchConfig: "/api/v1/workbench/batch-config",
 			sessionStatus: "/api/workbench/session-status",
 			taskStatus: "/api/workbench/task-status",
 			sessionClient: "/api/workbench/session-client",
@@ -2479,6 +2482,39 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 		}
 		var wbBatches = Object.create(null);
 		var wbBatchViews = Object.create(null);
+		var wbServerBatchCache = { value: false, checkedAt: null, pending: null };
+		function wbServerBatch() {
+			var cache = wbServerBatchCache;
+			if (cache.pending) return cache.pending;
+			if (cache.checkedAt !== null && Date.now() - cache.checkedAt < 60000) return Promise.resolve(cache.value);
+			cache.pending = (async function () {
+				try {
+					var response = await fetch(WB_API.batchConfig, { headers: { accept: "application/json" }, cache: "no-store" });
+					var body = response.ok ? await response.json() : null;
+					cache.value = !!(body && body.ok === true && body.server === true);
+				} catch (e) { cache.value = false; }
+				cache.checkedAt = Date.now();
+				return cache.value;
+			})().finally(function () { cache.pending = null; });
+			return cache.pending;
+		}
+		function wbMergeBatchStatus(items, batches) {
+			var merged = Object.assign({}, items);
+			Object.keys(batches || {}).forEach(function (id) {
+				var batch = batches[id];
+				if (!batch || batch.driver !== "server" || batch.session_id !== id) return;
+				merged[id] = Object.assign({}, merged[id], { batch: batch,
+					finished_at: ["done", "failed_partial", "stopped"].includes(batch.status) ? batch.savedAt : null });
+			});
+			return merged;
+		}
+		function wbRememberServerBatch(sessionId, batch) {
+			var key = wbBatchKey(sessionId), entry = wbBatches[key];
+			if (!batch || batch.driver !== "server" || batch.session_id !== sessionId) return;
+			if (!entry || !entry.batch || entry.batch.id !== batch.id) entry = wbBatches[key] = {};
+			if (!entry.batch || entry.batch.driver !== "server" || batch.revision >= entry.batch.revision) entry.batch = batch;
+			return entry;
+		}
 		function wbBatchKey(sessionId) {
 			var uid = (window.dshUnified && window.dshUnified.store && window.dshUnified.store.state && window.dshUnified.store.state.uid) || wbNavState.uid || "";
 			return JSON.stringify([uid, sessionId]);
@@ -2531,15 +2567,18 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			return [progress.finished ? "done" : "run",
 				(progress.finished ? "草稿已写完：" : "写作中 · 已写 ") + scope + " 篇（草稿区待审）"];
 		}
-		async function wbBatchPost(body) {
-			var response = await fetch(WB_API.batch, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+		async function wbBatchPost(body, server) {
+			var response = await fetch(server ? WB_API.serverBatch : WB_API.batch, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
 			var result = await response.json();
 			if (!result.ok) { var error = new Error(result.detail || result.error || "批次保存失败"); error.batch = result.batch; throw error; }
 			return result.batch;
 		}
 		async function wbBatchSave(entry, patch) {
+			var server = entry.batch.driver === "server";
+			// Server records/status are read-only, including after a config failure.
+			if (server && Object.keys(patch).some(function (key) { return key !== "op" && key !== "review_opened"; })) return false;
 			try {
-				var saved = await wbBatchPost(Object.assign({ id: entry.batch.id, revision: entry.batch.revision }, patch));
+				var saved = await wbBatchPost(Object.assign({ id: entry.batch.id, revision: entry.batch.revision }, patch), server);
 				if (saved.revision >= entry.batch.revision) entry.batch = saved;
 				entry.error = ""; wbBatchEmit(); return true;
 			} catch (e) {
@@ -2564,28 +2603,58 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			return saved;
 		}
 		async function wbBatchSend(entry, actions, text, alive) {
+			if (entry.batch.driver === "server") return;
 			var batch = entry.batch, row = batch.records.find(function (r) { return r.status !== "ok" && r.status !== "failed"; });
 			if (!row || row.status !== "pending" || batch.status !== "running" || entry.stopping || !alive()) return;
 			var rows = batch.records.map(function (r) { return r === row ? Object.assign({}, r, { status: "sending", sent_at: Date.now() }) : r; });
 			if (!await wbBatchSave(entry, { records: rows })) return;
-			if (!alive() || entry.stopping || entry.batch.status !== "running") return;
+			if (!alive() || entry.stopping || entry.batch.status !== "running" || entry.batch.driver === "server") return;
 			try { actions.setDraft(wbRoundPrompt(text, entry.batch, row.round)); await actions.submit(); }
 			catch (e) {
 				rows[row.round - 1] = Object.assign({}, rows[row.round - 1], { status: "failed", reason: "发送失败：" + String(e.message || e).slice(0, 120) });
 				await wbBatchSave(entry, { records: rows });
 			}
 		}
+		async function wbBatchReview(entry, view) {
+			var batch = entry.batch;
+			if (!batch.review_opened || entry.reviewPending) {
+				var titles = Object.keys(wbBatchTitles(batch, {})), ctrl = WbCtx && WbCtx.sidebarRight;
+				var open = titles.length > 0 || batch.driver === "server";
+				if (open && !WB_MOBILE.matches && !window.dshUnified && (!ctrl || !ctrl.openTab)) return;
+				if (!batch.review_opened) {
+					if (!await wbBatchSave(entry, { review_opened: true })) return;
+					entry.reviewPending = true;
+				}
+				if (!view.alive()) return;
+				if (open) {
+					window.dispatchEvent(new CustomEvent("wb:review-refresh", { detail: { sessionId: view.sessionId, batch: true } }));
+					if (WB_MOBILE.matches) window.dispatchEvent(new CustomEvent("wb:batch-review", { detail: { sessionId: view.sessionId } }));
+					else if (window.dshUnified) window.dispatchEvent(new Event("dsh:review-available"));
+					else ctrl.openTab("wb-review", { params: { client: batch.client, client_key: batch.client_key, meta: batch.meta_id } });
+				}
+				entry.reviewPending = false;
+			}
+			entry.finished = true;
+		}
 		async function wbBatchTick(entry, view) {
 			if (entry.busy || entry.relayPending || !view.alive()) return;
 			entry.busy = true;
 			try {
 				// Revalidate owner/session and observe a stop from another tab before any send.
-				var response = await fetch(WB_API.batch + "?id=" + encodeURIComponent(entry.batch.id) + (entry.batch.session_id ? "&session_id=" + encodeURIComponent(view.sessionId) : ""));
+				var server = entry.batch.driver === "server" || await wbServerBatch();
+				if (!view.alive()) return;
+				var response = await fetch((server ? WB_API.serverBatch : WB_API.batch) + "?id=" + encodeURIComponent(entry.batch.id) + (entry.batch.session_id ? "&session_id=" + encodeURIComponent(view.sessionId) : ""));
 				var body = await response.json();
 				if (!body.ok) throw new Error(body.error || "批次读取失败");
 				if (!view.alive()) return;
 				if (body.batch.revision >= entry.batch.revision) entry.batch = body.batch;
 				if (entry.batch.session_id && entry.batch.session_id !== view.sessionId) return;
+				if (server || entry.batch.driver === "server") {
+					entry.error = "";
+					if (entry.stopping && entry.batch.status === "running") await wbBatchSave(entry, { op: "stop" });
+					if (["done", "failed_partial"].includes(entry.batch.status)) await wbBatchReview(entry, view);
+					return; // Only the server may evaluate records or advance rounds.
+				}
 				if (!entry.batch.session_id && !await wbBatchSave(entry, { session_id: view.sessionId })) return;
 				var batch = entry.batch, row = batch.records.find(function (r) { return r.status !== "ok" && r.status !== "failed"; });
 				if (entry.stopping && batch.status !== "stopped") { await wbBatchSave(entry, { op: "stop" }); return; }
@@ -2620,23 +2689,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				if (batch.status === "running") {
 					await wbBatchSave(entry, { status: batch.records.some(function (r) { return r.status === "failed"; }) ? "failed_partial" : "done" }); return;
 				}
-				if (!batch.review_opened || entry.reviewPending) {
-					var titles = Object.keys(wbBatchTitles(batch, {})), ctrl = WbCtx && WbCtx.sidebarRight;
-					if (titles.length && !WB_MOBILE.matches && !window.dshUnified && (!ctrl || !ctrl.openTab)) return;
-					if (!batch.review_opened) {
-						if (!await wbBatchSave(entry, { review_opened: true })) return;
-						entry.reviewPending = true;
-					}
-					if (!view.alive()) return;
-					if (titles.length) {
-						window.dispatchEvent(new CustomEvent("wb:review-refresh", { detail: { sessionId: view.sessionId, batch: true } }));
-						if (WB_MOBILE.matches) window.dispatchEvent(new CustomEvent("wb:batch-review", { detail: { sessionId: view.sessionId } }));
-						else if (window.dshUnified) window.dispatchEvent(new Event("dsh:review-available"));
-						else ctrl.openTab("wb-review", { params: { client: batch.client, client_key: batch.client_key, meta: batch.meta_id } });
-					}
-					entry.reviewPending = false;
-				}
-				entry.finished = true;
+				await wbBatchReview(entry, view);
 			} catch (e) { entry.error = "批次暂未继续：" + e.message; }
 			finally { entry.busy = false; wbBatchEmit(); }
 		}
@@ -2661,32 +2714,52 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					return active && mounted.current && live.current.key === key && wbBatchKey(props.sessionId) === key
 						&& (!live.current.session || live.current.session.sessionId === props.sessionId);
 				}
+				var checking = false, serverPolledAt = null;
 				async function run() {
-					if (!alive() || !hint) return;
+					if (!alive() || checking) return;
 					var entry = wbBatches[key];
-					if (!entry) {
-						entry = wbBatches[key] = { loading: true };
-						try {
-							var r = await fetch(WB_API.batch + "?id=" + encodeURIComponent(hint)); var b = await r.json();
-							if (!alive() || !b.ok || (b.batch.session_id && b.batch.session_id !== props.sessionId)) { delete wbBatches[key]; return; }
-							entry.batch = b.batch;
-						} catch (e) { delete wbBatches[key]; return; }
-						finally { entry.loading = false; }
-					}
-					if (!entry.batch || entry.finished) return;
-					await wbBatchTick(entry, { sessionId: props.sessionId, actions: live.current.props.inputActions, alive: alive,
-						nodes: function () { var s = live.current.snap; return s && s.legacy && Array.isArray(s.legacy.nodes) ? s.legacy.nodes : []; },
-						running: function () {
-							var s = live.current.snap, l = s && s.legacy;
-							var session = live.current.session;
-							// Session lifecycle is authoritative, including history loading and gaps between tools.
-							if (session && (session.sessionId !== props.sessionId || session.openState !== "open" || session.removed
-								|| session.running || session.awaitingFirstTurn || (session.pendingSubmissions && session.pendingSubmissions.length)
-								|| (session.queue && session.queue.length))) return true;
-							if (!l || !Array.isArray(l.nodes)) return true;
-							return l.partial != null || !!(l.runningCalls && l.runningCalls.length)
-								|| !!document.querySelector('[data-slot="main.conversation"][data-wb-running="1"]');
-						} });
+					// Standalone single-turn views have no batch to discover. Cloud views
+					// also discover by session id, even when history has no round marker.
+					if (!hint && !entry && !window.dshUnified && !wbServerBatchCache.value) return;
+					checking = true;
+					try {
+						var server = (entry && entry.batch && entry.batch.driver === "server") || await wbServerBatch();
+						if (!alive() || (!server && !hint && !entry)) return;
+						if (server && serverPolledAt !== null && Date.now() - serverPolledAt < 3000) return;
+						if (server) serverPolledAt = Date.now();
+						if (!entry) {
+							entry = wbBatches[key] = { loading: true };
+							try {
+								var url = server ? WB_API.serverBatch + "?session_id=" + encodeURIComponent(props.sessionId) : WB_API.batch + "?id=" + encodeURIComponent(hint);
+								var r = await fetch(url); var b = await r.json();
+								if (!alive() || !b.ok || !b.batch || (b.batch.session_id && b.batch.session_id !== props.sessionId)) {
+									if (wbBatches[key] === entry) delete wbBatches[key];
+									return;
+								}
+								entry.batch = b.batch;
+								wbBatchEmit();
+								if (server) {
+									if (["done", "failed_partial"].includes(entry.batch.status)) await wbBatchReview(entry, {sessionId:props.sessionId, alive:alive});
+									return; // Avoid a duplicate GET on mount.
+								}
+							} catch (e) { if (wbBatches[key] === entry) delete wbBatches[key]; return; }
+							finally { entry.loading = false; }
+						}
+						if (!entry.batch || (entry.finished && !server)) return;
+						await wbBatchTick(entry, { sessionId: props.sessionId, actions: live.current.props.inputActions, alive: alive,
+							nodes: function () { var s = live.current.snap; return s && s.legacy && Array.isArray(s.legacy.nodes) ? s.legacy.nodes : []; },
+							running: function () {
+								var s = live.current.snap, l = s && s.legacy;
+								var session = live.current.session;
+								// Session lifecycle is authoritative, including history loading and gaps between tools.
+								if (session && (session.sessionId !== props.sessionId || session.openState !== "open" || session.removed
+									|| session.running || session.awaitingFirstTurn || (session.pendingSubmissions && session.pendingSubmissions.length)
+									|| (session.queue && session.queue.length))) return true;
+								if (!l || !Array.isArray(l.nodes)) return true;
+								return l.partial != null || !!(l.runningCalls && l.runningCalls.length)
+									|| !!document.querySelector('[data-slot="main.conversation"][data-wb-running="1"]');
+							} });
+					} finally { checking = false; }
 				}
 				function changed() { if (active) tick[1](function (v) { return v + 1; }); }
 				window.addEventListener("wb:batch-change", changed);
@@ -2709,7 +2782,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				wbBatchStop(entry, props.sessionId);
 			}
 			return createPortal(h("div", { className: "wb_batch", role: "status" },
-				h("span", null, batch.status === "running" ? "第 " + (row ? row.round : batch.rounds) + "/" + batch.rounds + " 轮" : batch.status === "stopped" ? "本批已停止" : "本批已结束"),
+				h("span", null, batch.status === "running" ? "第 " + (row ? row.round : batch.rounds) + "/" + batch.rounds + " 轮" : batch.status === "stopping" ? "正在停止本批…" : batch.status === "stopped" ? "本批已停止" : "本批已结束"),
 				batch.status === "running" ? h("button", { type: "button", onClick: stop, disabled: !!entry.stopping }, "停止本批") : null,
 				entry.error ? h("span", null, entry.error) : null,
 				batch.status !== "running" ? h("ul", null, batch.records.filter(function (r) { return r.status === "failed"; }).map(function (r) { return h("li", { key: r.round }, "第 " + r.round + " 轮：" + r.reason); })) : null), document.body);
@@ -2811,6 +2884,12 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					questionBinding.then(async function () {
 						function alive() { return relayLive.current && relayLive.current.sessionId === props.sessionId && relayLive.current.key === relayKey && wbBatchKey(props.sessionId) === relayKey; }
 						if (!alive()) return;
+						if (batchEntry.batch.driver === "server") {
+							// The one initial relay stays in the composer path. No record claim:
+							// the server recognizes the round marker in this first user turn.
+							if (batchEntry.stopping || batchEntry.batch.status !== "running" || batchEntry.batch.records[0].status !== "pending") return;
+							actions.setDraft(wbRoundPrompt(text, batchEntry.batch, 1)); await actions.submit(); return;
+						}
 						if (!batchEntry.batch.session_id && !await wbBatchSave(batchEntry, { session_id: props.sessionId })) return;
 						await wbBatchSend(batchEntry, actions, text, alive);
 					}).finally(function () { batchEntry.relayPending = false; });
@@ -3016,6 +3095,8 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			function wbRunErrorKey(snapshot) { return JSON.stringify([snapshot && snapshot.lastAgentError || null, snapshot && snapshot.promptError || null]); }
 			function wbNavBatch(id) {
 				var local = wbBatchFor(id), info = wbNavState.statusInfo[id], remote = info && info.batch;
+				if (local && local.driver === 'server' && (!remote || remote.driver !== 'server')) return local;
+				if (remote && remote.driver === 'server' && (!local || local.driver !== 'server')) return remote;
 				// A poll can arrive after a local relay save; prefer the newer persisted version.
 				return local && (!remote || String(local.savedAt || '') >= String(remote.savedAt || '')) ? local : remote;
 			}
@@ -3071,17 +3152,39 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					try {
 						for (var i = 0; i < ids.length && visible() && state === wbNavRunState(); i += 50) {
 							var chunk = ids.slice(i, i + 50);
+							var before = Object.create(null);
+							chunk.forEach(function (id) { before[id] = wbBatchFor(id); });
 							try {
-								var response = await fetch(WB_API.sessionStatus + '?ids=' + encodeURIComponent(chunk.join(',')), {method:'GET', headers:{accept:'application/json'}});
-								var body = await response.json();
+								var replies = await Promise.all([
+									fetch(WB_API.sessionStatus + '?ids=' + encodeURIComponent(chunk.join(',')), {method:'GET', headers:{accept:'application/json'}}).then(function (r) { return r.json(); }).catch(function () { return null; }),
+									(async function () {
+										if (!await wbServerBatch()) return null;
+										try {
+											var r = await fetch(WB_API.serverBatch + '?session_ids=' + encodeURIComponent(chunk.join(',')), {method:'GET', headers:{accept:'application/json'}});
+											return await r.json();
+										} catch (e) { return null; }
+									})()
+								]);
 								if (!visible() || state !== wbNavRunState()) break;
-								if (!body.ok || !body.items || typeof body.items !== 'object') continue;
+								var body = replies[0], serverBody = replies[1];
+								var items = body && body.ok && body.items && typeof body.items === 'object' ? body.items : null;
+								var batches = serverBody && serverBody.ok && serverBody.items && typeof serverBody.items === 'object' ? serverBody.items : null;
+								if (!items && !batches) continue;
+								var merged = wbMergeBatchStatus(items || wbNavState.statusInfo, batches);
 								var listed = wbNavStatusIds();
 								chunk.forEach(function (id) {
 									delete wbNavState.statusInfo[id]; // Omitted ACL records must also disappear locally.
-									if (listed.includes(id) && Object.prototype.hasOwnProperty.call(body.items, id)) wbNavState.statusInfo[id] = body.items[id];
+									if (batches && !batches[id]) {
+										if (before[id] && before[id].driver === 'server' && wbBatchFor(id) === before[id]) delete wbBatches[wbBatchKey(id)];
+										if (merged[id] && merged[id].batch && merged[id].batch.driver === 'server') merged[id] = Object.assign({}, merged[id], {batch:null, finished_at:null});
+									}
+									if (listed.includes(id) && Object.prototype.hasOwnProperty.call(merged, id)) {
+										wbNavState.statusInfo[id] = merged[id];
+										if (batches) wbRememberServerBatch(id, batches[id]);
+									}
 									wbNavRememberBatch(id);
 								});
+								if (batches) wbBatchEmit();
 								wbNavBatchChanged();
 							} catch (e) { /* Keep the last successful projection until the next visible poll. */ }
 						}
@@ -5305,13 +5408,15 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 							sessionStorage.setItem(WB_KEY.modelPending, JSON.stringify({ provider: selModel === "__default__" ? "deepseek-official" : mp[0], model: selModel === "__default__" ? "deepseek-flash" : mp[1], effort: selEffort === "__default__" ? "" : selEffort }));
 						}
 					} catch (error) { /* storage unavailable */ }
+					var serverBatch = batchId ? await wbServerBatch() : false, batchBody = null;
 					if (batchId) {
 						var batchModel = null;
 						try { batchModel = JSON.parse(sessionStorage.getItem(WB_KEY.modelPending) || "null"); } catch (e) { }
-						batch = await wbBatchPost({ id: batchId, rounds: totalRounds, prompt: text, meta_id: metaId,
+						batchBody = { id: batchId, rounds: totalRounds, prompt: text, meta_id: metaId,
 							client: clientName, client_key: pick.key, questions: selectedQuestions, model: batchModel,
 							bind: { client_key: pick.key, client: clientName, topic: topic, meta_id: metaId, questions: selectedQuestions,
-								capture_period: weakGaps.capturePeriod || weakClientId || "", capture_task_id: weakGaps.taskId || "", collected_at: weakGaps.collectedAt || "" } });
+								capture_period: weakGaps.capturePeriod || weakClientId || "", capture_task_id: weakGaps.taskId || "", collected_at: weakGaps.collectedAt || "" } };
+						if (!serverBatch) batch = await wbBatchPost(batchBody);
 					}
 					var openedSession = false;
 					var rememberPending = function (sessionId) {
@@ -5342,8 +5447,13 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 							}));
 						} catch (error) { /* 隐身模式就算了 */ }
 					};
+					var batchSessionId = "";
+					function preparePending(sessionId) {
+						if (serverBatch) batchSessionId = sessionId;
+						else rememberPending(sessionId);
+					}
 					if (typeof workspace.openWorkspace === "function") {
-						await workspace.openWorkspace(personal.id, rememberPending);
+						await workspace.openWorkspace(personal.id, preparePending);
 					} else {
 						/* Deploy-line hosts may expose only the new session-create route.
 						 * The host has already scoped that route to personal.id. */
@@ -5352,7 +5462,12 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 						var createdId = createBody && createBody.ok === true ? String(createBody.sessionId || "") : "";
 						if (!createdId) throw new Error(WB_WORKSPACE_ERROR);
 						workspace.openSession(createdId);
-						rememberPending(createdId);
+						preparePending(createdId);
+					}
+					if (serverBatch && batchSessionId) {
+						batch = await wbBatchPost(Object.assign({}, batchBody, { session_id: batchSessionId }), true);
+						rememberPending(batchSessionId);
+						wbBatchEmit();
 					}
 					setCounts({});
 					if (openedSession) { setWeakPicked([]); saveWeakSelection(weakSelectionKey, []); }
@@ -6108,6 +6223,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 		exports.apply = apply;
 		exports.wbRequestedTotal = wbRequestedTotal;
 		exports.wbWriteProgress = wbWriteProgress;
+		exports.wbMergeBatchStatus = wbMergeBatchStatus;
 		/* Small pure helpers are exported for the browser-package contract tests. */
 		exports.wbUseUnifiedContext = useUnifiedContext;
 		exports.UnifiedReviewPortal = UnifiedReviewPortal;
