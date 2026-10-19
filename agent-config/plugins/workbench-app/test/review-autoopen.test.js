@@ -34,7 +34,7 @@ test('a new user turn can open again, including a batched first write', () => {
   assert.deepEqual(decision(snapshot({ turnKey: 2, openedTurn: 1 }), snapshot({ turnKey: 2, writeCount: 1 })), { open: true, refresh: true })
 })
 
-test('old session replay and session switches establish a baseline without opening', () => {
+test('unified decision: old session replay and switches establish a baseline without opening', () => {
   const history = snapshot({ writeCount: 3, running: false })
   assert.deepEqual(decision(null, history), { open: false, refresh: false })
   assert.deepEqual(decision(snapshot({ turnKey: 0, running: false }), history), { open: false, refresh: false })
@@ -72,11 +72,11 @@ test('task-bar drafts fetch depends on writes and manual refresh, never chatSnap
 })
 
 // Exercise actual components with persistent hooks, effect cleanup and a fake clock.
-function harness({ component = 'TaskBar', binding, mapped, unified = false, openFailures = 0, fetchBody, mobile = false, tabParams = { client: '客户 A' } } = {}) {
+function harness({ component = 'TaskBar', binding, mapped, unified = false, openFailures = 0, commitOpens = true, fetchBody, mobile = false, tabParams = { client: '客户 A' } } = {}) {
   let clientApi, tree, cursor = 0, dirty = false, now = 0, timerId = 0
   let nodes = [user], running = true, sessionId = 'session-a'
   const hooks = [], pending = [], timers = new Map(), listeners = new Map()
-  const requests = [], opens = [], events = [], warnings = []
+  const requests = [], opens = [], openSessions = [], events = [], warnings = []
   const react = {
     createElement: (type, props, ...children) => ({ type, props, children }),
     useRef(value) { const i = cursor++; return hooks[i] ||= { current: value } },
@@ -107,6 +107,7 @@ function harness({ component = 'TaskBar', binding, mapped, unified = false, open
   }
   vm.runInNewContext(instrumented, {
     window, Event: TestEvent, CustomEvent: TestEvent,
+    Date: class extends Date { static now() { return now } },
     console: { warn: (...args) => warnings.push(args) },
     setTimeout(fn, delay) { const id = ++timerId; timers.set(id, { fn, at: now + delay }); return id },
     clearTimeout(id) { timers.delete(id) },
@@ -118,12 +119,31 @@ function harness({ component = 'TaskBar', binding, mapped, unified = false, open
   })
   if (binding) clientApi.wbNavState.bindings[sessionId] = binding
   if (mapped) clientApi.wbNavState.map[sessionId] = mapped
+  const surfaces = Object.create(null)
+  const sidebarRight = {
+    binding: null,
+    bind(value) { this.binding = value },
+    openTab(kind, options) {
+      opens.push({ kind, ...JSON.parse(JSON.stringify(options)) })
+      openSessions.push(this.binding?.sessionId)
+      if (!this.binding || opens.length <= openFailures) throw Error('surface not mounted')
+      if (commitOpens) showReview()
+    },
+  }
+  function bindSeat(id) { sidebarRight.bind(id === null ? null : { sessionId: id, surfaces }) }
+  function showReview() {
+    const id = sidebarRight.binding.sessionId
+    const surface = surfaces[id] ||= { layout: { expanded: false, tabs: {} } }
+    surface.layout.expanded = true
+    surface.layout.tabs.review = { id: 'review', kind: 'wb-review' }
+  }
   clientApi.apply({
     slots: { inject() {} }, sidebarRightTabs: { register() {} },
-    sidebarRight: { openTab(kind, options) { opens.push({ kind, ...JSON.parse(JSON.stringify(options)) }); if (opens.length <= openFailures) throw Error('surface not mounted') } },
-  }, {})
+    sidebarRight,
+  }, { defaultPanel: '' })
   function render(next = {}) {
     nodes = next.nodes ?? nodes; running = next.running ?? running; sessionId = next.sessionId ?? sessionId
+    bindSeat(next.seatSessionId === undefined ? sessionId : next.seatSessionId)
     cursor = 0; dirty = false
     tree = clientApi[component]({ sessionId, useChat: select => select({ legacy: { nodes, partial: running ? {} : null, runningCalls: [] } }), useTabInfo: () => ({ navigation: { params: tabParams } }) })
     pending.splice(0).forEach(fn => fn())
@@ -140,11 +160,18 @@ function harness({ component = 'TaskBar', binding, mapped, unified = false, open
     }
     now = until
   }
-  return { api: clientApi, render, settle, advance, requests, opens, events, warnings, timers,
+  function dispose() {
+    hooks.forEach(hook => { hook.cleanup?.(); hook.cleanup = undefined })
+    dirty = false
+  }
+  return { api: clientApi, render, settle, advance, requests, opens, openSessions, events, warnings, timers, sidebarRight, bindSeat, showReview,
     get tree() { return tree },
+    hide() { surfaces[sessionId].layout.expanded = false },
+    closeReview() { delete surfaces[sessionId].layout.tabs.review },
     batchChanged() { window.dispatchEvent(new TestEvent('wb:batch-change')) },
     refresh() { window.dispatchEvent(new TestEvent('wb:review-refresh')) },
-    dispose() { hooks.forEach(hook => hook.cleanup?.()) },
+    dispose,
+    remount(ms = 0) { dispose(); hooks.length = 0; advance(ms); render() },
   }
 }
 
@@ -156,11 +183,11 @@ test('no-meta sessions open using bindings/map or missing client, without awaiti
     f.render({ nodes: [user, write()] })
     assert.deepEqual(f.opens, [{ kind: 'wb-review', params: { client: options.binding?.client || options.mapped?.client || '', meta: '' } }])
     f.render({ nodes: [user, write(), write('第二篇')] })
-    assert.equal(f.opens.length, 1, 'closing the panel does not reset the once-per-turn marker')
+    assert.equal(f.opens.length, 1, 'a shown tab is not reopened for another article')
     assert.equal(f.events.filter(type => type === 'wb:review-refresh').length, 2)
     f.render({ nodes: [user, write(), write('第二篇'), user] })
     f.render({ nodes: [user, write(), write('第二篇'), user, write('第三篇')] })
-    assert.equal(f.opens.length, 2)
+    assert.equal(f.opens.length, 1, 'a new turn does not reopen a shown tab')
     f.dispose()
   }
 })
@@ -178,14 +205,128 @@ test('old drafts and streamed deltas do not open the panel or restart draft requ
   f.dispose()
 })
 
+test('three historical writes open once and 100 streamed rerenders do not reopen or restart verification', () => {
+  const f = harness()
+  f.render({ nodes: [user, write('一'), write('二'), write('三')], running: false })
+  assert.equal(f.opens.length, 1)
+  const timer = [...f.timers.keys()]
+  for (let i = 0; i < 100; i++) f.render({ nodes: [user, write('一'), write('二'), write('三')] })
+  assert.equal(f.opens.length, 1)
+  assert.deepEqual([...f.timers.keys()], timer)
+  f.advance(250)
+  assert.equal(f.timers.size, 0)
+  f.dispose()
+})
+
+test('collapse or close stays hidden through rerenders and run end; a new write reopens and refreshes', () => {
+  for (const hide of ['hide', 'closeReview']) {
+    const f = harness()
+    f.render({ nodes: [user, write()] })
+    f.advance(250)
+    f[hide]()
+    for (let i = 0; i < 100; i++) f.render()
+    f.render({ running: false })
+    f.render({ running: true })
+    f.advance(10000)
+    assert.equal(f.opens.length, 1)
+    f.render({ nodes: [user, write(), write('第二篇')] })
+    assert.equal(f.opens.length, 2)
+    assert.equal(f.events.filter(type => type === 'wb:review-refresh').length, 1)
+    f.advance(250)
+    assert.equal(f.timers.size, 0)
+    f.dispose()
+  }
+})
+
+test('a quick session switch away and back starts a new viewing, including after hide', () => {
+  const f = harness()
+  const nodes = [user, write(), write('二'), write('三')]
+  f.render({ nodes, running: false }); f.advance(250)
+  f.hide()
+  f.render({ sessionId: 'session-b', nodes: [user] })
+  assert.equal(f.opens.length, 1, 'zero-article sessions stay closed')
+  f.render({ sessionId: 'session-a', nodes })
+  assert.equal(f.opens.length, 2)
+  assert.deepEqual(f.openSessions, ['session-a', 'session-a'])
+  f.dispose()
+})
+
+test('same-session header remount preserves hide within 1000ms; a later visit opens again', () => {
+  const f = harness()
+  f.render({ nodes: [user, write()], running: false }); f.advance(250)
+  f.hide()
+  f.remount(999)
+  assert.equal(f.opens.length, 1, 'a quick remount observes the hide from the confirmed viewing')
+  f.remount()
+  assert.equal(f.opens.length, 1, 'a recorded hide survives repeated header remounts')
+  f.remount(1000)
+  assert.equal(f.opens.length, 2, 'returning after leaving starts a fresh viewing')
+  f.dispose()
+})
+
+test('a new module copy starts a fresh viewing after reload', () => {
+  const f = harness()
+  f.render({ nodes: [user, write()], running: false }); f.advance(250); f.hide(); f.dispose()
+  const reloaded = harness()
+  reloaded.render({ nodes: [user, write()], running: false })
+  assert.equal(reloaded.opens.length, 1)
+  reloaded.dispose()
+})
+
+test('navigating to another right-column tab does not reactivate review', () => {
+  const f = harness()
+  f.render({ nodes: [user, write()] }); f.advance(250)
+  const layout = f.sidebarRight.binding.surfaces['session-a'].layout
+  layout.tabs.other = { id: 'other', kind: 'other' }
+  layout.activeTabId = 'other'
+  f.sidebarRight.active = () => layout.tabs.other
+  f.render({ running: false })
+  f.render({ running: true, nodes: [user, write(), write('第二篇')] })
+  assert.equal(f.opens.length, 1)
+  assert.equal(layout.activeTabId, 'other')
+  f.dispose()
+})
+
+test('pin count uses successful results or distinct persisted batch titles, whichever is larger', () => {
+  const f = harness()
+  const batch = { status: 'done', review_opened: true, records: [
+    { status: 'ok', title: '第一篇' }, { status: 'ok', title: '第一篇' }, { status: 'failed', title: '失败' },
+  ] }
+  f.api.wbBatches[f.api.wbBatchKey('session-a')] = { batch }
+  f.render({ nodes: [], running: false }); f.advance(250)
+  assert.equal(f.opens.length, 1, 'persisted batch titles open even with no loaded write results')
+  f.hide(); f.render({ running: true })
+  batch.records.push({ status: 'ok', title: '第一篇' })
+  f.render()
+  assert.equal(f.opens.length, 1, 'a duplicate batch title does not clear hide')
+  batch.records.push({ status: 'ok', title: '第二篇' })
+  f.render(); f.advance(250)
+  assert.equal(f.opens.length, 2)
+  f.hide(); f.render({ running: false })
+  f.render({ nodes: [user, write('第一篇'), write('第一篇')] })
+  assert.equal(f.opens.length, 2, 'history results and persisted titles are not summed')
+  f.render({ nodes: [user, write('第一篇'), write('第一篇'), write('第一篇')] })
+  assert.equal(f.opens.length, 3, 'rewriting a title still increases the successful result count')
+  f.dispose()
+})
+
+test('zero successful writes never open, including failures and pending calls', () => {
+  const f = harness()
+  f.render({ nodes: [user, { ...write(), isError: true }, { ...write(), kind: 'tool-call' }] })
+  f.render({ running: false }); f.advance(20000)
+  assert.equal(f.opens.length, 0)
+  assert.equal(f.timers.size, 0)
+  f.dispose()
+})
+
 test('openTab retries every 250ms independently of messages and stops on success', () => {
   const f = harness({ openFailures: 2 })
   f.render(); f.render({ nodes: [user, write()] })
   assert.equal(f.opens.length, 1)
   f.advance(249); assert.equal(f.opens.length, 1)
   f.advance(1); assert.equal(f.opens.length, 2)
-  f.render({ nodes: [user, write(), write('第二篇')] })
   f.advance(250); assert.equal(f.opens.length, 3)
+  assert.equal(f.timers.size, 1, 'successful open schedules a commit check')
   f.advance(10000); assert.equal(f.opens.length, 3)
   assert.equal(f.timers.size, 0)
   f.dispose()
@@ -194,7 +335,7 @@ test('openTab retries every 250ms independently of messages and stops on success
 test('open retries are bounded and cancelled when the session changes or unmounts', () => {
   const f = harness({ openFailures: Infinity })
   f.render(); f.render({ nodes: [user, write()] }); f.advance(20000)
-  assert.equal(f.opens.length, 41)
+  assert.equal(f.opens.length, 40)
   assert.equal(f.warnings.filter(args => args[0].includes('重试超时')).length, 1)
   assert.equal(f.timers.size, 0)
   f.dispose()
@@ -209,13 +350,116 @@ test('open retries are bounded and cancelled when the session changes or unmount
   }
 })
 
-test('unified shell receives one availability event per turn; mobile has no new auto-open', () => {
-  for (const mobile of [false, true]) {
-    const f = harness({ unified: true, mobile })
-    f.render(); f.render({ nodes: [user, write()] }); f.render({ nodes: [user, write(), write('第二篇')] })
-    assert.equal(f.events.filter(type => type === 'dsh:review-available').length, mobile ? 0 : 1)
-    assert.equal(f.opens.length, 0)
+test('a stale or unbound seat waits until it belongs to the viewed session', () => {
+  for (const seatSessionId of [null, 'session-a']) {
+    const f = harness()
+    f.render({ nodes: [user, write()], running: false }); f.advance(250)
+    f.render({ sessionId: 'session-b', seatSessionId, nodes: [user, write('第二篇')] })
+    f.advance(750)
+    assert.equal(f.opens.length, 1, 'never open into the previous seat')
+    assert.equal(f.timers.size, 1)
+    f.bindSeat('session-b')
+    f.advance(250)
+    assert.deepEqual(f.openSessions, ['session-a', 'session-b'])
+    f.advance(250)
+    assert.equal(f.timers.size, 0)
     f.dispose()
+  }
+})
+
+test('waiting for a seat is bounded to 40 checks and warns once', () => {
+  const f = harness()
+  f.render({ nodes: [user, write()], seatSessionId: null })
+  f.advance(9749)
+  assert.equal(f.warnings.length, 0)
+  f.advance(1)
+  assert.equal(f.warnings.length, 1)
+  assert.match(f.warnings[0][0], /重试超时/)
+  f.advance(20000)
+  assert.equal(f.warnings.length, 1)
+  assert.equal(f.opens.length, 0)
+  assert.equal(f.timers.size, 0)
+  f.dispose()
+})
+
+test('delayed open commits stay unconfirmed and retry; only a committed tab can later be hidden', () => {
+  const f = harness({ commitOpens: false })
+  f.render({ nodes: [user, write()] })
+  f.advance(250)
+  assert.equal(f.opens.length, 2, 'a still-pending open is not misread as a hide')
+  assert.equal(f.timers.size, 1)
+  f.remount(100)
+  assert.equal(f.opens.length, 3, 'a quick remount keeps the open unconfirmed')
+  f.showReview(); f.advance(250)
+  assert.equal(f.timers.size, 0)
+  f.hide(); f.render({ running: false }); f.advance(20000)
+  assert.equal(f.opens.length, 3)
+  f.dispose()
+})
+
+test('opens that never commit also exhaust the bounded verification loop', () => {
+  const f = harness({ commitOpens: false })
+  f.render({ nodes: [user, write()] }); f.advance(20000)
+  assert.equal(f.opens.length, 40)
+  assert.equal(f.warnings.length, 1)
+  assert.equal(f.timers.size, 0)
+  f.dispose()
+})
+
+test('new articles replace an outstanding retry timer, and unmount cancels wait and verification timers', () => {
+  const f = harness({ openFailures: 2 })
+  f.render({ nodes: [user, write()] })
+  const first = [...f.timers.keys()][0]
+  f.render({ nodes: [user, write(), write('第二篇')] })
+  assert.equal(f.timers.size, 1)
+  assert.equal(f.timers.has(first), false)
+  f.advance(250); f.advance(250)
+  assert.equal(f.opens.length, 3)
+  assert.equal(f.timers.size, 0)
+  f.dispose()
+  for (const seatSessionId of [null, 'session-a']) {
+    const f = harness()
+    f.render({ nodes: [user, write()], seatSessionId })
+    assert.equal(f.timers.size, 1)
+    const opened = f.opens.length
+    f.dispose()
+    assert.equal(f.timers.size, 0)
+    f.advance(20000)
+    assert.equal(f.opens.length, opened)
+    assert.equal(f.warnings.length, 0)
+  }
+})
+
+test('openTab causing a synchronous rerender does not re-enter the pin effect', () => {
+  const f = harness()
+  const open = f.sidebarRight.openTab.bind(f.sidebarRight)
+  f.sidebarRight.openTab = (...args) => { open(...args); f.render() }
+  f.render({ nodes: [user, write()] })
+  assert.equal(f.opens.length, 1)
+  assert.equal(f.timers.size, 1)
+  f.advance(250)
+  assert.equal(f.timers.size, 0)
+  f.dispose()
+})
+
+test('unified keeps live-write availability per turn; mobile dispatches refresh only', () => {
+  for (const options of [{ unified: true }, { unified: true, mobile: true }, { mobile: true }]) {
+    const f = harness(options)
+    f.render(); f.render({ nodes: [user, write()] }); f.render({ nodes: [user, write(), write('第二篇')] })
+    assert.equal(f.events.filter(type => type === 'dsh:review-available').length, options.mobile ? 0 : 1)
+    assert.equal(f.events.filter(type => type === 'wb:review-refresh').length, 2)
+    assert.equal(f.opens.length, 0)
+    assert.equal(f.timers.size, 0)
+    f.render({ nodes: [user, write(), write('第二篇'), user] })
+    f.render({ nodes: [user, write(), write('第二篇'), user, write('第三篇')] })
+    assert.equal(f.events.filter(type => type === 'dsh:review-available').length, options.mobile ? 0 : 2)
+    f.dispose()
+    const history = harness(options)
+    history.render({ nodes: [user, write(), write('第二篇'), write('第三篇')], running: false })
+    assert.equal(history.opens.length, 0)
+    assert.equal(history.events.filter(type => type === 'dsh:review-available').length, 0)
+    assert.equal(history.timers.size, 0)
+    history.dispose()
   }
 })
 
@@ -259,13 +503,17 @@ test('active batch suppresses per-write auto-open while retaining refresh and si
   assert.deepEqual(decision(snapshot(), snapshot({ writeCount: 1, batchActive: false })), { open: true, refresh: true })
 })
 
-test('batch marker suppresses review before its persisted record finishes loading', () => {
-  const f = harness({ binding: { client: '客户 A' } })
+test('batch markers retain unified suppression while desktop pins the successful article', () => {
   const batchUser = { kind: 'user', content: [{ type: 'text', text: '[生文批次：wbb-test；第 1/3 轮]' }] }
-  f.render({ nodes: [batchUser] })
-  f.render({ nodes: [batchUser, write()] })
-  assert.equal(f.opens.length, 0)
-  f.dispose()
+  for (const unified of [false, true]) {
+    const f = harness({ binding: { client: '客户 A' }, unified })
+    f.render({ nodes: [batchUser] })
+    f.render({ nodes: [batchUser, write()] })
+    assert.equal(f.opens.length, unified ? 0 : 1)
+    assert.equal(f.events.filter(type => type === 'dsh:review-available').length, 0)
+    assert.equal(f.events.filter(type => type === 'wb:review-refresh').length, 1)
+    f.dispose()
+  }
 })
 
 

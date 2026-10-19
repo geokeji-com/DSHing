@@ -1684,6 +1684,36 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				&& (next.running || (sameTurn && prev.running)));
 			return { open: !next.batchActive && increase && prev.openedTurn !== next.turnKey, refresh: increase };
 		}
+		/* Desktop pin state is confirmed only by a committed, visible review tab. */
+		function wbReviewPinStep(state, input) {
+			var next = state && state.sessionId === input.sessionId ? Object.assign({}, state)
+				: { sessionId: input.sessionId, count: 0, hidden: false, confirmed: false };
+			var increased = input.count > next.count;
+			next.count = input.count;
+			if (input.count === 0) return { state: next, action: "none" };
+			if (increased) { next.hidden = false; next.confirmed = false; }
+			if (next.hidden) return { state: next, action: "none" };
+			if (input.shown === null) return { state: next, action: "wait" };
+			if (input.shown === true) { next.confirmed = true; return { state: next, action: "none" }; }
+			if (next.confirmed) { next.hidden = true; return { state: next, action: "none" }; }
+			return { state: next, action: "open" };
+		}
+		function wbReviewShown(ctrl, sessionId) {
+			try {
+				if (ctrl && typeof ctrl.bind === "function") {
+					var binding = ctrl.binding;
+					if (!binding || binding.sessionId !== sessionId) return null;
+					var surface = binding.surfaces && binding.surfaces[sessionId], layout = surface && surface.layout;
+					return !!(layout && layout.expanded && Object.keys(layout.tabs || {}).some(function (id) {
+						return layout.tabs[id] && layout.tabs[id].kind === "wb-review";
+					}));
+				}
+				return !!(ctrl && typeof ctrl.isExpanded === "function" && ctrl.isExpanded()
+					&& typeof ctrl.active === "function" && (ctrl.active() || {}).kind === "wb-review");
+			} catch (e) { return null; }
+		}
+		/* Header-slot remounts within 1s continue the viewing; switching sessions never does. */
+		var wbReviewPinViews = Object.create(null), wbReviewPinSession = null;
 		var WB_API = {
 			clients: "/api/workbench/clients",
 			skills: "/api/workbench/skills",
@@ -4677,6 +4707,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					}
 				}
 				wbBatchTitles(currentBatch, writeTitles);
+				var count = Math.max(writeCount, Object.keys(writeTitles).length);
 				var running = !!(chatSnap && chatSnap.legacy && (chatSnap.legacy.partial != null
 					|| (chatSnap.legacy.runningCalls && chatSnap.legacy.runningCalls.length > 0)));
 				var binding = wbNavState.bindings[sessionId] || {}, mapped = wbNavState.map[sessionId] || {};
@@ -4762,7 +4793,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					};
 				}, [metaId, sessionId, meta && meta.client]);
 
-				/* 只由本轮实时 write 触发；草稿目录和 task-meta 均不在打开路径上。 */
+				/* 实时 write 保留刷新与 unified 通知；桌面原生右栏由下方 pin 管理。 */
 				var autoRef = React.useRef({ previous: null, opened: {}, timer: null });
 				autoRef.current.target = { client: client, meta: metaId };
 				React.useEffect(function () {
@@ -4777,18 +4808,14 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					var prev = auto.previous && Object.assign({}, auto.previous, { openedTurn: auto.opened[key] ? turnKey : null });
 					var decision = wbReviewAutoOpenDecision(prev, next);
 					auto.previous = next;
-					if (WB_MOBILE.matches) return;
 					if (decision.refresh) window.dispatchEvent(new CustomEvent("wb:review-refresh", { detail: { sessionId: sessionId } }));
-					if (!decision.open) return;
+					if (WB_MOBILE.matches || !window.dshUnified || !decision.open) return;
 					auto.opened[key] = true;
 					var attempts = 0;
 					function openReview() {
 						auto.timer = null;
 						try {
-							var ctrl = WbCtx && WbCtx.sidebarRight;
-							if (window.dshUnified) window.dispatchEvent(new Event("dsh:review-available"));
-							else if (ctrl && typeof ctrl.openTab === "function") ctrl.openTab("wb-review", { params: auto.target });
-							else throw new Error("sidebarRight is not ready");
+							window.dispatchEvent(new Event("dsh:review-available"));
 						} catch (e) {
 							if (++attempts <= 40) auto.timer = setTimeout(openReview, 250);
 							else console.warn("[dsh-workbench] 打开审核侧栏失败（重试超时）：", String(e));
@@ -4796,6 +4823,47 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					}
 					openReview();
 				}, [sessionId, turnKey, turnWriteCount, running]);
+
+				var pinViewRef = React.useRef(null);
+				React.useEffect(function () {
+					if (WB_MOBILE.matches || window.dshUnified) return;
+					var view = wbReviewPinViews[sessionId];
+					if (wbReviewPinSession !== sessionId || !view || (view.leftAt !== null && Date.now() - view.leftAt >= 1000)) {
+						view = wbReviewPinViews[sessionId] = { state: null, leftAt: null };
+					}
+					wbReviewPinSession = sessionId;
+					view.leftAt = null;
+					pinViewRef.current = view;
+					return function () { view.leftAt = Date.now(); };
+				}, [sessionId]);
+				React.useEffect(function () {
+					if (WB_MOBILE.matches || window.dshUnified || sessionId === undefined || sessionId === null) return;
+					var view = pinViewRef.current, timer = null, attempts = 0, cancelled = false, checking = false;
+					function check() {
+						if (cancelled || checking) return;
+						timer = null;
+						checking = true;
+						var error = "sidebarRight is not ready";
+						try {
+							attempts++;
+							var ctrl = WbCtx && WbCtx.sidebarRight;
+							var step = wbReviewPinStep(view.state, { sessionId: sessionId, count: count, shown: wbReviewShown(ctrl, sessionId) });
+							view.state = step.state;
+							if (step.action === "none") return;
+							if (step.action === "open") {
+								if (!ctrl || typeof ctrl.openTab !== "function") throw new Error(error);
+								ctrl.openTab("wb-review", { params: autoRef.current.target });
+							}
+						} catch (e) { error = e; }
+						finally { checking = false; }
+						/* A successful open still needs a commit check; our own write never confirms it. */
+						if (cancelled) return;
+						if (attempts < 40) timer = setTimeout(check, 250);
+						else console.warn("[dsh-workbench] 打开审核侧栏失败（重试超时）：", String(error));
+					}
+					check();
+					return function () { cancelled = true; clearTimeout(timer); };
+				}, [sessionId, count, running]);
 
 				/* 手动刷新另计 tick；实时写入已通过 writeCount 触发同一次拉取。 */
 				var rvTickS = React.useState(0), rvTick = rvTickS[0];
@@ -6338,7 +6406,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			/* ---- R 区：右侧栏"文章审核" tab（2026-09-24）--------------------
 			 * stage1：向 tab 注册表声明类型（分页型，不带资源地址）；
 			 * stage2：`sidebar.right.pane.tab`/`.title` 槽按 id 给 body 和 chip。
-			 * TaskBar 探测到本轮首次实时写入时 openTab 自动展开右侧栏。 */
+			 * TaskBar 在桌面会话已有文章时自动展开右侧栏，本次查看可手动隐藏。 */
 			try {
 				ctx.sidebarRightTabs.register({
 					id: "workbench-article-review",
@@ -6448,6 +6516,8 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 		exports.wbWriteProgress = wbWriteProgress;
 		exports.wbReviewListSize = wbReviewListSize;
 		exports.wbReviewListKey = wbReviewListKey;
+		exports.wbReviewPinStep = wbReviewPinStep;
+		exports.wbReviewShown = wbReviewShown;
 		exports.wbMergeBatchStatus = wbMergeBatchStatus;
 		exports.wbConvTick = wbConvTick;
 		exports.wbTitleLoopState = wbTitleLoopState;
