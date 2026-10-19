@@ -53,7 +53,7 @@ test('loader is an inline 12px masked Klein Blue arc row in the message column, 
   const arc = api.CSS.match(/\.wb_ldrSpin\{([^}]+)\}/)[1]
   for (const token of ['width:12px', 'height:12px', 'corner-shape:round', 'conic-gradient', 'var(--wb-klein)', '-webkit-mask:radial-gradient', ';mask:radial-gradient']) assert.ok(arc.includes(token), token)
   assert.doesNotMatch(arc, /border-top-color|border:2px solid/)
-  assert.match(api.CSS, /\[data-chat-flow\]:has\(> \.wb_ldr\) > \[class\*='_turnStatus_'\]\{display:none !important;\}/)
+  assert.match(api.CSS, /\[data-chat-flow\]:has\(> \.wb_ldr\) > \[class\*='_turnStatus'\]\{display:none !important;\}/)
 })
 
 test('motion hooks cover waiting, surfaces, controls, collapse and reduced motion including pseudo elements', () => {

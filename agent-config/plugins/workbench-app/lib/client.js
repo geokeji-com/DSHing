@@ -855,7 +855,7 @@ window.__ModuleLoader__.load({
 			".wb_ldrT{min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;background:linear-gradient(90deg,#8a909c 0%,#8a909c 40%,#c9cdd5 50%,#8a909c 60%,#8a909c 100%);background-size:200% 100%;-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;animation:wbLdrShimmer 2.4s linear infinite;}",
 			"@keyframes wbLdrShimmer{from{background-position:100% 0}to{background-position:-100% 0}}",
 			/* Our row replaces the host's own turn status line while both exist (no double indicator). */
-			"[data-chat-flow]:has(> .wb_ldr) > [class*='_turnStatus_']{display:none !important;}",
+			"[data-chat-flow]:has(> .wb_ldr) > [class*='_turnStatus']{display:none !important;}",
 			"@keyframes wbSpin{to{transform:rotate(360deg)}}",
 			/* —— 进行中思考淡化 —— */
 			"[data-slot='main.conversation'] [data-chat-flow-kind='reasoning']{opacity:.55;}",
@@ -2370,6 +2370,9 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			if (slot) wbConvAttr(slot, "data-wb-running", null);
 			if (ldr.parentNode) ldr.parentNode.removeChild(ldr);
 		}
+		function wbConvStatusRow(el) {
+			return !!el && ((el.classList && el.classList.contains("wb_ldr")) || (el.getAttribute && el.getAttribute("role") === "status"));
+		}
 		function wbConvInside(root, node) {
 			for (var n = node; n; n = n.parentNode) if (n === root) return true;
 			return false;
@@ -2378,7 +2381,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			var root = document.querySelector("[data-slot='main.conversation']");
 			if (previousLoader && (!root || !wbConvInside(root, previousLoader))) wbRemoveLoader(previousLoader);
 			if (!root) return null;
-			var items = root.querySelectorAll("[data-chat-anchor-key]");
+			var items = root.querySelectorAll("[data-chat-anchor-key]"), liveTails = [];
 			for (var i = items.length - 1; i >= 0; i--) {
 				(function (el) {
 					var head = el.querySelector(":scope > .wb_prefoldHead");
@@ -2394,7 +2397,11 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					for (var y = sidx + 1; sidx > -1 && y < sibs.length; y++) {
 						var tail = sibs[y];
 						if (tail.hasAttribute("data-chat-anchor-key") || tail.querySelector("[data-chat-anchor-key]")) break;
+						/* Run-status rows (host TurnStatus, our .wb_ldr) follow the latest message in the
+						 * real harness column; they are never part of the injected prompt. */
+						if (wbConvStatusRow(tail)) break;
 						tails.push(tail);
+						liveTails.push(tail);
 						t += "\n" + (tail.textContent || "");
 					}
 					wbConvAttr(el, "data-wb-prefold", "1");
@@ -2425,6 +2432,10 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					head._wbSync();
 				})(items[i]);
 			}
+			/* Tails are recomputed every tick: once the host inserts the reply between the prompt and
+			 * a former tail, that node must be shown again (stale marks hid the run status row). */
+			var marked = root.querySelectorAll("[data-wb-pref-tail]");
+			for (var m = 0; m < marked.length; m++) if (liveTails.indexOf(marked[m]) === -1) wbConvAttr(marked[m], "data-wb-pref-tail", null);
 			var prows = root.querySelectorAll("[data-disclosure-row]");
 			for (var p = 0; p < prows.length; p++) {
 				var ttl = prows[p].children[1];
@@ -6511,6 +6522,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 		exports.wbReviewListSize = wbReviewListSize;
 		exports.wbReviewListKey = wbReviewListKey;
 		exports.wbMergeBatchStatus = wbMergeBatchStatus;
+		exports.wbConvTick = wbConvTick;
 		exports.wbTitleLoopState = wbTitleLoopState;
 		exports.wbCaptureRetryDelay = wbCaptureRetryDelay;
 		exports.wbLoadCapture = wbLoadCapture;
