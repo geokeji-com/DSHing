@@ -818,20 +818,10 @@ window.__ModuleLoader__.load({
 			"}",
 			"[data-slot='conversation.composer.bar']{ --dsw-specific-input-major:var(--wb-elev); }",
 
-			/* 会话页美化（2026-10-13 晚 · 气泡轮）：预填简报气泡 / 过程折叠卡 / 工具与思考胶囊 / 表格修复。
+			/* 会话页美化（2026-10-13 晚 · 气泡轮）：过程折叠卡 / 工具与思考胶囊 / 表格修复。
 			 * 锚点全用官方 data-*：data-chat-anchor-key（条目）、data-turn-process（过程折叠总条）、
-			 * data-disclosure-row（过程内每行）、data-wb-prefold（我们打的预填标）。
+			 * data-disclosure-row（过程内每行）。
 			 * 保留原型的浅色样式；主题由 forceLightTheme 统一固定。 */
-			/* —— 预填简报气泡 —— */
-			"[data-slot='main.conversation'] [data-wb-prefold]{background:#eef3ff; border:1px solid #d7e3ff; border-radius:14px; padding:6px 10px; max-width:640px; margin:2px 0 10px;}",
-			/* !important：chat.node 带内联 display:contents，样式表规则必须 !important 才压得过 */
-			"[data-slot='main.conversation'] [data-wb-prefold]:not([data-wb-open]) > :not(.wb_prefoldHead){display:none !important;}",
-			"[data-slot='main.conversation'] [data-wb-prefold]:not([data-wb-open]){max-height:37px; overflow:hidden;}",
-			".wb_root button.wb_prefoldHead, [data-slot='main.conversation'] .wb_prefoldHead{all:unset; box-sizing:border-box; display:flex; align-items:center; gap:8px; width:100%; padding:3px 6px; color:#3563e9; font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif; font-size:12.5px; line-height:1.5; cursor:pointer; user-select:none;}",
-			".wb_prefoldHead:hover{opacity:.85;}",
-			"[data-slot='main.conversation'] .wb_prefoldHead .wb_pfT{overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}",
-			"[data-slot='main.conversation'] .wb_prefoldHead .wb_pfTag{flex:none; background:#fff; border:1px solid #d7e3ff; border-radius:99px; padding:0 8px; font-size:11px; font-weight:600;}",
-			"[data-slot='main.conversation'] .wb_prefoldHead .wb_pfC{flex:none; margin-left:auto; font-size:11px;}",
 			/* —— 过程折叠总条（官方 data-turn-process 按钮，整轮一条）—— */
 			"[data-slot='main.conversation'] button[data-turn-process]{all:unset; box-sizing:border-box; display:flex; align-items:center; gap:8px; width:100%; max-width:640px; margin:2px 0 10px; padding:9px 14px; background:#fff; border:1px solid #e7e9ee; border-radius:13px; cursor:pointer; color:#565c6b; font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif; font-size:13px; line-height:1.6; box-shadow:0 1px 2px rgba(16,24,40,.04);}",
 			"[data-slot='main.conversation'] button[data-turn-process]::before{content:'💡'; font-size:13px; line-height:1;}",
@@ -865,8 +855,6 @@ window.__ModuleLoader__.load({
 			"[data-slot='main.conversation'] table{table-layout:auto; width:100%; max-width:100%; border-collapse:collapse;}",
 			"[data-slot='main.conversation'] td, [data-slot='main.conversation'] th{white-space:normal !important; word-break:break-word; overflow-wrap:anywhere; vertical-align:top;}",
 			"[data-slot='main.conversation'] th{border-bottom:2px solid #cfdcff; background:#eef3ff; text-align:left;}",
-
-			"[data-slot='main.conversation'] [data-wb-pref-tail]{display:none !important;}",
 
 			/* ---- 工作台自己的壳 ---------------------------------------------- */
 			".wb_root{",
@@ -1459,12 +1447,10 @@ window.__ModuleLoader__.load({
 			".wb_ref>.wb_collapse{flex:1;min-height:0;}.wb_ref>.wb_collapse>.wb_collapseInner{display:flex;flex-direction:column;}.wb_ref[data-open='0']{min-height:0;}",
 			".wb_mProgress summary svg,.wb_rvChev,[data-slot='main.conversation'] [data-disclosure-row] svg{transition:transform var(--wb-motion) var(--wb-ease),color var(--wb-motion) var(--wb-ease);}",
 			"[data-slot='main.conversation'] :is(button[data-turn-process],[data-disclosure-row]){transition:background-color var(--wb-motion-fast) var(--wb-ease),opacity var(--wb-motion) var(--wb-ease);}",
-			".wb_mProgress[open] .wb_mChecklist,[data-slot='main.conversation'] [data-wb-open]>:not(.wb_prefoldHead),[data-slot='main.conversation'] [data-disclosure-row]{animation:wbFade var(--wb-motion) var(--wb-ease);}",
+			".wb_mProgress[open] .wb_mChecklist,[data-slot='main.conversation'] [data-disclosure-row]{animation:wbFade var(--wb-motion) var(--wb-ease);}",
 			"@supports selector(details::details-content){.wb_mProgress::details-content{opacity:0;transition:opacity var(--wb-motion) var(--wb-ease),content-visibility var(--wb-motion) allow-discrete;}.wb_mProgress[open]::details-content{opacity:1;}}",
-			/* Progressive intrinsic-height interpolation; older engines retain the fold. */
-			"@supports (interpolate-size:allow-keywords){[data-slot='main.conversation'] [data-wb-prefold]{interpolate-size:allow-keywords;height:auto;max-height:none;overflow:hidden;transition:height var(--wb-motion) var(--wb-ease);}[data-slot='main.conversation'] [data-wb-prefold]:not([data-wb-open]){height:37px;max-height:none;}}",
 			"html[data-wb-mobile][data-wb-scene='compose'] dsh-tabbar a{transition:opacity var(--wb-motion-fast) var(--wb-ease),transform var(--wb-motion-fast) var(--wb-ease);}html[data-wb-mobile][data-wb-scene='compose'] dsh-tabbar a:active{opacity:.7;transform:scale(.96);}",
-			"@media (prefers-reduced-motion: reduce){[class^='wb_'],[class*=' wb_'],[class^='wb_']::before,[class^='wb_']::after,[class*=' wb_']::before,[class*=' wb_']::after,.wb_root *,.wb_mScrim *,.wb_mProgress *,[data-slot='main.conversation'] [data-wb-prefold],[data-slot='main.conversation'] [data-wb-open]>*,[data-slot='main.conversation'] button[data-turn-process],[data-slot='main.conversation'] [data-disclosure-row],[data-slot='main.conversation'] [data-disclosure-row] *,html[data-wb-mobile][data-wb-scene='compose'] dsh-tabbar a{animation:none!important;transition:none!important;scroll-behavior:auto!important;}.wb_mProgress::details-content{transition:none!important;}.wb_ldrSpin{transform:none;}.wb_fly{display:none;}}",
+			"@media (prefers-reduced-motion: reduce){[class^='wb_'],[class*=' wb_'],[class^='wb_']::before,[class^='wb_']::after,[class*=' wb_']::before,[class*=' wb_']::after,.wb_root *,.wb_mScrim *,.wb_mProgress *,[data-slot='main.conversation'] button[data-turn-process],[data-slot='main.conversation'] [data-disclosure-row],[data-slot='main.conversation'] [data-disclosure-row] *,html[data-wb-mobile][data-wb-scene='compose'] dsh-tabbar a{animation:none!important;transition:none!important;scroll-behavior:auto!important;}.wb_mProgress::details-content{transition:none!important;}.wb_ldrSpin{transform:none;}.wb_fly{display:none;}}",
 		].join("\n");
 
 		/* Mobile CSS: tokens/components adapted from screens/ds.css. */
@@ -2343,18 +2329,6 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				return (library === "articles" ? "文章库" : "知识库") + " · " + (WB_TOOL_LABELS[name] || name.replace(/_/g, " "));
 			}).replace(/\bget_skill\b/g, "读取技能规则");
 		}
-		function wbPrefoldSummary(t) {
-			var bits = ["装配台简报"];
-			var client = (t.match(/客户：([^\s——，。]+)/) || [])[1];
-			var q = (t.match(/共\s*(\d+)\s*条/) || [])[1];
-			var arts = 0, mm = t.match(/写\s*(\d+)\s*篇/g) || [];
-			for (var k = 0; k < mm.length; k++) arts += parseInt(mm[k].replace(/\D/g, ""), 10) || 0;
-			if (client) bits.push(client);
-			if (q) bits.push(q + " 条问句");
-			if (arts) bits.push("共 " + arts + " 篇");
-			bits.push("点击查看全文");
-			return bits.join(" · ");
-		}
 		function wbConvAttr(el, name, value) {
 			if (value === null) {
 				if (el.hasAttribute(name)) el.removeAttribute(name);
@@ -2370,9 +2344,6 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			if (slot) wbConvAttr(slot, "data-wb-running", null);
 			if (ldr.parentNode) ldr.parentNode.removeChild(ldr);
 		}
-		function wbConvStatusRow(el) {
-			return !!el && ((el.classList && el.classList.contains("wb_ldr")) || (el.getAttribute && el.getAttribute("role") === "status"));
-		}
 		function wbConvInside(root, node) {
 			for (var n = node; n; n = n.parentNode) if (n === root) return true;
 			return false;
@@ -2381,61 +2352,13 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			var root = document.querySelector("[data-slot='main.conversation']");
 			if (previousLoader && (!root || !wbConvInside(root, previousLoader))) wbRemoveLoader(previousLoader);
 			if (!root) return null;
-			var items = root.querySelectorAll("[data-chat-anchor-key]"), liveTails = [];
-			for (var i = items.length - 1; i >= 0; i--) {
-				(function (el) {
-					var head = el.querySelector(":scope > .wb_prefoldHead");
-					var t = Array.prototype.filter.call(el.childNodes, function (node) { return node !== head; })
-						.map(function (node) { return node.textContent || ""; }).join("").trim();
-					if (!el.hasAttribute("data-wb-prefold")) {
-						if (el.querySelector("[data-wb-prefold]") || t.indexOf("【装配台预填") !== 0) return;
-					}
-					/* The host can split one message into sibling blocks. Include those
-					 * in both the summary and the fold, stopping at the next anchor. */
-					var tails = [], sibs = el.parentElement ? el.parentElement.children : [];
-					var sidx = Array.prototype.indexOf.call(sibs, el);
-					for (var y = sidx + 1; sidx > -1 && y < sibs.length; y++) {
-						var tail = sibs[y];
-						if (tail.hasAttribute("data-chat-anchor-key") || tail.querySelector("[data-chat-anchor-key]")) break;
-						/* Run-status rows (host TurnStatus, our .wb_ldr) follow the latest message in the
-						 * real harness column; they are never part of the injected prompt. */
-						if (wbConvStatusRow(tail)) break;
-						tails.push(tail);
-						liveTails.push(tail);
-						t += "\n" + (tail.textContent || "");
-					}
-					wbConvAttr(el, "data-wb-prefold", "1");
-					if (!head) {
-						head = document.createElement("button");
-						head.type = "button"; head.className = "wb_prefoldHead";
-						["wb_pfT", "wb_pfTag", "wb_pfC"].forEach(function (name) {
-							var span = document.createElement("span"); span.className = name; head.appendChild(span);
-						});
-						head.addEventListener("click", function () {
-							head._wbUpdate(function () {
-								wbConvAttr(el, "data-wb-open", el.hasAttribute("data-wb-open") ? null : "1");
-								head._wbSync();
-							});
-						});
-						el.insertBefore(head, el.firstChild);
-					}
-					/* Refresh the closure when React replaces message fragments. */
-					head._wbUpdate = update;
-					head._wbSync = function () {
-						var open = el.hasAttribute("data-wb-open");
-						tails.forEach(function (tail) { wbConvAttr(tail, "data-wb-pref-tail", open ? null : "1"); });
-						wbConvAttr(head, "aria-expanded", open ? "true" : "false");
-						wbConvText(head.children[0], wbPrefoldSummary(t));
-						wbConvText(head.children[1], "已注入");
-						wbConvText(head.children[2], open ? "▴" : "▾");
-					};
-					head._wbSync();
-				})(items[i]);
-			}
-			/* Tails are recomputed every tick: once the host inserts the reply between the prompt and
-			 * a former tail, that node must be shown again (stale marks hid the run status row). */
-			var marked = root.querySelectorAll("[data-wb-pref-tail]");
-			for (var m = 0; m < marked.length; m++) if (liveTails.indexOf(marked[m]) === -1) wbConvAttr(marked[m], "data-wb-pref-tail", null);
+			/* Remove old-version fold decorations inside update(), without touching clean nodes. */
+			var heads = root.querySelectorAll(".wb_prefoldHead");
+			for (var i = 0; i < heads.length; i++) heads[i].parentNode.removeChild(heads[i]);
+			["data-wb-prefold", "data-wb-open", "data-wb-pref-tail"].forEach(function (name) {
+				var marked = root.querySelectorAll("[" + name + "]");
+				for (var m = 0; m < marked.length; m++) wbConvAttr(marked[m], name, null);
+			});
 			var prows = root.querySelectorAll("[data-disclosure-row]");
 			for (var p = 0; p < prows.length; p++) {
 				var ttl = prows[p].children[1];
@@ -2475,10 +2398,14 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			} else if (!running && ldr) { wbRemoveLoader(ldr); ldr = null; }
 			if (ldr && (ldr.parentNode !== flow || flow.children[flow.children.length - 1] !== ldr)) flow.appendChild(ldr);
 			if(window.dshUnified && ldr){clearInterval(ldr._wbLi);wbConvText(ldr.querySelector(".wb_ldrT"), "Agent 正在码字");}
-			/* Preserve the raw tools in the injected prompt, including split tails. */
+			/* Preserve injected prompt text verbatim; cache by closest flow item for this tick only. */
+			var prefills = new Map();
 			var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false), tn;
 			while ((tn = walker.nextNode())) {
-				if (!tn.parentElement || tn.parentElement.closest("[data-wb-prefold],[data-wb-pref-tail]")) continue;
+				if (!tn.parentElement || tn.parentElement.closest(".wb_ldr")) continue;
+				var item = tn.parentElement.closest("[data-chat-anchor-key]");
+				if (item && !prefills.has(item)) prefills.set(item, (item.textContent || "").trim().indexOf("【装配台预填") === 0);
+				if (prefills.get(item)) continue;
 				var out = wbHumanizeToolNames(tn.data);
 				if (out !== tn.data) tn.data = out;
 			}
@@ -2489,10 +2416,10 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			if (window.__wbConversationCleanup) window.__wbConversationCleanup();
 			var queued = false, disposed = false, loader = null;
 			/* Never observe style/class: host layout and theme observers own those.
-			 * Disconnect around ALL writes (fold clicks and loader rotation too).
+			 * Disconnect around ALL writes (old-version cleanup and loader rotation too).
 			 * A microtask coalesces host mutations without waiting for first paint (~80ms). */
 			var options = { childList: true, subtree: true, characterData: true, attributes: true,
-				attributeFilter: ["data-chat-anchor-key", "data-disclosure-row", "data-wb-open", "aria-label", "title"] };
+				attributeFilter: ["data-chat-anchor-key", "data-disclosure-row", "aria-label", "title"] };
 			function update(write) {
 				if (disposed) return;
 				observer.disconnect();
