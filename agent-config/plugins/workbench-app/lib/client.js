@@ -3024,8 +3024,9 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			/* Only injected hooks: no materializing background sessions or private RPCs. */
 			function useWbRunStatus(props) {
 				var session = typeof props.useSession === 'function' ? props.useSession(function (s) { return s; }) : null;
-				var pending = typeof props.useSessionPendingInteraction === 'function' ? props.useSessionPendingInteraction() : null;
 				var id = props.sessionId, uid = wbNavRunState().uid;
+				/* Harness hook is a selector hook over Map<sessionId, interaction>; select a stable kind string. */
+				var pending = typeof props.useSessionPendingInteraction === 'function' ? props.useSessionPendingInteraction(function (m) { var v = m && typeof m.get === 'function' ? m.get(id) : null; return v && typeof v.kind === 'string' ? v.kind : null; }) : null;
 				React.useEffect(function () {
 					if (!id) return;
 					var state = wbNavRunState();

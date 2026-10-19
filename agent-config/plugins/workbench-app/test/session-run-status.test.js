@@ -193,7 +193,7 @@ test('injected current errors update live, clear on open, and a later failure ca
   const own = load(), { api } = own
   api.wbNavSnapshot({ byId: { s: idle }, current: 's' })
   let snapshot = { lastAgentError: null }, pending = null
-  const props = { sessionId: 's', useSession: select => select(snapshot), useSessionPendingInteraction: () => pending }
+  const props = { sessionId: 's', useSession: select => select(snapshot), useSessionPendingInteraction: select => select(new Map(pending ? [['s', typeof pending === 'string' ? { kind: pending } : pending]] : [])) }
   own.renderHooks(props)
   snapshot = { lastAgentError: 'failed' }
   own.renderHooks(props)
