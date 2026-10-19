@@ -90,26 +90,33 @@ window.__ModuleLoader__.load({
 			var label = heading[1].replace(/[ \t]+#+[ \t]*$/, '');
 			return wbNormalizeLabel(label) === wbNormalizeLabel(title) ? text.slice(heading[0].length).replace(/^[ \t]*\r?\n/, '') : text;
 		}
-		/* Shared desktop/mobile projection. S2 can supply attention/draftsPending
-		 * from its aggregate; S1 only reads facts already in this browser. */
+		/* Shared desktop/mobile projection of harness, aggregate and local unread facts. */
 		function wbRunStatus(input) {
 			input = input || {};
-			var summary = input.summary, batch = input.batch, session = input.snapshot;
+			var info = input.statusInfo || {}, summary = input.summary, batch = input.batch || info.batch, session = input.snapshot;
+			var draftsPending = info.drafts_pending === undefined ? input.draftsPending : info.drafts_pending;
 			function status(kind, tone, label, extra, unread) { return {kind:kind, tone:tone, label:label, extra:extra || '', unread:!!unread}; }
 			if (!summary) return status('idle', '', '');
 			var pending = input.pendingInteraction, kind = typeof pending === 'string' ? pending : pending && pending.kind;
 			if (['approval', 'question', 'plan-review'].includes(kind)) return status('attention', 'warn', '等你确认', '等你确认');
 			if (input.attention) return status('attention', 'warn', input.attention, input.attention);
+			var row = batch && (batch.records || []).find(function (r) { return r.status !== 'ok' && r.status !== 'failed'; });
+			var round = batch && Math.min(batch.rounds, Math.max(1, batch.round || (row && row.round) || batch.rounds));
+			if (batch && batch.status === 'running' && !summary.running && !input.batchDriven) {
+				return status('attention', 'warn', '待继续 第 ' + round + '/' + batch.rounds + ' 轮', '待继续 ' + round + '/' + batch.rounds);
+			}
 			if (summary.running) {
 				var extra = '';
 				if (batch && batch.status === 'running' && batch.rounds > 0) {
-					var row = (batch.records || []).find(function (r) { return r.status !== 'ok' && r.status !== 'failed'; });
-					extra = Math.min(batch.rounds, Math.max(1, batch.round || (row && row.round) || batch.rounds)) + '/' + batch.rounds + ' 轮';
+					extra = round + '/' + batch.rounds + ' 轮';
 				}
 				return status('running', 'klein', '写作中' + (extra ? ' ' + extra : ''), extra);
 			}
 			if (!input.failureRead && session && (session.lastAgentError || session.promptError)) return status('failed', 'bad', '失败 · 点开查看原因', '失败', !input.isCurrent);
-			if (input.draftsPending > 0) return status('review', 'warn', input.draftsPending + ' 篇草稿待审', input.draftsPending + ' 篇待审');
+			var batchFailed = batch && batch.status === 'failed_partial' && (batch.failed > 0 || (batch.records || []).some(function (r) { return r.status === 'failed'; }));
+			if (batchFailed && !input.batchFailureRead && !input.isCurrent) return status('failed', 'bad', '失败 · 点开查看原因', '失败', true);
+			if (draftsPending > 0) return status('review', 'warn', draftsPending + ' 篇草稿待审', draftsPending + ' 篇待审');
+			if (batchFailed) return status('idle', '', ''); // Acknowledged failures must not fall back to a green completion dot.
 			var finishedAt = input.unread && input.unread[input.id || summary.id];
 			if (!input.isCurrent && finishedAt) {
 				var time = new Date(finishedAt).toLocaleTimeString('zh-CN', {timeZone:'Asia/Shanghai', hour:'2-digit', minute:'2-digit', hour12:false});
@@ -146,6 +153,23 @@ window.__ModuleLoader__.load({
 		}
 		function wbWriteUnread(uid, unread) {
 			try { if (uid) localStorage.setItem('wb-unread-' + uid, JSON.stringify(unread)); } catch (e) { }
+		}
+		function wbReadBatchSeen(uid) {
+			var seen = Object.create(null);
+			try {
+				var saved = uid && JSON.parse(localStorage.getItem('wb-batch-seen-' + uid) || '{}');
+				if (saved && typeof saved === 'object' && !Array.isArray(saved)) Object.keys(saved).forEach(function (id) {
+					var item = saved[id];
+					if (item && typeof item.batchId === 'string' && Number.isFinite(item.at)) seen[id] = item;
+				});
+			} catch (e) { }
+			return seen;
+		}
+		function wbWriteBatchSeen(state) {
+			try { if (state.uid) localStorage.setItem('wb-batch-seen-' + state.uid, JSON.stringify(state.seenBatches)); } catch (e) { }
+		}
+		function wbBatchWasSeen(batch, seen) {
+			return !!(batch && seen && (seen.batchId === batch.id || (!seen.batchId && Date.parse(batch.savedAt) <= seen.at)));
 		}
 		function WbRunIndicator(p) {
 			return h('span', {className:'wb_runSlot' + (p.mobile ? ' wb_mStatus' : ''), 'aria-hidden':true},
@@ -1491,6 +1515,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			assignGroup: "/api/workbench/assign-client-group",
 			taskMeta: "/api/workbench/task-meta",
 			batch: "/api/workbench/batch",
+			sessionStatus: "/api/workbench/session-status",
 			taskStatus: "/api/workbench/task-status",
 			sessionClient: "/api/workbench/session-client",
 			drafts: "/api/workbench/drafts",
@@ -2624,11 +2649,14 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			var hint = wbBatchHint(Array.isArray(nodes) ? nodes : []);
 			try { hint = hint || sessionStorage.getItem("wb-batch-for-" + key) || ""; } catch (e) { }
 			var mounted = React.useRef(false);
+			seat.current.batchId = hint;
+			seat.current.driving = !!props.inputActions;
 			live.current = { snap: snap, session: session, props: props, key: key };
 			React.useEffect(function () {
 				mounted.current = true;
 				var active = true;
 				(wbBatchViews[key] || (wbBatchViews[key] = [])).push(seat.current);
+				wbNavEmit();
 				function alive() {
 					return active && mounted.current && live.current.key === key && wbBatchKey(props.sessionId) === key
 						&& (!live.current.session || live.current.session.sessionId === props.sessionId);
@@ -2950,7 +2978,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			 * "会话→客户"来自我们自己的映射表；新客户在装配台勾选即出现，
 			 * 不需要预先建任何组。绝不改动官方组件内部（历史教训：一改就崩）。 */
 			var WB_NAV_W = 330;
-			var wbNavState = { sessions: null, map: {}, q: "", open: {}, current: "", navW: 330, drawer: false, bindings: {}, customers: [], clientsReady: false, uid: "", renames: {}, renameErrors: {} };
+			var wbNavState = { sessions: null, map: {}, q: "", open: {}, current: "", navW: 330, drawer: false, bindings: {}, customers: [], clientsReady: false, uid: "", renames: {}, renameErrors: {}, statusInfo: Object.create(null) };
 			try {
 				var savedW = parseInt(localStorage.getItem(WB_KEY.navW) || "0", 10);
 				if (savedW >= 200 && savedW <= 480) wbNavState.navW = savedW;
@@ -2976,32 +3004,120 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			var wbFrameMo = null;
 			function wbNavEmit() { wbNavSubs.forEach(function (f) { try { f(); } catch (e) { } }); }
 			var wbRunState = null;
+			var wbNavStatusPoll = null;
 			function wbNavRunState() {
 				var uid = (window.dshUnified && window.dshUnified.store && window.dshUnified.store.state && window.dshUnified.store.state.uid) || wbNavState.uid || '';
-				if (!wbRunState || wbRunState.uid !== uid) wbRunState = {uid:uid, unread:wbReadUnread(uid), previous:Object.create(null), observed:Object.create(null), readErrors:Object.create(null)};
+				if (!wbRunState || wbRunState.uid !== uid) {
+					wbNavState.statusInfo = Object.create(null);
+					wbRunState = {uid:uid, unread:wbReadUnread(uid), previous:Object.create(null), observed:Object.create(null), readErrors:Object.create(null), seenBatches:wbReadBatchSeen(uid)};
+				}
 				return wbRunState;
 			}
 			function wbRunErrorKey(snapshot) { return JSON.stringify([snapshot && snapshot.lastAgentError || null, snapshot && snapshot.promptError || null]); }
+			function wbNavBatch(id) {
+				var local = wbBatchFor(id), info = wbNavState.statusInfo[id], remote = info && info.batch;
+				// A poll can arrive after a local relay save; prefer the newer persisted version.
+				return local && (!remote || String(local.savedAt || '') >= String(remote.savedAt || '')) ? local : remote;
+			}
 			function wbNavSelect(id) {
 				var state = wbNavRunState(), observed = state.observed[id];
 				wbNavState.current = id;
 				delete state.unread[id];
 				state.readErrors[id] = wbRunErrorKey(observed && observed.snapshot);
+				if (id) {
+					var batch = wbNavBatch(id);
+					state.seenBatches[id] = {batchId:batch && batch.status === 'failed_partial' ? batch.id : '', at:Date.now()};
+					wbWriteBatchSeen(state);
+				}
 				wbWriteUnread(state.uid, state.unread);
 				wbNavEmit();
 			}
 			function wbNavStatus(id) {
 				var state = wbNavRunState(), observed = state.observed[id] || {};
+				var batch = wbNavBatch(id), current = id === wbNavState.current;
 				return wbRunStatus({id:id, summary:wbNavState.sessions && wbNavState.sessions[id], snapshot:observed.snapshot,
 					pendingInteraction:observed.pending, failureRead:state.readErrors[id] === wbRunErrorKey(observed.snapshot),
-					unread:state.unread, isCurrent:id === wbNavState.current, batch:wbBatchFor(id)});
+					unread:state.unread, isCurrent:current, batch:batch, statusInfo:wbNavState.statusInfo[id],
+					batchFailureRead:wbBatchWasSeen(batch, state.seenBatches[id]),
+					batchDriven:current && batch && (wbBatchViews[wbBatchKey(id)] || []).some(function (view) { return view.batchId === batch.id && view.driving; })});
+			}
+			function wbNavRememberBatch(id) {
+				var state = wbNavRunState(), batch = wbNavBatch(id), seen = state.seenBatches[id];
+				if (batch && batch.status === 'failed_partial' && (!seen || seen.batchId !== batch.id)
+					&& (id === wbNavState.current || wbBatchWasSeen(batch, seen))) {
+					state.seenBatches[id] = {batchId:batch.id, at:Date.now()};
+					wbWriteBatchSeen(state);
+				}
+			}
+			function wbNavBatchChanged() {
+				wbNavRememberBatch(wbNavState.current);
+				wbNavEmit();
+			}
+			function wbNavStatusIds() {
+				return Object.keys(wbNavState.map).filter(function (id) {
+					var rec = wbNavState.map[id], name = rec && rec.client || '其他';
+					var title = wbNavState.renames[id] ? wbNavState.renames[id].title : wbSessionTitle(rec, wbNavState.sessions && wbNavState.sessions[id]);
+					return !wbNavState.q || title.indexOf(wbNavState.q) >= 0 || name.indexOf(wbNavState.q) >= 0;
+				}).sort();
+			}
+			function wbNavPollSessionStatus() {
+				var disposed = false, busy = false, again = false, timer = null, signature = '';
+				function visible() { return !disposed && document.visibilityState === 'visible'; }
+				async function refresh() {
+					if (!visible()) return;
+					if (busy) { again = true; return; }
+					busy = true;
+					var state = wbNavRunState(), ids = wbNavStatusIds();
+					try {
+						for (var i = 0; i < ids.length && visible() && state === wbNavRunState(); i += 50) {
+							var chunk = ids.slice(i, i + 50);
+							try {
+								var response = await fetch(WB_API.sessionStatus + '?ids=' + encodeURIComponent(chunk.join(',')), {method:'GET', headers:{accept:'application/json'}});
+								var body = await response.json();
+								if (!visible() || state !== wbNavRunState()) break;
+								if (!body.ok || !body.items || typeof body.items !== 'object') continue;
+								var listed = wbNavStatusIds();
+								chunk.forEach(function (id) {
+									delete wbNavState.statusInfo[id]; // Omitted ACL records must also disappear locally.
+									if (listed.includes(id) && Object.prototype.hasOwnProperty.call(body.items, id)) wbNavState.statusInfo[id] = body.items[id];
+									wbNavRememberBatch(id);
+								});
+								wbNavBatchChanged();
+							} catch (e) { /* Keep the last successful projection until the next visible poll. */ }
+						}
+					} finally {
+						busy = false;
+						if (again) { again = false; refresh(); }
+					}
+				}
+				function changed() {
+					var next = JSON.stringify([wbNavRunState().uid, wbNavStatusIds()]);
+					if (next !== signature) { signature = next; refresh(); }
+				}
+				function visibility() {
+					if (timer !== null) clearInterval(timer);
+					timer = null;
+					if (visible()) { refresh(); timer = setInterval(refresh, 10000); }
+				}
+				signature = JSON.stringify([wbNavRunState().uid, wbNavStatusIds()]);
+				wbNavSubs.push(changed);
+				document.addEventListener('visibilitychange', visibility);
+				visibility();
+				return {refresh:refresh, dispose:function () {
+					disposed = true;
+					if (timer !== null) clearInterval(timer);
+					document.removeEventListener('visibilitychange', visibility);
+					wbNavSubs = wbNavSubs.filter(function (fn) { return fn !== changed; });
+				}};
 			}
 			function wbNavSnapshot(snapshot) {
 				if (!snapshot || (snapshot.phase && snapshot.phase !== 'ready')) return;
 				wbNavState.sessions = snapshot.byId || {};
 				if ('current' in snapshot && (snapshot.current || '') !== wbNavState.current) wbNavSelect(snapshot.current || '');
 				var state = wbNavRunState(), next = wbUnreadNext(state, wbNavState.sessions, wbNavState.current, Date.now());
+				var finished = false;
 				Object.keys(next.previous).forEach(function (id) {
+					if (state.previous[id] && state.previous[id].running && !next.previous[id].running) finished = true;
 					if (next.previous[id].running && (!state.previous[id] || !state.previous[id].running)) {
 						delete state.readErrors[id];
 						if (id !== wbNavState.current) delete state.observed[id];
@@ -3010,6 +3126,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				if (JSON.stringify(next.unread) !== JSON.stringify(state.unread)) wbWriteUnread(state.uid, next.unread);
 				state.unread = next.unread; state.previous = next.previous;
 				wbNavEmit();
+				if (finished && wbNavStatusPoll) wbNavStatusPoll.refresh();
 			}
 			function wbNavSubscribe(ctx) {
 				try {
@@ -3229,13 +3346,14 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				}
 				React.useEffect(function () {
 					var unsubscribe = wbNavSubscribe(ctx);
-					window.addEventListener('wb:batch-change', wbNavEmit);
+					window.addEventListener('wb:batch-change', wbNavBatchChanged);
+					var statusPoll = wbNavStatusPoll = wbNavPollSessionStatus();
 					wbNavRefresh();
 					var stop = false;
 					function tick() { if (!stop) { wbNavRefresh(); wbNavHideOfficial(); } }
 					var timerId = setInterval(tick, 4000);
 					wbNavHideOfficial();
-					return function () { stop = true; clearInterval(timerId); unsubscribe(); window.removeEventListener('wb:batch-change', wbNavEmit); };
+					return function () { stop = true; clearInterval(timerId); unsubscribe(); statusPoll.dispose(); if (wbNavStatusPoll === statusPoll) wbNavStatusPoll = null; window.removeEventListener('wb:batch-change', wbNavBatchChanged); };
 				}, [ctx]);
 				var q = wbNavState.q;
 				var map = wbNavState.map;
