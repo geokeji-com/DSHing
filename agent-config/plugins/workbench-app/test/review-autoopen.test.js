@@ -72,8 +72,8 @@ test('task-bar drafts fetch depends on writes and manual refresh, never chatSnap
 })
 
 // Exercise actual components with persistent hooks, effect cleanup and a fake clock.
-function harness({ component = 'TaskBar', binding, mapped, unified = false, openFailures = 0, fetchBody, mobile = false } = {}) {
-  let clientApi, cursor = 0, dirty = false, now = 0, timerId = 0
+function harness({ component = 'TaskBar', binding, mapped, unified = false, openFailures = 0, fetchBody, mobile = false, tabParams = { client: '客户 A' } } = {}) {
+  let clientApi, tree, cursor = 0, dirty = false, now = 0, timerId = 0
   let nodes = [user], running = true, sessionId = 'session-a'
   const hooks = [], pending = [], timers = new Map(), listeners = new Map()
   const requests = [], opens = [], events = [], warnings = []
@@ -125,7 +125,7 @@ function harness({ component = 'TaskBar', binding, mapped, unified = false, open
   function render(next = {}) {
     nodes = next.nodes ?? nodes; running = next.running ?? running; sessionId = next.sessionId ?? sessionId
     cursor = 0; dirty = false
-    clientApi[component]({ sessionId, useChat: select => select({ legacy: { nodes, partial: running ? {} : null, runningCalls: [] } }), useTabInfo: () => ({ navigation: { params: { client: '客户 A' } } }) })
+    tree = clientApi[component]({ sessionId, useChat: select => select({ legacy: { nodes, partial: running ? {} : null, runningCalls: [] } }), useTabInfo: () => ({ navigation: { params: tabParams } }) })
     pending.splice(0).forEach(fn => fn())
   }
   async function settle() {
@@ -141,6 +141,8 @@ function harness({ component = 'TaskBar', binding, mapped, unified = false, open
     now = until
   }
   return { api: clientApi, render, settle, advance, requests, opens, events, warnings, timers,
+    get tree() { return tree },
+    batchChanged() { window.dispatchEvent(new TestEvent('wb:batch-change')) },
     refresh() { window.dispatchEvent(new TestEvent('wb:review-refresh')) },
     dispose() { hooks.forEach(hook => hook.cleanup?.()) },
   }
@@ -276,5 +278,42 @@ test('review includes every persisted successful batch title even when chat hist
   ] } }
   f.render({ nodes: [], running: false }); await f.settle()
   assert.deepEqual(Array.from(f.api.WB_PICK.drafts, d => d.title), ['第一篇', '第三篇'])
+  f.dispose()
+})
+
+test('persisted batch changes update progress without new chat writes or draft fetches', async () => {
+  const f = harness({ fetchBody: async url => url.startsWith('/api/workbench/task-meta?')
+    ? { ok: true, client: '客户 A', rounds: 12, skills: ['a×12'] }
+    : { ok: true, drafts: [], library: [] } })
+  const batch = { rounds: 12, records: [{ status: 'ok', title: '第一篇' }] }
+  f.api.wbBatches[f.api.wbBatchKey('session-a')] = { batch }
+  f.render({ nodes: [{ kind: 'user', content: [{ type: 'text', text: '[任务编号：wbtm-test]' }] }], running: false })
+  await f.settle()
+  assert.match(JSON.stringify(f.tree), /写作中 · 已写 1\/12 篇（草稿区待审）/)
+  const requests = f.requests.length
+  batch.records.push({ status: 'ok', title: '第二篇' })
+  f.batchChanged(); await f.settle()
+  assert.match(JSON.stringify(f.tree), /写作中 · 已写 2\/12 篇（草稿区待审）/)
+  assert.equal(f.requests.length, requests)
+  f.dispose()
+})
+
+test('mobile review passes the existing task-meta response to its progress header', async () => {
+  const meta = { ok: true, client: '客户 A', rounds: 12, skills: ['a×12'], savedAt: '2026-10-19' }
+  const f = harness({ component: 'ReviewTabBody', mobile: true,
+    tabParams: { client: '客户 A', meta: 'wbtm-test' },
+    fetchBody: async url => url.startsWith('/api/workbench/task-meta?') ? meta : { ok: true, drafts: [], library: [] } })
+  f.render(); await f.settle()
+  assert.equal(f.tree.props.meta, meta)
+  f.dispose()
+})
+
+test('review retains earlier session drafts alongside successful current-batch titles', async () => {
+  const f = harness({ component: 'ReviewTabBody', fetchBody: async url => url.startsWith('/api/workbench/drafts?')
+    ? { ok: true, drafts: [{ title: '旧批次' }, { title: '本批次' }, { title: '其他会话' }], library: [] }
+    : { ok: true } })
+  f.api.wbBatches[f.api.wbBatchKey('session-a')] = { batch: { rounds: 2, records: [{ status: 'ok', title: '本批次' }] } }
+  f.render({ nodes: [user, write('旧批次')], running: false }); await f.settle()
+  assert.deepEqual(Array.from(f.api.WB_PICK.drafts, d => d.title), ['旧批次', '本批次'])
   f.dispose()
 })

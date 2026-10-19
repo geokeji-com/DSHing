@@ -397,7 +397,7 @@ window.__ModuleLoader__.load({
 			if(!mobile || !p.inputActions) return null;
 			return h('div',{className:'wb_mQuick'},['再写 1 篇','换个语气'].map(function(text){return h('button',{type:'button',className:'wb_mChip',key:text,onClick:function(){p.inputActions.setDraft(text);var el=document.querySelector('[data-slot="conversation.composer.bar"] [contenteditable]');if(el)el.focus();}},text);}));
 		}
-		function wbMobileProgress(nodes, legacy, drafts, done) {
+		function wbMobileProgress(nodes, legacy, drafts, done, meta, batch) {
 			// Last successful todo_write is authoritative, including an empty list.
 			for (var i=nodes.length-1;i>=0;i--) {
 				var node=nodes[i];
@@ -408,11 +408,10 @@ window.__ModuleLoader__.load({
 					break;
 				}
 			}
-			var titles={};
-			nodes.forEach(function(node){if(node.kind==='tool-result'&&node.call&&WB_WRITE_TOOL_RE.test(node.call.name)&&node.isError!==true){try{var args=JSON.parse(node.call.argsRaw||'{}');var title=String(args.title||args.file||'').replace(/\.md$/i,'');if(title)titles[title]=true;}catch(e){}}});
-			var count=Object.keys(titles).length, confirmed=Object.keys(done||{}).filter(function(t){return titles[t]&&done[t];}).length;
+			var titles=wbWrittenTitles(nodes), progress=wbWriteProgress(meta,batch,titles);
+			var confirmed=Object.keys(done||{}).filter(function(t){return titles[t]&&done[t];}).length;
 			var running=!!(legacy&&(legacy.partial||(legacy.runningCalls&&legacy.runningCalls.length)));
-			var rows=[[running?'run':count?'done':'wait',running?'写作中':count?'本会话已写 '+count+' 篇文章':'已停止，尚无文章产物']];
+			var rows=[progress.done>0?wbWriteProgressRow(progress):[running?'run':'wait',running?'写作中':'已停止，尚无文章产物']];
 			var pending=(drafts||[]).filter(function(d){return titles[d.title]&&!(done&&done[d.title]);}).length;
 			if(pending)rows.push(['wait',pending+' 篇草稿待审核']);
 			if(confirmed)rows.push(['done','已入库 '+confirmed+' 篇']);
@@ -424,7 +423,8 @@ window.__ModuleLoader__.load({
 			useWbChatLayout(chatRef);
 			var menu=React.useState(false), preset=React.useState(false), rename=React.useState(false), newTitle=React.useState(""), renameError=React.useState(""), renaming=React.useState(false);
 			useWbPickTick();
-			var rows=wbMobileProgress(p.nodes||[],p.legacy,WB_PICK.drafts,WB_PICK.done);
+			var batch=useWbBatch(p.sessionId);
+			var rows=wbMobileProgress(p.nodes||[],p.legacy,WB_PICK.drafts,WB_PICK.done,p.meta,batch);
 			var meta=p.meta||{}, binding=wbNavState.bindings[p.sessionId]||{};
 			var title=(wbNavState.renames[p.sessionId]&&wbNavState.renames[p.sessionId].title)||wbSessionTitle(meta, wbNavState.sessions && wbNavState.sessions[p.sessionId] || {displayTitle:p.title}, binding);
 			async function saveTitle(){
@@ -2398,10 +2398,52 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			return JSON.stringify([uid, sessionId]);
 		}
 		function wbBatchFor(sessionId) { var entry = wbBatches[wbBatchKey(sessionId)]; return entry && entry.batch; }
+		function useWbBatch(sessionId) {
+			var tick = React.useState(0);
+			React.useEffect(function () {
+				function changed() { tick[1](function (n) { return n + 1; }); }
+				window.addEventListener("wb:batch-change", changed);
+				return function () { window.removeEventListener("wb:batch-change", changed); };
+			}, [sessionId]);
+			return wbBatchFor(sessionId);
+		}
 		function wbBatchEmit() { window.dispatchEvent(new Event("wb:batch-change")); }
 		function wbBatchTitles(batch, titles) {
 			if (batch) batch.records.forEach(function (r) { if (r.status === "ok" && r.title) titles[r.title] = true; });
 			return titles;
+		}
+		function wbRequestedTotal(meta, batch) {
+			var rounds = Number(batch ? batch.rounds : meta && meta.rounds);
+			if (Number.isFinite(rounds) && rounds >= 1) return rounds;
+			if (batch) return 0;
+			return ((meta && meta.skills) || []).reduce(function (total, skill) {
+				var count = String(skill).match(/×\s*(\d+)\s*$/);
+				return total + (count ? Number(count[1]) : 1);
+			}, 0);
+		}
+		function wbWrittenTitles(nodes) {
+			var titles = Object.create(null);
+			(Array.isArray(nodes) ? nodes : []).forEach(function (node) {
+				if (!wbIsSuccessfulWrite(node)) return;
+				try {
+					var args = JSON.parse(node.call.argsRaw || "{}");
+					var title = String(args.title || args.file || "").replace(/\.md$/i, "");
+					if (title) titles[title] = true;
+				} catch (e) { }
+			});
+			return titles;
+		}
+		function wbWriteProgress(meta, batch, titles) {
+			// Progress belongs to the current batch; review still keeps all session titles.
+			var total = wbRequestedTotal(meta, batch);
+			var done = Object.keys(batch ? wbBatchTitles(batch, Object.create(null)) : titles || {}).length;
+			if (total > 0) done = Math.min(done, total);
+			return { total: total, done: done, finished: total > 0 && done >= total };
+		}
+		function wbWriteProgressRow(progress) {
+			var scope = progress.total > 0 ? progress.done + "/" + progress.total : String(progress.done);
+			return [progress.finished ? "done" : "run",
+				(progress.finished ? "草稿已写完：" : "写作中 · 已写 ") + scope + " 篇（草稿区待审）"];
 		}
 		async function wbBatchPost(body) {
 			var response = await fetch(WB_API.batch, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
@@ -3273,20 +3315,8 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				/* 本会话产物归属：数消息流里成功的 write_article 调用（argsRaw 带 title）。
 				 * 文件时刻会串会话（别的会话后入库也会晚于本任务发起），
 				 * 消息流留痕才是真正的会话归属。 */
-				var writeTitles = {}, writeCount = 0;
-				if (Array.isArray(legacyNodes)) {
-					for (var wsi = 0; wsi < legacyNodes.length; wsi++) {
-						var wsn = legacyNodes[wsi];
-						if (wbIsSuccessfulWrite(wsn)) {
-							writeCount++;
-							try {
-								var wargs = JSON.parse(wsn.call.argsRaw || "{}");
-								var wtitle = String(wargs.title || wargs.file || "").replace(/\.md$/i, "");
-								if (wtitle !== "") writeTitles[wtitle] = true;
-							} catch (e) { }
-						}
-					}
-				}
+				var writeTitles = wbWrittenTitles(legacyNodes);
+				var writeCount = Array.isArray(legacyNodes) ? legacyNodes.filter(wbIsSuccessfulWrite).length : 0;
 				var reviewBatch = wbBatchFor(sessionId);
 				wbBatchTitles(reviewBatch, writeTitles);
 				if (mobile || reviewBatch) { writeCount = 0; for (var wtk in writeTitles) writeCount++; }
@@ -3559,12 +3589,12 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					});
 				};
 				React.useEffect(function () {
-					if (metaId === "") { setL(function (p) { return Object.assign({}, p, { at: "" }); }); return; }
+					if (metaId === "") { setL(function (p) { return Object.assign({}, p, { at: "", meta: null }); }); return; }
 					var alive = true;
 					fetch(WB_API.taskMeta + "?id=" + encodeURIComponent(metaId), { headers: { accept: "application/json" } })
 						.then(function (r) { return r.json(); })
 						.then(function (b) {
-							if (alive && b && typeof b.savedAt === "string") setL(function (p) { return Object.assign({}, p, { at: b.savedAt }); });
+							if (alive && b) setL(function (p) { return Object.assign({}, p, { at: typeof b.savedAt === "string" ? b.savedAt : p.at, meta: b }); });
 						})
 						.catch(function () { });
 					return function () { alive = false; };
@@ -4040,6 +4070,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				var sessionId = props.sessionId;
 				var useSessions = props.useSessions;
 				var useChat = props.useChat;
+				var currentBatch = useWbBatch(sessionId);
 				var state = React.useState({ status: "idle", meta: null, net: "-" });
 				var meta = state[0].meta, net = state[0].net, setState = state[1];
 				var title = "";
@@ -4066,21 +4097,15 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				else if (legacyNodes && typeof legacyNodes.values === "function") list = legacyNodes.values();
 				else if (legacyNodes && typeof legacyNodes.forEach === "function") { legacyNodes.forEach(function (v) { list.push(v); }); }
 				/* 元数据加载前就统计成功写入；turnKey 用 user 消息数，重写同篇也计数。 */
-				var writeCount = 0, turnKey = 0, turnWriteCount = 0, writeTitles = {};
+				var writeCount = 0, turnKey = 0, turnWriteCount = 0, writeTitles = wbWrittenTitles(list);
 				for (var wi = 0; wi < list.length; wi++) {
 					var tn = list[wi];
 					if (tn && tn.kind === "user") { turnKey++; turnWriteCount = 0; }
 					if (wbIsSuccessfulWrite(tn)) {
 						writeCount++; turnWriteCount++;
-						try {
-							var targs = JSON.parse(tn.call.argsRaw || "{}");
-							var ttitle = String(targs.title || targs.file || "").replace(/\.md$/i, "");
-							if (ttitle !== "") writeTitles[ttitle] = true;
-						} catch (e) { }
 					}
 				}
-				wbBatchTitles(wbBatchFor(sessionId), writeTitles);
-				var writeDone = writeCount;
+				wbBatchTitles(currentBatch, writeTitles);
 				var running = !!(chatSnap && chatSnap.legacy && (chatSnap.legacy.partial != null
 					|| (chatSnap.legacy.runningCalls && chatSnap.legacy.runningCalls.length > 0)));
 				var binding = wbNavState.bindings[sessionId] || {}, mapped = wbNavState.map[sessionId] || {};
@@ -4246,14 +4271,11 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				var wsText = (st.ws && st.ws.exists) ? "工作区共 " + st.ws.files + " 个文件" + (st.ws.recent > 0 ? "（本任务新增 " + st.ws.recent + "）" : "") : "暂无";
 				var libText = (st.lib && st.lib.exists) ? "文章库共 " + st.lib.files + " 篇" + (st.lib.recent > 0 ? "（本任务新增 " + st.lib.recent + "）" : "") : "暂无";
 				var subRows = subsText === "" ? [] : subsText.split("§");
-				var skillTotal = (meta.skills || []).length;
+				var progress = wbWriteProgress(meta, currentBatch, writeTitles);
 				/* 任务清单样式的行：[状态, 文本] —— done=绿勾，run=进行中，wait=待办 */
 				var taskRows = [];
-				if (writeDone > 0) {
-					var scopeTxt = skillTotal > 0 ? writeDone + "/" + skillTotal : String(writeDone);
-					var finished = skillTotal > 0 && writeDone >= skillTotal;
-					taskRows.push([finished ? "done" : "run",
-						(finished ? "草稿已写完：" : "写作中 · 已写 ") + scopeTxt + " 篇（草稿区待审）"]);
+				if (progress.done > 0) {
+					taskRows.push(wbWriteProgressRow(progress));
 				} else if (chatSnap && chatSnap.legacy
 					&& (chatSnap.legacy.partial !== null
 						|| (chatSnap.legacy.runningCalls && chatSnap.legacy.runningCalls.length > 0))) {
@@ -5837,6 +5859,8 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 
 		exports.inject = ["slots", "layout", "sidebarRight", "sidebarRightTabs", "sessions", "uiWorkspace"];
 		exports.apply = apply;
+		exports.wbRequestedTotal = wbRequestedTotal;
+		exports.wbWriteProgress = wbWriteProgress;
 		/* Small pure helpers are exported for the browser-package contract tests. */
 		exports.wbUseUnifiedContext = useUnifiedContext;
 		exports.UnifiedReviewPortal = UnifiedReviewPortal;
