@@ -4838,7 +4838,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				}, [sessionId]);
 				React.useEffect(function () {
 					if (WB_MOBILE.matches || window.dshUnified || sessionId === undefined || sessionId === null) return;
-					var view = pinViewRef.current, timer = null, attempts = 0, cancelled = false, checking = false;
+					var view = pinViewRef.current, timer = null, attempts = 0, opened = 0, cancelled = false, checking = false;
 					function check() {
 						if (cancelled || checking) return;
 						timer = null;
@@ -4852,7 +4852,10 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 							if (step.action === "none") return;
 							if (step.action === "open") {
 								if (!ctrl || typeof ctrl.openTab !== "function") throw new Error(error);
+								/* At most two accepted opens per trigger: a surface that never reports the tab must not be re-opened in a loop. */
+								if (opened >= 2) { console.warn("[dsh-workbench] 审核侧栏打开后未显示，本次不再重试"); return; }
 								ctrl.openTab("wb-review", { params: autoRef.current.target });
+								opened++;
 							}
 						} catch (e) { error = e; }
 						finally { checking = false; }

@@ -397,10 +397,10 @@ test('delayed open commits stay unconfirmed and retry; only a committed tab can 
   f.dispose()
 })
 
-test('opens that never commit also exhaust the bounded verification loop', () => {
+test('opens that never commit are capped at two per trigger (no open loop)', () => {
   const f = harness({ commitOpens: false })
   f.render({ nodes: [user, write()] }); f.advance(20000)
-  assert.equal(f.opens.length, 40)
+  assert.equal(f.opens.length, 2)
   assert.equal(f.warnings.length, 1)
   assert.equal(f.timers.size, 0)
   f.dispose()
