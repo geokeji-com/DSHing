@@ -45,6 +45,10 @@ const ARTICLES_PATH = '/api/workbench/articles'
 const MCP_INFO_PATH = '/api/workbench/mcp'
 const TASK_META_PATH = '/api/workbench/task-meta'
 const BATCH_PATH = '/api/workbench/batch'
+const SESSION_STATUS_PATH = '/api/workbench/session-status'
+// create() runs per request; keep read-only Support results across handler instances.
+// Context and caller scope are part of the cache boundary, never a source of grants.
+const sessionStatusDraftCache = new WeakMap()
 // Test overrides are resolved at use time; production storage stays in place.
 const taskMetaDir = () => process.env.DSH_WORKBENCH_META_DIR || '/home/dsh/.dsh/workbench-meta'
 const TASK_STATUS_PATH = '/api/workbench/task-status'
@@ -778,6 +782,43 @@ function visibleBatch(scope, batch) {
   return batch && visibleRecord(scope, batch) && (!scope.cloud || (scope.uid && batch.owner_uid === scope.uid))
 }
 
+function sessionStatusIds(params) {
+  const values = params.getAll('ids')
+  const ids = values.length === 1 ? values[0].split(',') : []
+  if (!ids.length || ids.length > 50 || ids.some(id => !/^[a-zA-Z0-9_-]{1,128}$/.test(id))) return null
+  return [...new Set(ids)]
+}
+
+/** Same latest-visible selection as the single-session batch route, scanned once. */
+function latestSessionBatches(scope, ids) {
+  const wanted = new Set(ids), latest = new Map()
+  let files = []
+  try { files = readdirSync(batchDir()) } catch { /* no batches yet */ }
+  for (const file of files) {
+    if (!file.endsWith('.json')) continue
+    const batch = readBatch(file.slice(0, -5))
+    if (!visibleBatch(scope, batch) || !wanted.has(batch.session_id)) continue
+    const previous = latest.get(batch.session_id)
+    if (!previous || String(batch.savedAt || '').localeCompare(String(previous.savedAt || '')) > 0) latest.set(batch.session_id, batch)
+  }
+  return latest
+}
+
+function sessionStatusItem(batch, merged) {
+  if (!batch) return { batch: null, drafts_pending: null, finished_at: null }
+  const records = Array.isArray(batch.records) ? batch.records : []
+  const next = records.find(row => row.status !== 'ok' && row.status !== 'failed')
+  const terminal = ['done', 'failed_partial', 'stopped'].includes(batch.status)
+  const pending = merged && new Set(merged.drafts.map(row => row.title).filter(title => !merged.library.includes(title)))
+  return {
+    batch: { id: batch.id, status: batch.status, round: next ? next.round : batch.rounds,
+      rounds: batch.rounds, failed: records.filter(row => row.status === 'failed').length,
+      review_opened: !!batch.review_opened, savedAt: batch.savedAt || null },
+    drafts_pending: pending ? records.filter(row => row.status === 'ok' && pending.has(row.title)).length : null,
+    finished_at: terminal ? batch.savedAt || null : null,
+  }
+}
+
 /**
  * 确认入库绑死客户：优先 session-client 索引，其次 task-meta。
  * body 可带 session_id / meta_id / client_key / client。
@@ -887,6 +928,8 @@ export {
   resolveBoundClientForConfirm,
   assertConfirmClientMatch,
   readTaskMetaRecord,
+  sessionStatusIds,
+  sessionStatusItem,
 }
 
 /**
@@ -1429,13 +1472,7 @@ export function create(ctx, config) {
         const id = url.searchParams.get('id') || ''
         const session = url.searchParams.get('session_id') || ''
         let batch = id ? readBatch(id) : null
-        if (!id && session) {
-          let files = []
-          try { files = readdirSync(batchDir()) } catch { /* no batches yet */ }
-          batch = files.filter(file => file.endsWith('.json')).map(file => readBatch(file.slice(0, -5)))
-            .filter(item => visibleBatch(scope, item) && item.session_id === session)
-            .sort((a, b) => b.savedAt.localeCompare(a.savedAt))[0]
-        }
+        if (!id && session) batch = latestSessionBatches(scope, [session]).get(session)
         const binding = batch && ownEntry(readSessionClientIndex(), batch.session_id)
         if (!visibleBatch(scope, batch) || (session && batch.session_id !== session)
           || (binding && !visibleRecord(scope, binding))) {
@@ -1621,11 +1658,7 @@ export function create(ctx, config) {
       if (!s || s.includes('/') || s.includes('\\') || s.includes('..')) throw new Error('bad file name')
       return s.endsWith('.md') ? s : s + '.md'
     }
-    handlers[DRAFTS_PATH] = async (req, res, scope) => {
-      if (req.method !== 'GET') { methodNotAllowed(res); return }
-      const url = new URL(req.url, 'http://localhost')
-      const bound = await libraryClient(Object.fromEntries(url.searchParams), scope, res)
-      if (!bound) return
+    function localDraftLists(bound) {
       const localDrafts = []
       const localReady = []
       try {
@@ -1645,7 +1678,11 @@ export function create(ctx, config) {
         }
       } catch { /* 客户还没有正式库目录 */ }
 
-      /* Support 是正式站的权威源；MCP 不可用时仍返回本地兼容目录。 */
+      return { localDrafts, localReady }
+    }
+
+    /* Support 是正式站的权威源；MCP 不可用时仍返回本地兼容目录。 */
+    async function listLibraryArticles(bound) {
       let mcpArticles = []
       const resolved = resolveTool(hostCtx, libraryServer, libraryServers, articlesTool, [/^list_articles$/i, /^list/i])
       if (resolved.tool !== '') {
@@ -1655,6 +1692,66 @@ export function create(ctx, config) {
           if (normalized !== null) mcpArticles = normalized
         }
       }
+      return mcpArticles
+    }
+
+    function cachedStatusArticles(bound, scope) {
+      let cache = sessionStatusDraftCache.get(hostCtx)
+      if (!cache) { cache = new Map(); sessionStatusDraftCache.set(hostCtx, cache) }
+      const now = Date.now()
+      for (const [key, entry] of cache) if (entry.expires <= now) cache.delete(key)
+      const key = JSON.stringify([libraryRoot(), scope.cloud, scope.uid, [...scope.allowed].sort(),
+        libraryServer, articlesTool, bound.client_key || bound.client])
+      if (!cache.has(key)) {
+        const entry = { expires: now + 30000, promise: listLibraryArticles(bound) }
+        cache.set(key, entry) // Share in-flight reads as well as completed results.
+        entry.promise.then(() => { entry.expires = Date.now() + 30000 })
+      }
+      return cache.get(key).promise
+    }
+
+    handlers[SESSION_STATUS_PATH] = async (req, res, scope) => {
+      if (req.method !== 'GET') { methodNotAllowed(res); return }
+      const ids = sessionStatusIds(new URL(req.url, 'http://localhost').searchParams)
+      if (!ids) { fail(res, 400, 'bad-ids', 'ids must contain 1–50 session ids'); return }
+      const items = Object.create(null)
+      if (scope.cloud && !scope.uid) { sendJson(res, { ok: true, items }); return }
+      await loadClientNames(scope)
+      const index = readSessionClientIndex(), map = readSessionClientIndex(clientMapFile())
+      const batches = latestSessionBatches(scope, ids), clients = new Map()
+      for (const id of ids) {
+        const binding = ownEntry(index, id), mapped = ownEntry(map, id), batch = batches.get(id)
+        if ((binding !== undefined && !visibleRecord(scope, binding))
+            || (mapped !== undefined && !visibleRecord(scope, mapped)) || (!binding && !mapped && !batch)) continue
+        if (!batch) { items[id] = sessionStatusItem(null); continue }
+        const bound = resolveBoundClientForConfirm({ session_id: id, meta_id: batch.meta_id }, scope, index)
+        if (bound?.forbidden) continue
+        let merged = null
+        if (bound && authorizedBinding(scope, bound) && assertConfirmClientMatch(bound, batch, scope).ok) {
+          try {
+            const dir = clientLibraryDir(bound.client_key, bound.client)
+            // Match the drafts route's legacy-directory guard; writable names are not grants.
+            if (scope.cloud && dir !== join(libraryRoot(), bound.client_key)
+                && scope.namesByKey.get(bound.client_key) !== clientPathName(bound.client)) continue
+            if (!clients.has(bound.client_key)) {
+              const { localDrafts, localReady } = localDraftLists(bound)
+              clients.set(bound.client_key, mergeDraftLists(localDrafts, localReady, await cachedStatusArticles(bound, scope)))
+            }
+            merged = clients.get(bound.client_key)
+          } catch { /* An unavailable/invalid binding cannot safely attribute drafts. */ }
+        }
+        items[id] = sessionStatusItem(batch, merged)
+      }
+      sendJson(res, { ok: true, items })
+    }
+
+    handlers[DRAFTS_PATH] = async (req, res, scope) => {
+      if (req.method !== 'GET') { methodNotAllowed(res); return }
+      const url = new URL(req.url, 'http://localhost')
+      const bound = await libraryClient(Object.fromEntries(url.searchParams), scope, res)
+      if (!bound) return
+      const { localDrafts, localReady } = localDraftLists(bound)
+      const mcpArticles = await listLibraryArticles(bound)
       const merged = mergeDraftLists(localDrafts, localReady, mcpArticles)
       sendJson(res, { ok: true, drafts: merged.drafts, library: merged.library })
     }
