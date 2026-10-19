@@ -8,7 +8,7 @@ function load() {
   let api
   const media = { matches: false }
   const window = { matchMedia: () => media, __ModuleLoader__: { load({ factory }) { api = factory(() => ({})) } } }
-  vm.runInNewContext(source.replace('return module.exports;', 'return {periodsFor, firstPeriodId, splitRefs, buildTaskMetaPayload, wbKeyboardInset, wbMobileViewport, wbStripLeadingTitle, wbContextLabel, wbSessionStatus, wbMobileProgress, wbNavTakeFrame};'), {window})
+  vm.runInNewContext(source.replace('return module.exports;', 'return {periodsFor, firstPeriodId, splitRefs, buildTaskMetaPayload, wbKeyboardInset, wbMobileViewport, wbStripLeadingTitle, wbContextLabel, wbRunStatus, wbSessionStatus, wbMobileProgress, wbNavTakeFrame};'), {window})
   return { api, media }
 }
 const { api } = load()
@@ -45,11 +45,12 @@ test('visual viewport accounts for scrolling, resizing, and pinch zoom', () => {
   assert.equal(api.wbKeyboardInset(852,null),0)
 })
 test('drawer states are based on evidence, unknown is never labelled stopped', () => {
-  assert.equal(api.wbSessionStatus(null).label,'状态未同步')
-  assert.equal(api.wbSessionStatus({running:false}).label,'已停止')
-  assert.equal(api.wbSessionStatus({running:true,pending:2}).tone,'blue')
-  assert.equal(api.wbSessionStatus({pending:2,confirmed:1}).tone,'orange')
-  assert.equal(api.wbSessionStatus({confirmed:1}).tone,'green')
+  const status = input => api.wbSessionStatus(api.wbRunStatus(input))
+  assert.equal(status({}).label,'')
+  assert.equal(status({summary:{running:false}}).label,'')
+  assert.equal(status({summary:{running:true},draftsPending:2}).tone,'klein')
+  assert.equal(status({summary:{running:false},draftsPending:2}).tone,'warn')
+  assert.equal(status({summary:{id:'s'},unread:{s:1}}).tone,'ok')
 })
 test('mobile frame forcing exits before accessing the DOM', () => {
   const {api,media}=load();media.matches=true

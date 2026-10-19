@@ -90,11 +90,67 @@ window.__ModuleLoader__.load({
 			var label = heading[1].replace(/[ \t]+#+[ \t]*$/, '');
 			return wbNormalizeLabel(label) === wbNormalizeLabel(title) ? text.slice(heading[0].length).replace(/^[ \t]*\r?\n/, '') : text;
 		}
-		function wbSessionStatus(record) {
-			if (record && record.running === true) return { tone: 'blue', label: '写作中' };
-			if (record && record.pending > 0) return { tone: 'orange', label: record.pending + ' 篇草稿待审' };
-			if (record && record.confirmed > 0) return { tone: 'green', label: '已入库 ' + record.confirmed + ' 篇' };
-			return { tone: 'grey', label: record && record.running === false ? '已停止' : '状态未同步' };
+		/* Shared desktop/mobile projection. S2 can supply attention/draftsPending
+		 * from its aggregate; S1 only reads facts already in this browser. */
+		function wbRunStatus(input) {
+			input = input || {};
+			var summary = input.summary, batch = input.batch, session = input.snapshot;
+			function status(kind, tone, label, extra, unread) { return {kind:kind, tone:tone, label:label, extra:extra || '', unread:!!unread}; }
+			if (!summary) return status('idle', '', '');
+			var pending = input.pendingInteraction, kind = typeof pending === 'string' ? pending : pending && pending.kind;
+			if (['approval', 'question', 'plan-review'].includes(kind)) return status('attention', 'warn', '等你确认', '等你确认');
+			if (input.attention) return status('attention', 'warn', input.attention, input.attention);
+			if (summary.running) {
+				var extra = '';
+				if (batch && batch.status === 'running' && batch.rounds > 0) {
+					var row = (batch.records || []).find(function (r) { return r.status !== 'ok' && r.status !== 'failed'; });
+					extra = Math.min(batch.rounds, Math.max(1, batch.round || (row && row.round) || batch.rounds)) + '/' + batch.rounds + ' 轮';
+				}
+				return status('running', 'klein', '写作中' + (extra ? ' ' + extra : ''), extra);
+			}
+			if (!input.failureRead && session && (session.lastAgentError || session.promptError)) return status('failed', 'bad', '失败 · 点开查看原因', '失败', !input.isCurrent);
+			if (input.draftsPending > 0) return status('review', 'warn', input.draftsPending + ' 篇草稿待审', input.draftsPending + ' 篇待审');
+			var finishedAt = input.unread && input.unread[input.id || summary.id];
+			if (!input.isCurrent && finishedAt) {
+				var time = new Date(finishedAt).toLocaleTimeString('zh-CN', {timeZone:'Asia/Shanghai', hour:'2-digit', minute:'2-digit', hour12:false});
+				return status('done', 'ok', '已完成 · 未查看 · ' + time + ' (UTC+8)', '', true);
+			}
+			return status('idle', '', '');
+		}
+		function wbSessionStatus(status) {
+			status = status || wbRunStatus();
+			return Object.assign({}, status, {label:status.kind === 'done' ? '已完成 · 未查看' : status.label});
+		}
+		/* Pure transition: the first observation is a baseline, including completed.
+		 * Remember that bit too so an acknowledged, stale completed flag cannot rearm. */
+		function wbUnreadNext(state, byId, current, now) {
+			var unread = Object.assign(Object.create(null), state.unread), previous = Object.create(null);
+			delete unread[current];
+			Object.keys(byId).forEach(function (id) {
+				var s = byId[id], before = state.previous[id];
+				if (s.running || id === current) delete unread[id];
+				else if (before && (before.running || (s.completed === true && !before.completed)) && !unread[id]) unread[id] = now;
+				previous[id] = {running:!!s.running, completed:s.completed === true};
+			});
+			return {unread:unread, previous:previous};
+		}
+		function wbReadUnread(uid) {
+			var unread = Object.create(null);
+			try {
+				var saved = uid && JSON.parse(localStorage.getItem('wb-unread-' + uid) || '{}');
+				if (saved && typeof saved === 'object' && !Array.isArray(saved)) Object.keys(saved).forEach(function (id) {
+					if (Number.isFinite(saved[id]) && saved[id] > 0) unread[id] = saved[id];
+				});
+			} catch (e) { }
+			return unread;
+		}
+		function wbWriteUnread(uid, unread) {
+			try { if (uid) localStorage.setItem('wb-unread-' + uid, JSON.stringify(unread)); } catch (e) { }
+		}
+		function WbRunIndicator(p) {
+			return h('span', {className:'wb_runSlot' + (p.mobile ? ' wb_mStatus' : ''), 'aria-hidden':true},
+				p.status.kind === 'running' ? h('span', {className:'wb_ldrSpin wb_runSpin'})
+				: p.status.tone ? h('span', {className:'wb_runDot', 'data-tone':p.status.tone}) : null);
 		}
 		function wbSessionTitle(rec, summary, meta) {
 			var title = summary && !summary.blank && summary.displayTitle;
@@ -173,14 +229,16 @@ window.__ModuleLoader__.load({
 				finally { busy[1](false); }
 			}
 			var label = (it.at && it.at.length >= 10 ? collectedDay(it.at).slice(5, 10) + ' · ' : '') + it.title;
+			var status = wbNavStatus(it.id), accessible = [label, status.label].filter(Boolean).join(' · ');
 			return h('div', null,
 				edit[0] ? h('input', {className:'wb_nvRename', 'aria-label':'会话名称', value:draft[0], maxLength:40, autoFocus:true,
 					onFocus:function(e){e.target.select();}, onChange:function(e){draft[1](wbClampTitle(e.target.value));},
 					onKeyDown:function(e){wbTitleKey(e,save,cancel);}, onBlur:save, onClick:function(e){e.stopPropagation();}})
-				: h('button', {type:'button', className:'wb_nvItem'+(it.id===wbNavState.current?' wb_nvCur':''), title:label,
+				: h('button', {type:'button', className:'wb_nvItem'+(it.id===wbNavState.current?' wb_nvCur':''), 'data-unread':status.unread, title:accessible, 'aria-label':accessible,
 					onClick:function(e){if(editing.current)return;clearTimeout(timer.current);if(e.detail===0)p.open(it.id);else if(e.detail===1)timer.current=setTimeout(function(){p.open(it.id);},300);},
 					onDoubleClick:function(e){e.preventDefault();start();},
-					onContextMenu:function(e){e.preventDefault();clearTimeout(timer.current);if(allowed&&!busy[0])menu[1]({x:Math.max(0,Math.min(e.clientX,window.innerWidth-140)),y:Math.max(0,Math.min(e.clientY,window.innerHeight-48))});}},label),
+					onContextMenu:function(e){e.preventDefault();clearTimeout(timer.current);if(allowed&&!busy[0])menu[1]({x:Math.max(0,Math.min(e.clientX,window.innerWidth-140)),y:Math.max(0,Math.min(e.clientY,window.innerHeight-48))});}},
+					h(WbRunIndicator,{status:status}),h('span',{className:'wb_nvLabel'},label),status.extra?h('small',{className:'wb_nvExtra','data-tone':status.tone},status.extra):null),
 				wbNavState.renameErrors[it.id] ? h('small',{className:'wb_nvRenameError',role:'alert'},wbNavState.renameErrors[it.id]) : null,
 				menu[0] && allowed ? createPortal(h('div',{className:'wb_nvMenu',ref:menuRef,role:'menu',style:{left:menu[0].x,top:menu[0].y}},
 					h('button',{type:'button',role:'menuitem',autoFocus:true,onClick:start},'重命名')),document.body) : null);
@@ -389,7 +447,7 @@ window.__ModuleLoader__.load({
 				h('aside',{className:'wb_mDrawer',ref:ref,tabIndex:-1,role:'dialog','aria-modal':true,'aria-label':'会话列表',onTouchStart:function(e){start.current=e.touches[0].clientX;},onTouchEnd:function(e){if(start.current-e.changedTouches[0].clientX>70)p.close();}},
 					h('div',{className:'wb_mDrawerHead'},h('b',null,'生文 Agent'),h('button',{type:'button',className:'wb_mIcon','aria-label':'关闭会话抽屉',onClick:p.close},wbIcon('close'))),
 					h('div',{className:'wb_mDrawerTools'},h('button',{type:'button',className:'wb_mPrimary',onClick:p.compose},wbIcon('plus'),'新建任务'),h('label',{className:'wb_mSearch'},wbIcon('search'),h('input',{type:'search','aria-label':'搜索会话',placeholder:'搜索会话',value:wbNavState.q,onChange:function(e){wbNavState.q=e.target.value;wbNavEmit();}}))),
-					h('div',{className:'wb_mTree'},p.names.map(function(name){var open=wbNavState.open[name]!==false;return h('section',{key:name},h('button',{type:'button',className:'wb_mGroup','aria-expanded':open,onClick:function(){wbNavState.open[name]=!open;wbNavEmit();}},h('span',{className:'wb_mAvatar'},name.slice(0,1)),h('b',null,name),h('small',null,p.groups[name].length),wbIcon(open?'down':'next')),h(WbCollapse,{open:open},p.groups[name].map(function(it){var status=wbSessionStatus(wbNavState.statuses&&wbNavState.statuses[it.id]);return h('button',{key:it.id,type:'button',className:'wb_mSession','aria-current':it.id===wbNavState.current,onClick:function(){p.openSession(it.id);}},h('span',{className:'wb_mStatus','data-tone':status.tone}),h('span',{className:'wb_mGrow'},h('b',null,it.title),h('small',null,[it.at?collectedDay(it.at).slice(5,10).replace('-','月')+'日':'',status.label].filter(Boolean).join(' · '))));})));}),p.names.length===0?h('p',{className:'wb_mEmpty'},wbNavState.q?'没有匹配的会话':'还没有会话，点上方新建任务'):null),
+					h('div',{className:'wb_mTree'},p.names.map(function(name){var open=wbNavState.open[name]!==false;return h('section',{key:name},h('button',{type:'button',className:'wb_mGroup','aria-expanded':open,onClick:function(){wbNavState.open[name]=!open;wbNavEmit();}},h('span',{className:'wb_mAvatar'},name.slice(0,1)),h('b',null,name),h('small',null,p.groups[name].length),wbIcon(open?'down':'next')),h(WbCollapse,{open:open},p.groups[name].map(function(it){var run=wbNavStatus(it.id),status=wbSessionStatus(run),day=it.at?collectedDay(it.at).slice(5,10).replace('-','月')+'日':'';return h('button',{key:it.id,type:'button',className:'wb_mSession','data-unread':run.unread,title:run.label,'aria-label':[it.title,run.label].filter(Boolean).join(' · '),'aria-current':it.id===wbNavState.current,onClick:function(){p.openSession(it.id);}},h(WbRunIndicator,{status:run,mobile:true}),h('span',{className:'wb_mGrow'},h('b',null,it.title),h('small',null,day,day&&status.label?' · ':'',h('span',{'data-tone':status.tone},status.label))));})));}),p.names.length===0?h('p',{className:'wb_mEmpty'},wbNavState.q?'没有匹配的会话':'还没有会话，点上方新建任务'):null),
 					h('div',{className:'wb_mAccount'},h('span',{className:'wb_mAvatar'},p.me.label.slice(0,1)),h('div',null,h('b',null,p.me.label),p.me.sub?h('small',null,p.me.sub):null)))),document.body);
 		}
 		function MobileQuickPrompts(p) {
@@ -876,8 +934,13 @@ window.__ModuleLoader__.load({
 			".wb_nvHint{padding:10px 6px;font-size:12px;color:#9ca3af;}",
 			".wb_nvGroupName{width:100%;border:none;background:none;text-align:left;font-size:12.5px;font-weight:600;color:#374151;cursor:pointer;padding:6px 6px;border-radius:6px;}",
 			".wb_nvGroupName:hover{background:#eef2f7;}",
-			".wb_nvItem{width:100%;border:none;background:none;text-align:left;font-size:12.5px;color:#4b5563;cursor:pointer;padding:6px 6px 6px 18px;border-radius:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}",
+			".wb_nvItem{display:flex;align-items:center;gap:6px;width:100%;border:none;background:none;text-align:left;font-size:12.5px;color:#4b5563;cursor:pointer;padding:6px 6px 6px 18px;border-radius:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}",
 			".wb_nvItem:hover{background:#eef2f7;color:#111827;}",
+			".wb_nvLabel{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;}.wb_nvItem[data-unread=true] .wb_nvLabel{font-weight:600;}",
+			".wb_nvExtra{flex:none;font-size:11.5px;font-variant-numeric:tabular-nums;}",
+			".wb_runSlot{display:inline-flex;align-items:center;justify-content:center;flex:0 0 14px;width:14px;height:14px;}.wb_ldrSpin.wb_runSpin{width:12px;height:12px;flex:0 0 12px;}",
+			".wb_runDot{width:6px;height:6px;border-radius:50%;corner-shape:round;background:currentColor;}.wb_runDot[data-tone=ok]{box-shadow:0 0 0 2px rgba(18,160,106,.18);}",
+			".wb_nv [data-tone=klein],.wb_mSession [data-tone=klein]{color:var(--wb-klein);}.wb_nv [data-tone=ok],.wb_mSession [data-tone=ok]{color:var(--wb-ok);}.wb_nv [data-tone=bad],.wb_mSession [data-tone=bad]{color:var(--wb-bad);}.wb_nv [data-tone=warn],.wb_mSession [data-tone=warn]{color:var(--wb-warn);}",
 			".wb_nvRename{width:100%;box-sizing:border-box;padding:5px 8px;border:1px solid #93c5fd;border-radius:6px;font:inherit;}",
 			".wb_nvRenameError{display:block;padding:2px 8px;color:#b91c1c;font-size:12px;}",
 			".wb_nvMenu{position:fixed;z-index:10000;min-width:132px;padding:4px;background:#fff;border:1px solid #e5e7eb;border-radius:8px;box-shadow:0 4px 16px #0002;}",
@@ -1298,10 +1361,8 @@ html[data-wb-mobile] .wb_mSession[aria-current=true]{background:var(--dsh-card,#
 html[data-wb-mobile] .wb_mSession[aria-current=true] b{color:var(--wb-accent-ink);font-weight:700}
 html[data-wb-mobile] .wb_mSession b{display:block;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-size:16px;line-height:22px;font-weight:500}
 html[data-wb-mobile] .wb_mSession small{display:block;margin-top:2px;font-size:14px;line-height:20px;color:var(--wb-dim2)}
-html[data-wb-mobile] .wb_mStatus{width:8px;height:8px;border-radius:50%;corner-shape:round;background:var(--dsh-ink-4,#b9bccb);margin-top:8px;flex:none}
-html[data-wb-mobile] .wb_mStatus[data-tone=blue]{background:var(--wb-accent)}
-html[data-wb-mobile] .wb_mStatus[data-tone=orange]{background:var(--dsh-orange,#ff6a1f)}
-html[data-wb-mobile] .wb_mStatus[data-tone=green]{background:var(--dsh-green,#14a05a)}
+html[data-wb-mobile] .wb_mStatus{margin-top:4px}
+html[data-wb-mobile] .wb_mSession[data-unread=true] b{font-weight:600}
 html[data-wb-mobile] .wb_mAccount{display:flex;align-items:center;gap:12px;padding:16px 20px calc(16px + env(safe-area-inset-bottom));border-top:1px solid var(--wb-line);flex:none}
 html[data-wb-mobile] .wb_mAccount small{display:block;color:var(--wb-dim2);font-size:13px;overflow-wrap:anywhere}
 html[data-wb-mobile] .wb_mAccount .wb_mAvatar{border-radius:50%;corner-shape:round;background:var(--dsh-blue-50,#eef2fd);color:var(--wb-accent-ink)}
@@ -2914,6 +2975,70 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			var wbNavSubs = [];
 			var wbFrameMo = null;
 			function wbNavEmit() { wbNavSubs.forEach(function (f) { try { f(); } catch (e) { } }); }
+			var wbRunState = null;
+			function wbNavRunState() {
+				var uid = (window.dshUnified && window.dshUnified.store && window.dshUnified.store.state && window.dshUnified.store.state.uid) || wbNavState.uid || '';
+				if (!wbRunState || wbRunState.uid !== uid) wbRunState = {uid:uid, unread:wbReadUnread(uid), previous:Object.create(null), observed:Object.create(null), readErrors:Object.create(null)};
+				return wbRunState;
+			}
+			function wbRunErrorKey(snapshot) { return JSON.stringify([snapshot && snapshot.lastAgentError || null, snapshot && snapshot.promptError || null]); }
+			function wbNavSelect(id) {
+				var state = wbNavRunState(), observed = state.observed[id];
+				wbNavState.current = id;
+				delete state.unread[id];
+				state.readErrors[id] = wbRunErrorKey(observed && observed.snapshot);
+				wbWriteUnread(state.uid, state.unread);
+				wbNavEmit();
+			}
+			function wbNavStatus(id) {
+				var state = wbNavRunState(), observed = state.observed[id] || {};
+				return wbRunStatus({id:id, summary:wbNavState.sessions && wbNavState.sessions[id], snapshot:observed.snapshot,
+					pendingInteraction:observed.pending, failureRead:state.readErrors[id] === wbRunErrorKey(observed.snapshot),
+					unread:state.unread, isCurrent:id === wbNavState.current, batch:wbBatchFor(id)});
+			}
+			function wbNavSnapshot(snapshot) {
+				if (!snapshot || (snapshot.phase && snapshot.phase !== 'ready')) return;
+				wbNavState.sessions = snapshot.byId || {};
+				if ('current' in snapshot && (snapshot.current || '') !== wbNavState.current) wbNavSelect(snapshot.current || '');
+				var state = wbNavRunState(), next = wbUnreadNext(state, wbNavState.sessions, wbNavState.current, Date.now());
+				Object.keys(next.previous).forEach(function (id) {
+					if (next.previous[id].running && (!state.previous[id] || !state.previous[id].running)) {
+						delete state.readErrors[id];
+						if (id !== wbNavState.current) delete state.observed[id];
+					}
+				});
+				if (JSON.stringify(next.unread) !== JSON.stringify(state.unread)) wbWriteUnread(state.uid, next.unread);
+				state.unread = next.unread; state.previous = next.previous;
+				wbNavEmit();
+			}
+			function wbNavSubscribe(ctx) {
+				try {
+					var svc = ctx && typeof ctx.get === 'function' && ctx.get('sessions'), list = svc && svc.list;
+					if (!list || typeof list.getSnapshot !== 'function') return function () {};
+					function changed() { try { wbNavSnapshot(list.getSnapshot()); } catch (e) { } }
+					var dispose = typeof list.subscribe === 'function' ? list.subscribe(changed) : null;
+					changed();
+					return typeof dispose === 'function' ? dispose : function () {};
+				} catch (e) { return function () {}; }
+			}
+			/* Only injected hooks: no materializing background sessions or private RPCs. */
+			function useWbRunStatus(props) {
+				var session = typeof props.useSession === 'function' ? props.useSession(function (s) { return s; }) : null;
+				var id = props.sessionId, uid = wbNavRunState().uid;
+				/* Harness hook is a selector hook over Map<sessionId, interaction>; select a stable kind string. */
+				var pending = typeof props.useSessionPendingInteraction === 'function' ? props.useSessionPendingInteraction(function (m) { var v = m && typeof m.get === 'function' ? m.get(id) : null; return v && typeof v.kind === 'string' ? v.kind : null; }) : null;
+				React.useEffect(function () {
+					if (!id) return;
+					var state = wbNavRunState();
+					if (session) state.observed[id] = {snapshot:session, pending:pending};
+					wbNavSelect(id); // Opening acknowledges even an already-materialized error.
+				}, [id, uid]);
+				React.useEffect(function () {
+					if (!id) return;
+					wbNavRunState().observed[id] = {snapshot:session, pending:pending};
+					wbNavEmit();
+				}, [id, uid, session, pending]);
+			}
 			async function wbNavReadSessions() {
 				// Only retire edits already saved when this refresh starts.
 				var saved = {};
@@ -2927,7 +3052,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					if (typeof svc.refresh === 'function') await svc.refresh();
 					var snapshot = svc.list.getSnapshot();
 					if (!snapshot || (snapshot.phase && snapshot.phase !== 'ready')) return;
-					wbNavState.sessions = snapshot.byId || {};
+					wbNavSnapshot(snapshot);
 					Object.keys(saved).forEach(function (id) {
 						if (wbNavState.renames[id] === saved[id] && wbNavState.sessions[id]) delete wbNavState.renames[id];
 					});
@@ -3016,8 +3141,9 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			function SidebarNav(props) {
 				var st = React.useState(0);
 				React.useEffect(function () {
-					wbNavSubs.push(function () { st[1](function (x) { return x + 1; }); });
-					return function () { wbNavSubs = wbNavSubs.filter(function (x) { return x !== undefined; }); };
+					function changed() { st[1](function (x) { return x + 1; }); }
+					wbNavSubs.push(changed);
+					return function () { wbNavSubs = wbNavSubs.filter(function (x) { return x !== changed; }); };
 				}, []);
 				/* shell.overlay 的 props 里没有 ctx —— 注册时用闭包把插件 ctx 传进来 */
 				var ctx = (props && props.wbCtx) ? props.wbCtx : (props && props.ctx ? props.ctx : null);
@@ -3102,13 +3228,15 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					} catch (e) { }
 				}
 				React.useEffect(function () {
+					var unsubscribe = wbNavSubscribe(ctx);
+					window.addEventListener('wb:batch-change', wbNavEmit);
 					wbNavRefresh();
 					var stop = false;
 					function tick() { if (!stop) { wbNavRefresh(); wbNavHideOfficial(); } }
 					var timerId = setInterval(tick, 4000);
 					wbNavHideOfficial();
-					return function () { stop = true; clearInterval(timerId); };
-				}, []);
+					return function () { stop = true; clearInterval(timerId); unsubscribe(); window.removeEventListener('wb:batch-change', wbNavEmit); };
+				}, [ctx]);
 				var q = wbNavState.q;
 				var map = wbNavState.map;
 				/* 组装：客户 → [{id,title,at}]，按登记时间倒序 */
@@ -3133,7 +3261,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					 * 优先 uiWorkspace.openSession（内部处理挂载），传登记时的原样 id。 */
 					try {
 						var raw = String(id);
-						wbNavState.current = raw; wbNavEmit();   // 树里高亮当前位置
+						wbNavSelect(raw);   // Highlight and acknowledge before host navigation.
 						var w = ctx && typeof ctx.get === "function" ? ctx.get("uiWorkspace") : null;
 						if (w && typeof w.openSession === "function") { w.openSession(raw); return; }
 						var s = ctx && typeof ctx.get === "function" ? ctx.get("sessions") : null;
@@ -4055,6 +4183,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			}
 
 			function TaskBar(props) {
+				useWbRunStatus(props);
 				var reviewPropsRef = React.useRef(props);
 				reviewPropsRef.current = props;
 				if (window.dshUnified) window.dshUnified.reviewProps = props;
