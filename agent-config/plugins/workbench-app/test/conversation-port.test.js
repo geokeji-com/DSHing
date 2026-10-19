@@ -229,3 +229,46 @@ test('loader renders inline as the last item of the chat flow column and stays l
   assert.equal(f.root.hasAttribute('data-wb-running'), false)
   dispose()
 })
+
+test('real harness column: run status rows after the prefill prompt are never folded, stale tail marks are cleared', () => {
+  const f = fixture(), dispose = f.api.wbInstallConversation(), observer = f.observers[0]
+  // Real ChatView: every flow item is a direct child of [data-chat-flow] and carries data-chat-anchor-key;
+  // the host TurnStatus (role=status) is the last React child while running.
+  const flow = f.el('div', '', { 'data-chat-flow': '' })
+  const prompt = f.el('div', '', { 'data-chat-anchor-key': 'u1', 'data-chat-flow-key': 'u1', 'data-chat-flow-kind': 'user' })
+  prompt.appendChild(f.el('span', '【装配台预填 · 初始上下文】\n客户：移山科技 共 10 条 写 5 篇'))
+  const hostStatus = f.el('div', '深度求索中...', { role: 'status' }); hostStatus.className = 'KrrKnq_turnStatus'
+  const stop = f.el('button', '', { 'aria-label': '停止生成' })
+  flow.appendChild(prompt); flow.appendChild(hostStatus); f.root.appendChild(flow); f.root.appendChild(stop)
+  observer.callback(); f.flush()
+  const ldr = f.root.querySelector('.wb_ldr')
+  assert.ok(ldr, 'running → inline row exists')
+  assert.equal(ldr.parentNode, flow); assert.equal(flow.children.at(-1), ldr, 'row is the last item of the flow column')
+  assert.equal(prompt.getAttribute('data-wb-prefold'), '1', 'prompt still folded')
+  assert.equal(hostStatus.hasAttribute('data-wb-pref-tail'), false, 'host TurnStatus is not a prompt tail')
+  assert.equal(ldr.hasAttribute('data-wb-pref-tail'), false, 'our row is not a prompt tail')
+  // Older/foreign mark left on a node that is no longer a tail (prod: marked before the reply arrived).
+  hostStatus.setAttribute('data-wb-pref-tail', '1'); ldr.setAttribute('data-wb-pref-tail', '1')
+  const reply = f.el('div', '我先加载两个技能', { 'data-chat-anchor-key': 'a1', 'data-chat-flow-key': 'a1' })
+  const skill = f.el('div', 'Skill · sora-selection', { 'data-chat-anchor-key': 'a2', 'data-chat-flow-key': 'a2' })
+  flow.insertBefore(reply, hostStatus); flow.insertBefore(skill, hostStatus)
+  f.trace.length = 0
+  observer.callback(); f.flush()
+  assert.equal(hostStatus.hasAttribute('data-wb-pref-tail'), false, 'stale mark cleared')
+  assert.equal(ldr.hasAttribute('data-wb-pref-tail'), false, 'stale mark cleared on our row')
+  assert.equal(flow.children.at(-1), ldr, 'row stays after the latest tool line')
+  assertGuarded(f.trace)
+  // A second tick with no host change writes nothing (no loop).
+  f.trace.length = 0
+  observer.callback(); f.flush()
+  assert.equal(f.trace.filter(x => x.observed !== undefined).length, 0, 'idle tick performs no DOM writes')
+  // Legacy split-message tail (no anchor key) right after the prompt is still folded.
+  const legacyTail = f.el('div', '主题：共 2 条。')
+  flow.insertBefore(legacyTail, reply)
+  observer.callback(); f.flush()
+  assert.equal(legacyTail.getAttribute('data-wb-pref-tail'), '1')
+  // Run ends: stop button gone → row removed.
+  f.root.removeChild(stop); observer.callback(); f.flush()
+  assert.equal(f.root.querySelector('.wb_ldr'), null)
+  dispose()
+})
