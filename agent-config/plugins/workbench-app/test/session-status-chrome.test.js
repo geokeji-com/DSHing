@@ -7,7 +7,9 @@ const source = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8'
 const plain = value => JSON.parse(JSON.stringify(value))
 function load(title = '生文 Agent') {
   let api, cursor = 0, mutation = false
-  const slots = [], effects = [], observers = [], writes = []
+  const slots = [], effects = [], observers = [], writes = [], frames = new Map()
+  let frameId = 0, now = 0
+  function frame() { const pending = [...frames.values()]; frames.clear(); now += 16; pending.forEach(fn => fn()) }
   const document = { head: {}, body: {}, get title() { return title }, set title(value) { title = value; writes.push(value); mutation = true } }
   const media = { matches: false }
   const react = {
@@ -30,20 +32,25 @@ function load(title = '生文 Agent') {
   const window = { matchMedia: () => media, __ModuleLoader__: { load({ factory }) {
     api = factory(name => name === 'react' ? react : { createPortal: element => element })
   } } }
-  vm.runInNewContext(source.replace('return module.exports;', `return {CSS, wbNeedsViewCount, wbGroupStatus, wbTabTitleState,
+  function evaluate() { vm.runInNewContext(source.replace('return module.exports;', `return {CSS, wbTitleLoopState, wbNeedsViewCount, wbGroupStatus, wbTabTitleState,
     wbNavState, wbNavRunState, wbNavStatus, wbNavSelect, wbNavEmit, wbNavNeedsViewCount, wbNavWatchTitle,
     WbRunIndicator, WbGroupIndicator, SidebarNav, MobileDrawer, MobileDrawerEntry, MobileTopBar,
     subscriberCount() { return wbNavSubs.length; }};`), {
-    window, document,
+    window, document, Date: class extends Date { static now() { return now } },
+    requestAnimationFrame(fn) { frames.set(++frameId, fn); return frameId }, cancelAnimationFrame(id) { frames.delete(id) },
     MutationObserver: class {
       constructor(callback) { this.callback = callback; observers.push(this) }
       observe(target, options) { this.target = target; this.options = options; this.active = true }
       disconnect() { this.active = false }
     },
   })
+  }
+  evaluate()
   api.wbNavState.uid = 'fixture-user'
   api.wbNavRunState()
-  return { api, document, observers, writes,
+  return { api, document, observers, writes, frames, frame, window,
+    reload() { evaluate(); return api },
+    mutations() { mutation = false; observers.filter(observer => observer.active).forEach(observer => observer.callback()) },
     render(component, props = {}, runEffects = true) {
       cursor = 0
       const element = component(props)
@@ -52,10 +59,11 @@ function load(title = '生文 Agent') {
     },
     flush() {
       let turns = 0
-      while (mutation) {
-        assert.ok(++turns < 10, 'title observer must settle without a write loop')
+      while (mutation || frames.size) {
+        assert.ok(++turns < 30, 'title observer must settle without a write loop')
         mutation = false
         observers.filter(observer => observer.active).forEach(observer => observer.callback())
+        frame()
       }
     },
     dispose() { slots.forEach(slot => slot?.cleanup?.()) },
@@ -238,4 +246,77 @@ test('entry dot and group indicators use the mockup dimensions, tokens and exist
   for (const tone of ['klein', 'ok', 'bad', 'warn']) assert.ok(api.CSS.includes('.wb_groupStatus [data-tone=' + tone + ']{color:var(--wb-' + tone + ');}'))
   assert.equal(api.WbRunIndicator({ status: { kind: 'running' } }).children[0].props.className, 'wb_ldrSpin wb_runSpin')
   assert.match(api.CSS, /@media \(prefers-reduced-motion: reduce\)\{[^\n]+animation:none!important;transition:none!important/)
+})
+
+
+test('title mutations yield to one frame and queued work is cancelled on disposal', () => {
+  const f = load(), {api} = f; seed(api)
+  const dispose = api.wbNavWatchTitle(); f.flush()
+  f.document.title = 'Host rename'
+  const writes = f.writes.length
+  f.mutations(); api.wbNavEmit(); api.wbNavEmit()
+  assert.equal(f.writes.length, writes, 'observer delivery must not synchronously fight the host')
+  assert.equal(f.frames.size, 1)
+  dispose()
+  assert.equal(f.frames.size, 0)
+  f.flush()
+  assert.equal(f.document.title, 'Host rename')
+})
+
+test('two live module instances hand title ownership over without fighting different counts', () => {
+  const f = load(), old = f.api; seed(old)
+  const disposeOld = old.wbNavWatchTitle(); f.flush()
+  const next = f.reload(); seed(next); next.wbNavState.map = {}
+  assert.equal(old.subscriberCount(), 0, 'loading a new module immediately disposes the old owner')
+  assert.equal(f.observers.filter(o => o.active).length, 0)
+  const disposeNew = next.wbNavWatchTitle(); f.flush()
+  assert.equal(old.subscriberCount(), 0)
+  assert.equal(next.subscriberCount(), 1)
+  assert.equal(f.observers.filter(o => o.active).length, 1)
+  assert.equal(f.document.title, '生文 Agent')
+  disposeOld(); old.wbNavWatchTitle(); old.wbNavEmit(); f.flush()
+  assert.equal(old.subscriberCount(), 0, 'an old module remount cannot reclaim ownership')
+  assert.equal(f.observers.filter(o => o.active).length, 1, 'stale cleanup cannot disconnect the new owner')
+  seed(next); next.wbNavEmit(); f.flush()
+  assert.equal(f.document.title, '(3) 生文 Agent')
+  disposeNew(); f.flush()
+  assert.equal(f.document.title, '生文 Agent')
+})
+
+test('own title writes and unrelated head mutations do not schedule another frame', () => {
+  const f = load(); seed(f.api)
+  const dispose = f.api.wbNavWatchTitle()
+  const writes = f.writes.length
+  for (let i = 0; i < 20; i++) f.mutations()
+  assert.equal(f.frames.size, 0)
+  assert.equal(f.writes.length, writes)
+  dispose()
+})
+
+test('title loop guard ignores own writes, resets after quiet time and stays disabled after contention', () => {
+  const {api} = load(), step = api.wbTitleLoopState
+  let guard = step(undefined, 'Host', undefined, 0)
+  for (let i = 0; i < 20; i++) guard = step(guard, '(1) Host', '(1) Host', i)
+  assert.equal(guard.rewrites, 0)
+  guard = step(guard, 'Host', '(1) Host', 1100)
+  assert.equal(guard.rewrites, 1)
+  guard = step(guard, 'Other host', '(1) Host', 2200)
+  assert.equal(guard.rewrites, 1)
+  for (let i = 0; i < 7; i++) guard = step(guard, 'Host', '(1) Host', 2201 + i)
+  assert.equal(guard.disabled, true)
+  assert.equal(step(guard, 'Later host', '(1) Host', 99999), guard)
+})
+
+test('a persistent host title writer triggers page-lifetime backoff, including after remount', () => {
+  const f = load(); seed(f.api)
+  f.api.wbNavWatchTitle(); f.flush()
+  for (let i = 0; i < 12; i++) { f.document.title = 'Host owns title'; f.mutations(); f.frame() }
+  assert.equal(f.window.__wbTitleBackoff, true)
+  assert.equal(f.api.subscriberCount(), 0)
+  assert.equal(f.frames.size, 0)
+  assert.equal(f.observers.filter(o => o.active).length, 0)
+  const before = f.writes.length
+  const next = f.reload(); seed(next); next.wbNavWatchTitle(); next.wbNavEmit(); f.flush()
+  assert.equal(f.writes.length, before)
+  assert.equal(f.document.title, 'Host owns title')
 })

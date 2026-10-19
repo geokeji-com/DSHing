@@ -265,6 +265,13 @@ window.__ModuleLoader__.load({
 			var base = !previous || title !== previous.title ? title.replace(/^\(\d+\) /, '') : previous.base;
 			return {base:base, title:(count > 0 ? '(' + count + ') ' : '') + base};
 		}
+		function wbTitleLoopState(previous, title, expected, now) {
+			var state = previous || {since:now, rewrites:0, disabled:false};
+			if (state.disabled || expected === undefined || title === expected) return state;
+			var recent = now - state.since < 1000;
+			var rewrites = (recent ? state.rewrites : 0) + 1;
+			return {since:recent ? state.since : now, rewrites:rewrites, disabled:rewrites >= 8};
+		}
 		/* Pure transition: the first observation is a baseline, including completed.
 		 * Remember that bit too so an acknowledged, stale completed flag cannot rearm. */
 		function wbUnreadNext(state, byId, current, now) {
@@ -2106,6 +2113,42 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 		}
 
 		/* ---- 薄弱问句：某个客户/业务线全部问句 -------------------------- */
+		function wbCaptureRetryDelay(error, retries) {
+			return retries < 2 && ['timeout', 'network', 'unreachable'].includes(error) ? 1000 * Math.pow(2, retries) : null;
+		}
+		function wbLoadCapture(query, publish) {
+			var disposed = false, retries = 0, retryTimer = null, cancel = null;
+			function load() {
+				if (disposed) return;
+				retryTimer = null;
+				var controller = new AbortController(), timer;
+				publish({status:'loading'});
+				// Bound both the request and JSON body. Reject explicitly as well as
+				// aborting: a stalled body (or a fetch adapter) may ignore the signal.
+				var deadline = new Promise(function (_, reject) {
+					function stop(code) { reject({code:code}); controller.abort(); }
+					timer = setTimeout(function () { stop('timeout'); }, 15000);
+					cancel = function () { stop('cancelled'); };
+				});
+				var request = Promise.resolve().then(function () {
+					if (disposed) throw {code:'cancelled'};
+					return fetch(query, {credentials:'same-origin', headers:{accept:'application/json'}, signal:controller.signal});
+				}).then(readCaptureJson);
+				Promise.race([request, deadline]).catch(function (error) {
+					return {ok:false, error:error && error.code === 'timeout' ? 'timeout' : 'unreachable', detail:String(error && error.message || '')};
+				}).then(function (body) {
+					clearTimeout(timer); cancel = null;
+					if (disposed) return;
+					if (body && body.ok === true) { publish({status:'ready', body:body}); return; }
+					var error = body && body.error || 'unknown';
+					publish({status:'error', error:error, detail:body && body.detail || ''});
+					var delay = wbCaptureRetryDelay(error, retries);
+					if (!disposed && delay !== null) { retries++; retryTimer = setTimeout(load, delay); }
+				});
+			}
+			load();
+			return function () { disposed = true; clearTimeout(retryTimer); if (cancel) cancel(); };
+		}
 		function useWeakGaps(clientKey, enterprise, enabled) {
 			var state = React.useState({ status: "idle", collectedAt: "", computedAt: "", taskId: "", excluded: null, questions: [], error: "", detail: "" });
 			var setValue = state[1];
@@ -2114,37 +2157,26 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			React.useEffect(function () {
 				var blank = { status: "idle", collectedAt: "", computedAt: "", taskId: "", excluded: null, questions: [], error: "", detail: "" };
 				if (!enabled || clientKey === "") { setValue(blank); return undefined; }
-				var alive = true;
 				var query = WB_API.weakGaps + "?client=" + encodeURIComponent(clientKey) + "&enterprise=" + encodeURIComponent(enterprise || "");
-				setValue({ status: "loading", collectedAt: "", computedAt: "", taskId: "", excluded: null, questions: [], error: "", detail: "" });
-				fetch(query, { credentials: "same-origin", headers: { accept: "application/json" } })
-					.then(readCaptureJson)
-					.then(function (body) {
-						if (!alive) return;
-						if (body && body.ok === true) {
-							setValue({
-								status: "ready", clientKey: clientKey, enterprise: enterprise,
-								collectedAt: body.collectedAt || "",
-								capturePeriod: body.clientId || enterprise || "",
-								computedAt: body.computedAt || "",
-								taskId: body.taskId || "",
-								excluded: body.excluded === null ? null : (typeof body.excluded === "number" ? body.excluded : null),
-								questions: mapCaptureQuestions(body),
-								error: "", detail: "",
-							});
-						} else {
-							setValue({
-								status: "error", collectedAt: "", computedAt: "", taskId: "", excluded: null, questions: [],
-								error: (body && body.error) || "unknown", detail: (body && body.detail) || "",
-							});
-						}
-					})
-					.catch(function (e) {
-						if (alive) setValue({ status: "error", collectedAt: "", computedAt: "", taskId: "", excluded: null, questions: [], error: "unreachable", detail: String(e && e.message ? e.message : e) });
-					});
-				return function () { alive = false; };
+				return wbLoadCapture(query, function (result) {
+					var body = result.body;
+					if (result.status === 'ready') {
+						setValue({
+							status: "ready", clientKey: clientKey, enterprise: enterprise,
+							collectedAt: body.collectedAt || "",
+							capturePeriod: body.clientId || enterprise || "",
+							computedAt: body.computedAt || "",
+							taskId: body.taskId || "",
+							excluded: body.excluded === null ? null : (typeof body.excluded === "number" ? body.excluded : null),
+							questions: mapCaptureQuestions(body),
+							error: "", detail: "",
+						});
+					} else {
+						setValue(Object.assign({}, blank, result));
+					}
+				});
 			}, [clientKey, enterprise, enabled, tick]);
-			state[0].refresh = function () { setTick(tick + 1); };
+			state[0].refresh = function () { setTick(function (value) { return value + 1; }); };
 			return state[0];
 		}
 
@@ -3328,22 +3360,48 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				}, []);
 				return count[0];
 			}
+			// Claim ownership when the module loads, before React mounts its nav.
+			// Stale nav effects must not reclaim it after a hot reload.
+			var wbTitleOwner = {};
+			if (window.__wbTitleCleanup) window.__wbTitleCleanup();
+			window.__wbTitleOwner = wbTitleOwner;
 			function wbNavWatchTitle() {
-				var state;
+				if (window.__wbTitleOwner !== wbTitleOwner || window.__wbTitleBackoff) return function () {};
+				if (window.__wbTitleCleanup) window.__wbTitleCleanup();
+				var state, guard, frame = null, disposed = false;
 				function update() {
+					frame = null;
+					if (disposed) return;
+					guard = wbTitleLoopState(guard, document.title, state && state.title, Date.now());
+					if (guard.disabled) {
+						window.__wbTitleBackoff = true;
+						dispose(); // Leave the competing host's title alone for this page life.
+						return;
+					}
 					state = wbTabTitleState(document.title, wbNavNeedsViewCount(), state);
 					if (document.title !== state.title) document.title = state.title;
 				}
+				function schedule() {
+					if (!disposed && frame === null) frame = requestAnimationFrame(update);
+				}
 				// Observe the head so host replacement of the title element is handled too.
-				var observer = new MutationObserver(function () { if (document.title !== state.title) update(); });
+				// Own writes are ignored; external writes yield to a frame, never another
+				// mutation microtask that can starve fetches, polling and paint.
+				var observer = new MutationObserver(function () { if (document.title !== state.title) schedule(); });
 				update();
 				observer.observe(document.head, {childList:true, subtree:true, characterData:true});
-				wbNavSubs.push(update);
-				return function () {
+				wbNavSubs.push(schedule);
+				function dispose() {
+					if (disposed) return;
+					disposed = true;
+					if (frame !== null) cancelAnimationFrame(frame);
 					observer.disconnect();
-					wbNavSubs = wbNavSubs.filter(function (fn) { return fn !== update; });
-					if (document.title === state.title) document.title = state.base;
-				};
+					wbNavSubs = wbNavSubs.filter(function (fn) { return fn !== schedule; });
+					if (!window.__wbTitleBackoff && document.title === state.title) document.title = state.base;
+					if (window.__wbTitleCleanup === dispose) delete window.__wbTitleCleanup;
+				}
+				window.__wbTitleCleanup = dispose;
+				return dispose;
 			}
 			function wbNavRememberBatch(id) {
 				var state = wbNavRunState(), batch = wbNavBatch(id), seen = state.seenBatches[id];
@@ -5100,7 +5158,9 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				});
 			}
 			if (gaps.status === "loading") return h(Empty, { loading: true, title: "取数中…", sub: "" });
-			if (gaps.status === "error") return h(Empty, { bad: true, title: "这个客户取不到薄弱问句", sub: weakErrorText(gaps.error, gaps.detail) });
+			if (gaps.status === "error") return h('div', null,
+				h(Empty, { bad: true, title: "这个客户取不到薄弱问句", sub: weakErrorText(gaps.error, gaps.detail) }),
+				h('div', {style:{padding:'0 14px 14px'}}, h('button', {type:'button', className:'wb_mini', onClick:gaps.refresh}, '重试')));
 			if (gaps.status !== "ready") return h(Empty, { title: "还没有数据", sub: "" });
 			if (gaps.questions.length === 0) return h(Empty, { title: "这一期没有问句", sub: "" });
 
@@ -6451,6 +6511,9 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 		exports.wbReviewListSize = wbReviewListSize;
 		exports.wbReviewListKey = wbReviewListKey;
 		exports.wbMergeBatchStatus = wbMergeBatchStatus;
+		exports.wbTitleLoopState = wbTitleLoopState;
+		exports.wbCaptureRetryDelay = wbCaptureRetryDelay;
+		exports.wbLoadCapture = wbLoadCapture;
 		/* Small pure helpers are exported for the browser-package contract tests. */
 		exports.wbUseUnifiedContext = useUnifiedContext;
 		exports.UnifiedReviewPortal = UnifiedReviewPortal;
