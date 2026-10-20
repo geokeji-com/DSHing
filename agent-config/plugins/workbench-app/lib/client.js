@@ -836,6 +836,19 @@ window.__ModuleLoader__.load({
 			"[data-slot='main.conversation'] .wb_prefoldHead .wb_pfT::before, [data-slot='main.conversation'] .wb_prefoldHead .wb_pfC::before{content:attr(data-t);}",
 			"[data-slot='main.conversation'] [data-wb-prefold][data-wb-open] > :not(.wb_prefoldHead){animation:wbFade var(--wb-motion,160ms) var(--wb-ease,ease);}",
 			"@media (prefers-reduced-motion: reduce){[data-slot='main.conversation'] .wb_prefoldHead,[data-slot='main.conversation'] [data-wb-prefold] > *{animation:none !important; transition:none !important;}}",
+			/* —— 电脑端统一宽度轴（2026-10-20 泽辰）：所有块落在官方 W = --dsh-chat-content-width
+			 * （clamp(680px, 会话栏×0.64, 920px)，审核面板开合由官方 ResizeObserver 重算）。
+			 * 只限电脑端；手机端（data-wb-mobile）规则一律不动。
+			 * 变量声明在 ConversationRoot .root 上（slot 是 display:contents 外壳），所以输入框变量
+			 * 覆盖在 .root 本身：唯一同时带 data-phase 且包含 data-conversation-scroll 的节点。 —— */
+			/* 输入框外框 = 消息栏实际宽：W，或栏窄于 W 时（审核面板开着）的可用宽。% 在使用处解析：
+			 * 卡片容器已扣一层 clearance，再扣一层就与消息栏（clearance + 16 每侧）对齐。 */
+			"html:not([data-wb-mobile]) [data-slot='main.conversation'] [data-phase]:has([data-conversation-scroll]){--dsh-composer-card-max-width:min(var(--dsh-chat-content-width), calc(100% - 2 * var(--dsh-composer-side-clearance, 16px)));}",
+			/* 「改哪几篇」条挂在 composerStack（未扣 clearance）下：宽度扣两层 clearance，与卡片同框。 */
+			"html:not([data-wb-mobile]) [data-slot='main.conversation'] .wb_pkRow{width:calc(100% - 4 * var(--dsh-composer-side-clearance, 16px));}",
+			"html:not([data-wb-mobile]) [data-slot='main.conversation'] .md-table-wide{box-sizing:border-box; width:100% !important; max-width:100% !important; margin-left:0 !important; padding-left:0 !important; overflow-x:auto;}",
+			"html:not([data-wb-mobile]) [data-slot='main.conversation'] :is(button[data-turn-process],[data-disclosure-row]){max-width:100%;}",
+			"html:not([data-wb-mobile]) [data-slot='main.conversation'] .wb_prefoldHead{max-width:min(calc(var(--dsh-chat-content-width, 748px) * 0.702), 100%);}",
 			/* —— 过程折叠总条（官方 data-turn-process 按钮，整轮一条）—— */
 			"[data-slot='main.conversation'] button[data-turn-process]{all:unset; box-sizing:border-box; display:flex; align-items:center; gap:8px; width:100%; max-width:640px; margin:2px 0 10px; padding:9px 14px; background:#fff; border:1px solid #e7e9ee; border-radius:13px; cursor:pointer; color:#565c6b; font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif; font-size:13px; line-height:1.6; box-shadow:0 1px 2px rgba(16,24,40,.04);}",
 			"[data-slot='main.conversation'] button[data-turn-process]::before{content:'💡'; font-size:13px; line-height:1;}",
