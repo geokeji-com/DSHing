@@ -58,7 +58,9 @@ test('loader is an inline 12px masked Klein Blue arc row in the message column, 
 
 test('motion hooks cover waiting, surfaces, controls, collapse and reduced motion including pseudo elements', () => {
   for (const hook of ['wb_skeletonLine::after', 'wb_mScrim', 'wb_mSheet', 'wb_mEditor', 'wb_mDrawer', 'wb_mReview', 'wb_reviewWrap', 'wb_rv', 'wb_rvCollapse', 'wb_confirmMask', 'wb_zoomMask', 'wb_nvItem', 'wb_mSession', 'wb_mSegment', 'wb_mChip', 'wb_go', 'wb_reviewMsg', 'wb_nvRenameError', 'wb_refBd', 'data-disclosure-row', 'dsh-tabbar a:active']) assert.ok(api.CSS.includes(hook), hook)
-  assert.doesNotMatch(api.CSS, /data-wb-prefold|data-wb-open|wb_prefoldHead|interpolate-size/)
+  assert.doesNotMatch(api.CSS, /interpolate-size|data-wb-pref-tail/)
+  assert.match(api.CSS, /\[data-wb-prefold\]\[data-wb-open\] > :not\(\.wb_prefoldHead\)\{animation:wbFade/)
+  assert.match(api.CSS, /@media \(prefers-reduced-motion: reduce\)\{\[data-slot='main\.conversation'\] \.wb_prefoldHead,[^}]*animation:none !important; transition:none !important;/)
   assert.match(api.CSS, /\.wb_mProgress\[open\] \.wb_mChecklist,\[data-slot='main\.conversation'\] \[data-disclosure-row\]\{animation:wbFade/)
   const reduced = api.CSS.match(/@media \(prefers-reduced-motion: reduce\)\{\[class\^='wb_'\][^\n]+/)[0]
   for (const hook of ['.wb_mProgress *', 'button[data-turn-process]', '[data-disclosure-row]', '.wb_mProgress::details-content']) assert.ok(reduced.includes(hook), hook)

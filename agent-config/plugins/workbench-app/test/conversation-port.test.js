@@ -122,10 +122,25 @@ function assertUnfolded(root) {
     assert.equal(root.querySelector(selector), null, selector)
   }
 }
+function header(item) { return item.querySelector(':scope > .wb_prefoldHead') }
+function assertFolded(item, open = false) {
+  const head = header(item)
+  assert.ok(head, 'header button present')
+  assert.equal(item.children[0], head, 'header is the first child of the message item')
+  assert.equal(item.getAttribute('data-wb-prefold'), '1')
+  assert.equal(item.hasAttribute('data-wb-open'), open)
+  assert.equal(head.getAttribute('aria-expanded'), open ? 'true' : 'false')
+  assert.equal(head.textContent, '', 'header adds no text nodes (CSS ::before only)')
+  assert.match(head.children[0].getAttribute('data-t'), /^📋 装配台初始上下文/)
+  assert.equal(head.children[1].getAttribute('data-t'), open ? '▾ 收起' : '▸ 展开全文')
+}
+function assertNoMarks(...nodes) {
+  for (const node of nodes) for (const name of ['data-wb-prefold', 'data-wb-open', 'data-wb-pref-tail']) assert.equal(node.hasAttribute(name), false, name)
+}
 
-test('prompt stays unfolded and verbatim while other messages are humanized in one guarded tick', () => {
+test('prompt folds on first insertion in one guarded tick; text stays verbatim; siblings untouched', () => {
   const f = fixture(), dispose = f.api.wbInstallConversation(), observer = f.observers[0]
-  const { anchor, tail, next } = prefill(f)
+  const { parent, anchor, tail, next } = prefill(f)
   const promptText = anchor.textContent, tailText = tail.textContent
   f.trace.length = 0
   observer.callback(); observer.callback(); observer.callback()
@@ -134,9 +149,12 @@ test('prompt stays unfolded and verbatim while other messages are humanized in o
   assert.equal(f.trace.length, 0, 'observer callback only schedules')
   f.flush()
   assertGuarded(f.trace)
-  assertUnfolded(f.root)
-  assert.equal(anchor.textContent, promptText, 'preserve all text, whitespace and raw tools across fragments')
-  assert.equal(tail.textContent, tailText, 'closest enclosing anchor also protects split prompt fragments')
+  assertFolded(anchor)
+  assert.equal(anchor.textContent, promptText, 'textContent identical: task-number parsing and titles unaffected')
+  assert.match(header(anchor).children[0].getAttribute('data-t'), /客户 测试客户/)
+  assertNoMarks(parent, tail, next)
+  assert.equal(header(parent), null, 'container of other flow items is never folded')
+  assert.equal(tail.textContent, tailText, 'unanchored sibling content is left alone')
   assert.equal(next.textContent, '知识库 · 读文件')
   assert.ok(observer.options.characterData)
   assert.ok(!observer.options.attributeFilter.includes('style'))
@@ -147,7 +165,7 @@ test('prompt stays unfolded and verbatim while other messages are humanized in o
   dispose()
 })
 
-for (const open of [false, true]) test(`old-version ${open ? 'open' : 'closed'} fold leftovers are cleaned once inside the conversation only`, () => {
+for (const open of [false, true]) test(`old-version ${open ? 'open' : 'closed'} fold leftovers become the new collapsed fold; tails cleared`, () => {
   const f = fixture(), { anchor, tail } = prefill(f)
   const promptText = anchor.textContent, tailText = tail.textContent
   const head = f.el('button', '装配台简报 · 点击查看全文 · 已注入'); head.className = 'wb_prefoldHead'
@@ -155,28 +173,20 @@ for (const open of [false, true]) test(`old-version ${open ? 'open' : 'closed'} 
   anchor.setAttribute('data-wb-prefold', '1')
   if (open) anchor.setAttribute('data-wb-open', '1')
   tail.setAttribute('data-wb-pref-tail', '1')
-  const orphan = f.el('div', '', { 'data-wb-open': '1' }); f.root.appendChild(orphan)
   const outside = f.el('button', 'unrelated', { 'data-wb-prefold': '1', 'data-wb-open': '1', 'data-wb-pref-tail': '1' })
   outside.className = 'wb_prefoldHead'; f.document.body.appendChild(outside)
   f.trace.length = 0
   const dispose = f.api.wbInstallConversation(), observer = f.observers[0]
   assertGuarded(f.trace)
-  assert.equal(f.trace.filter(x => x.op === 'remove').length, 1, 'remove only the old header')
-  assert.equal(f.trace.filter(x => x.op === 'remove attribute').length, 3 + Number(open), 'remove only attributes present')
-  assertUnfolded(f.root)
-  assert.equal(anchor.textContent, promptText, 'cleanup precedes raw-prompt detection')
+  assert.notEqual(header(anchor), head, 'old text-bearing header replaced')
+  assertFolded(anchor, false)
+  assert.equal(anchor.textContent, promptText)
+  assert.equal(tail.hasAttribute('data-wb-pref-tail'), false)
   assert.equal(tail.textContent, tailText)
   assert.equal(outside.parentNode, f.document.body)
-  for (const name of ['data-wb-prefold', 'data-wb-open', 'data-wb-pref-tail']) assert.equal(outside.getAttribute(name), '1')
+  for (const name of ['data-wb-prefold', 'data-wb-open', 'data-wb-pref-tail']) assert.equal(outside.getAttribute(name), '1', 'outside the conversation untouched')
   f.trace.length = 0; observer.callback(); f.flush()
-  assert.equal(f.trace.filter(x => x.observed !== undefined).length, 0, 'idle cleanup does not write')
-  // A later host render can restore old DOM. Every tick applies the same cleanup.
-  anchor.insertBefore(head, anchor.firstChild); anchor.setAttribute('data-wb-prefold', '1')
-  tail.setAttribute('data-wb-pref-tail', '1'); orphan.setAttribute('data-wb-open', '1')
-  f.trace.length = 0; observer.callback(); f.flush()
-  assertGuarded(f.trace); assertUnfolded(f.root)
-  f.trace.length = 0; observer.callback(); f.flush()
-  assert.equal(f.trace.filter(x => x.observed !== undefined).length, 0)
+  assert.equal(f.trace.filter(x => x.observed !== undefined).length, 0, 'idle tick does not write')
   dispose()
 })
 
@@ -192,15 +202,56 @@ test('prompt detection is recomputed when the host reuses a flow item; loader te
   const label = f.root.querySelector('.wb_ldrT')
   label.textContent = 'mcp__articles__write_article get_skill'
   f.trace.length = 0; observer.callback(); f.flush()
+  assertGuarded(f.trace)
+  assertFolded(item)
   assert.equal(item.textContent, promptText)
   assert.equal(label.textContent, 'mcp__articles__write_article get_skill')
-  assert.equal(f.trace.filter(x => x.observed !== undefined).length, 0)
+  assert.equal(f.root.querySelector('.wb_ldr').hasAttribute('data-wb-prefold'), false)
   item.textContent = '普通消息中的【装配台预填：mcp__sora-knowledge__read_kb_file get_skill'
   f.trace.length = 0; observer.callback(); f.flush()
   assertGuarded(f.trace)
   assert.equal(item.textContent, '普通消息中的【装配台预填：知识库 · 读文件 读取技能规则')
   assertUnfolded(f.root)
   dispose()
+})
+
+test('click expands to the verbatim full text and collapses again; state survives host re-render by anchor key', () => {
+  const f = fixture(), dispose = f.api.wbInstallConversation(), observer = f.observers[0]
+  const flow = f.el('div', '', { 'data-chat-flow': '' }); f.root.appendChild(flow)
+  const promptText = '【装配台预填 · 初始上下文】\n工具分工：mcp__sora-articles__write_article\n1. 客户：猿编程 · 期数：第二期 —— 先读\n2. 主题：写下面这些薄弱问句（共 4 条，每条一行）——\n[任务编号：wbtm-x]\n\n【文章问句关联】本会话 session_id="s1"'
+  const make = () => { const item = f.el('div', '', { 'data-chat-anchor-key': 'u1' }); item.appendChild(f.el('span', promptText)); return item }
+  let item = make(); flow.appendChild(item)
+  observer.callback(); f.flush()
+  assertFolded(item)
+  assert.equal(header(item).children[0].getAttribute('data-t'), `📋 装配台初始上下文 · 客户 猿编程 · 4 条问句 · 约 ${promptText.length} 字`)
+  f.trace.length = 0; header(item).events.click(); assertGuarded(f.trace)
+  assertFolded(item, true)
+  assert.equal(item.textContent, promptText, 'expanded: verbatim, raw tool names kept')
+  // Host replaces the node (same key) while streaming → stays open for this page lifetime.
+  flow.removeChild(item); item = make(); flow.appendChild(item)
+  observer.callback(); f.flush()
+  assertFolded(item, true)
+  header(item).events.click()
+  assertFolded(item, false)
+  flow.removeChild(item); item = make(); flow.appendChild(item)
+  observer.callback(); f.flush()
+  assertFolded(item, false)
+  dispose()
+})
+
+test('fresh page instance (reload / re-enter) is collapsed again and never touches web storage', () => {
+  const storage = new Proxy({}, { get() { throw Error('web storage must not be used') } })
+  const first = fixture()
+  const install = (f) => { const d = f.api.wbInstallConversation(); const item = f.el('div', '', { 'data-chat-anchor-key': 'u1' }); item.appendChild(f.el('span', '【装配台预填 · 初始上下文】\n客户：A')); f.root.appendChild(item); f.observers.at(-1).callback(); f.flush(); return { d, item } }
+  const a = install(first); header(a.item).events.click(); assertFolded(a.item, true); a.d()
+  const second = fixture()
+  const b = install(second)
+  assertFolded(b.item, false)
+  b.d()
+  assert.ok(storage)
+  const src = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  const fold = src.slice(src.indexOf('var wbPrefoldOpen'), src.indexOf('function wbConvAttr'))
+  assert.doesNotMatch(fold, /sessionStorage|localStorage/)
 })
 
 test('loader rotates while running, yields to official collapse on completion and cleans up on navigation', () => {
@@ -231,14 +282,14 @@ test('loader rotates while running, yields to official collapse on completion an
   assert.equal(f.microtasks.size, 0)
 })
 
-test('reinstall replaces the observer and leaves the full prompt undecorated', () => {
+test('reinstall replaces the observer and keeps the prompt collapsed', () => {
   const f = fixture(), { anchor } = prefill(f), promptText = anchor.textContent
   const firstDispose = f.api.wbInstallConversation(), first = f.observers[0]
   const dispose = f.api.wbInstallConversation(), current = f.observers[1]
   assert.equal(first.connected, false)
   assert.equal(current.connected, true)
   firstDispose()
-  assertUnfolded(f.root)
+  assertFolded(anchor)
   assert.equal(anchor.textContent, promptText)
   current.callback(); dispose(); f.flush()
   assert.equal(current.connected, false)
@@ -280,7 +331,7 @@ test('loader renders inline as the last item of the chat flow column and stays l
   dispose()
 })
 
-test('real harness column: full prompt, reply and tool rows stay visible with the loader last', () => {
+test('real harness column: prompt collapsed at send, while running and after the run; loader and replies visible', () => {
   const f = fixture(), dispose = f.api.wbInstallConversation(), observer = f.observers[0]
   // Real ChatView: every flow item is a direct child of [data-chat-flow] and carries data-chat-anchor-key;
   // the host TurnStatus (role=status) is the last React child while running.
@@ -292,12 +343,13 @@ test('real harness column: full prompt, reply and tool rows stay visible with th
   const stop = f.el('button', '', { 'aria-label': '停止生成' })
   flow.appendChild(prompt); flow.appendChild(hostStatus); f.root.appendChild(flow); f.root.appendChild(stop)
   observer.callback(); f.flush()
+  assertFolded(prompt)
   const ldr = f.root.querySelector('.wb_ldr')
   assert.ok(ldr, 'running → inline row exists')
   assert.equal(ldr.parentNode, flow); assert.equal(flow.children.at(-1), ldr, 'row is the last item of the flow column')
-  assertUnfolded(f.root)
+  assertNoMarks(ldr, hostStatus)
   assert.equal(prompt.textContent, promptText)
-  // Older/foreign mark left on a node that is no longer a tail (prod: marked before the reply arrived).
+  // Older/foreign tail marks are cleared; siblings are never folded.
   hostStatus.setAttribute('data-wb-pref-tail', '1'); ldr.setAttribute('data-wb-pref-tail', '1')
   const reply = f.el('div', '我先加载两个技能', { 'data-chat-anchor-key': 'a1', 'data-chat-flow-key': 'a1' })
   const skill = f.el('div', 'mcp__sora-knowledge__read_kb_file', { 'data-chat-anchor-key': 'a2', 'data-chat-flow-key': 'a2' })
@@ -305,27 +357,27 @@ test('real harness column: full prompt, reply and tool rows stay visible with th
   flow.insertBefore(reply, hostStatus); flow.insertBefore(skill, hostStatus)
   f.trace.length = 0
   observer.callback(); f.flush()
-  assertUnfolded(f.root)
+  assertGuarded(f.trace)
+  assertFolded(prompt)
+  assertNoMarks(ldr, hostStatus, reply, skill)
   assert.equal(prompt.textContent, promptText)
   assert.equal(reply.textContent, '我先加载两个技能')
   assert.equal(skill.textContent, '知识库 · 读文件')
   assert.equal(flow.children.at(-1), ldr, 'row stays after the latest tool line')
-  assertGuarded(f.trace)
-  // A second tick with no host change writes nothing (no loop).
   f.trace.length = 0
   observer.callback(); f.flush()
   assert.equal(f.trace.filter(x => x.observed !== undefined).length, 0, 'idle tick performs no DOM writes')
-  // Unanchored siblings are ordinary visible content, never collected as prompt tails.
   const legacyTail = f.el('div', '主题：共 2 条。')
   flow.insertBefore(legacyTail, reply)
   observer.callback(); f.flush()
-  assertUnfolded(f.root)
+  assertNoMarks(legacyTail)
   assert.equal(legacyTail.textContent, '主题：共 2 条。')
   assert.equal(flow.children.at(-1), ldr)
-  // Run ends: stop button gone → row removed.
+  // Run ends: stop button gone → row removed, prompt stays collapsed (never auto-expands).
   f.root.removeChild(stop); observer.callback(); f.flush()
   assert.equal(f.root.querySelector('.wb_ldr'), null)
   assert.equal(f.root.hasAttribute('data-wb-running'), false)
+  assertFolded(prompt, false)
   assert.equal(hostStatus.parentNode, flow, 'host status remains for its own lifecycle')
   assert.equal(f.intervals.size, 0)
   dispose()

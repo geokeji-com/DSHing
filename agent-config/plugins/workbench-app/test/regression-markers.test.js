@@ -60,9 +60,13 @@ test('light process cards, pills, loader and wrapping markdown tables retain the
   assert.match(api.CSS, /th\{border-bottom:2px solid #cfdcff; background:#eef3ff/)
 })
 
-test('desktop and mobile leave the injected prompt to the harness with no prefill fold styles', () => {
-  assert.doesNotMatch(api.CSS, /data-wb-prefold|data-wb-pref-tail|data-wb-open|wb_prefoldHead|wb_pf(?:T|Tag|C)/)
-  assert.doesNotMatch(source, /function wbPrefoldSummary\b|function wbConvStatusRow\b|liveTails|_wbSync/)
+test('desktop and mobile fold the injected 装配台预填 message by default (10-20; supersedes 10-19 full display)', () => {
+  assert.match(api.CSS, /\[data-slot='main\.conversation'\] \[data-wb-prefold\]:not\(\[data-wb-open\]\) > :not\(\.wb_prefoldHead\)\{display:none !important;\}/)
+  assert.match(api.CSS, /\.wb_prefoldHead\{all:unset;[^}]*background:#eef2fb;[^}]*color:#002FA7;/)
+  assert.match(api.CSS, /\.wb_pfT::before, \[data-slot='main\.conversation'\] \.wb_prefoldHead \.wb_pfC::before\{content:attr\(data-t\);\}/, 'header text is CSS-generated, never in textContent')
+  assert.doesNotMatch(api.CSS, /data-wb-pref-tail\]\{display|max-height:37px/)
+  assert.doesNotMatch(source, /function wbConvStatusRow\b|liveTails|sessionStorage\.setItem\([^)]*prefold|localStorage\.setItem\([^)]*prefold/)
+  assert.match(source, /var wbPrefoldOpen = new Map\(\);/)
   const mobileChat = api.CSS.match(/html\[data-wb-mobile\] \[data-slot='conversation\.chat\.node'\]\{([^}]+)\}/)[1]
   assert.doesNotMatch(mobileChat, /display:none|max-height|overflow:hidden|line-clamp|white-space/)
   assert.match(mobileChat, /font-size:16px;line-height:26px/)
