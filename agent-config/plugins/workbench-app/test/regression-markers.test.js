@@ -92,3 +92,20 @@ test('desktop conversation blocks share the harness width axis W; mobile rules u
   assert.equal(mobile.length, 191)
   assert.equal(createHash('sha256').update(mobile.join('\n')).digest('hex').slice(0, 16), '721ae5a02b269517', 'mobile rules byte-identical to #50 (5bb4f43)')
 })
+
+test('desktop batch round label lives in the 改哪几篇 pick bar; floating card is mobile-only (10-20)', () => {
+  const desk = "html:not([data-wb-mobile]) [data-slot='main.conversation'] "
+  for (const sel of ['.wb_pkRound{', ':is(.wb_pkStop,.wb_pkFail > summary){', '.wb_pkFail{']) assert.ok(api.CSS.includes(desk + sel), sel)
+  // Every new rule string is desktop-scoped; ellipsis keeps the #51 width axis.
+  const added = source.split('\n').filter(l => /wb_pkRound|wb_pkStop|wb_pkFail/.test(l) && l.trim().startsWith('"'))
+  assert.equal(added.length, 3)
+  for (const line of added) for (const block of line.split('} ').map(b => b.replace(/^\s*"/, ''))) assert.ok(block.startsWith(desk), block.slice(0, 80))
+  assert.match(api.CSS, /:is\(\.wb_pkRoundT,\.wb_pkRoundE\)\{min-width:0; overflow:hidden; text-overflow:ellipsis;\}/)
+  // PickBar reads the batch rounds (not the harness turn counter) and hides the round part on mobile.
+  assert.match(source, /var batch = useWbBatch\(sessionId\);/)
+  assert.match(source, /var roundText = mobileBar \? "" : wbBatchRoundLabel\(batch\);/)
+  assert.match(source, /if \(pending\.length === 0\) return round \? h\("div", \{ className: "wb_pkRow is-round" \}, round\) : null;/)
+  // BatchRelay still drives the batch everywhere but only renders the floating card on mobile.
+  assert.match(source, /if \(!batch \|\| !mobileCard \|\| !wbBatchViews\[key\]/)
+  assert.match(source, /\.wb_batch\{position:fixed;z-index:100;bottom:100px;right:24px;/, 'mobile floating card styles unchanged')
+})

@@ -59,6 +59,7 @@ window.__ModuleLoader__.load({
 			var st = React.useState(WB_MOBILE.matches);
 			React.useEffect(function () {
 				function changed() { st[1](WB_MOBILE.matches); }
+				if (typeof WB_MOBILE.addEventListener !== 'function') return undefined;
 				WB_MOBILE.addEventListener('change', changed);
 				return function () { WB_MOBILE.removeEventListener('change', changed); };
 			}, []);
@@ -846,6 +847,10 @@ window.__ModuleLoader__.load({
 			"html:not([data-wb-mobile]) [data-slot='main.conversation'] [data-phase]:has([data-conversation-scroll]){--dsh-composer-card-max-width:min(var(--dsh-chat-content-width), calc(100% - 2 * var(--dsh-composer-side-clearance, 16px)));}",
 			/* 「改哪几篇」条挂在 composerStack（未扣 clearance）下：宽度扣两层 clearance，与卡片同框。 */
 			"html:not([data-wb-mobile]) [data-slot='main.conversation'] .wb_pkRow{width:calc(100% - 4 * var(--dsh-composer-side-clearance, 16px));}",
+			/* 批次轮次段（2026-10-20 泽辰）：「改哪几篇」条最左；文字过长省略号，不撑宽度轴；失败轮次点开小列表向上弹出。 */
+			"html:not([data-wb-mobile]) [data-slot='main.conversation'] .wb_pkRound{flex:0 1 auto; min-width:0; max-width:50%; display:flex; align-items:center; gap:6px; margin-right:4px; padding-right:10px; border-right:1px solid #e5e7eb; font-size:12px; color:#002FA7; font-weight:600; white-space:nowrap;} html:not([data-wb-mobile]) [data-slot='main.conversation'] .wb_pkRow.is-round .wb_pkRound{max-width:100%; border-right:0; padding-right:0;} html:not([data-wb-mobile]) [data-slot='main.conversation'] :is(.wb_pkRoundT,.wb_pkRoundE){min-width:0; overflow:hidden; text-overflow:ellipsis;} html:not([data-wb-mobile]) [data-slot='main.conversation'] .wb_pkRoundT{flex:0 0.01 auto;}",
+			"html:not([data-wb-mobile]) [data-slot='main.conversation'] :is(.wb_pkStop,.wb_pkFail > summary){all:unset; flex:none; box-sizing:border-box; height:22px; padding:0 6px; border-radius:6px; font-size:12px; line-height:22px; font-weight:400; color:#4b5563; cursor:pointer; list-style:none;} html:not([data-wb-mobile]) [data-slot='main.conversation'] :is(.wb_pkStop,.wb_pkFail > summary):hover{background:rgba(0,47,167,.06); color:#002FA7;} html:not([data-wb-mobile]) [data-slot='main.conversation'] .wb_pkStop:disabled{opacity:.5; cursor:default;} html:not([data-wb-mobile]) [data-slot='main.conversation'] .wb_pkFail > summary{color:#c0392b;} html:not([data-wb-mobile]) [data-slot='main.conversation'] .wb_pkRoundE{font-weight:400; color:#c0392b;}",
+			"html:not([data-wb-mobile]) [data-slot='main.conversation'] .wb_pkFail{position:relative; flex:none;} html:not([data-wb-mobile]) [data-slot='main.conversation'] .wb_pkFail > ul{position:absolute; left:0; bottom:calc(100% + 6px); z-index:5; width:max-content; max-width:360px; max-height:180px; overflow:auto; margin:0; padding:8px 12px 8px 26px; background:#fff; border:1px solid #e5e7eb; border-radius:10px; box-shadow:0 4px 18px #0002; font-weight:400; color:#25252b; white-space:normal;} html:not([data-wb-mobile]) [data-slot='main.conversation'] .wb_pkRow:has(.wb_pkFail[open]){clip-path:none;}",
 			"html:not([data-wb-mobile]) [data-slot='main.conversation'] .md-table-wide{box-sizing:border-box; width:100% !important; max-width:100% !important; margin-left:0 !important; padding-left:0 !important; overflow-x:auto;}",
 			"html:not([data-wb-mobile]) [data-slot='main.conversation'] :is(button[data-turn-process],[data-disclosure-row]){max-width:100%;}",
 			"html:not([data-wb-mobile]) [data-slot='main.conversation'] .wb_prefoldHead{max-width:min(calc(var(--dsh-chat-content-width, 748px) * 0.702), 100%);}",
@@ -2809,6 +2814,15 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			return wbBatchFor(sessionId);
 		}
 		function wbBatchEmit() { window.dispatchEvent(new Event("wb:batch-change")); }
+		/* 批次轮次标签（2026-10-20 泽辰）：电脑端挂在「改哪几篇」条最左边；单轮/无批次返回空串不显示。
+		 * 数据只认 wbBatches 的批次轮次，不是 harness 底部「N 轮 M 步」的会话轮数。 */
+		function wbBatchRoundLabel(batch) {
+			if (!batch || !(Number(batch.rounds) > 1) || !Array.isArray(batch.records)) return "";
+			if (batch.status === "done" || batch.status === "failed_partial") return "共 " + batch.rounds + " 轮 · 本批已结束";
+			var row = batch.records.find(function (r) { return r.status !== "ok" && r.status !== "failed"; });
+			var at = "第 " + (row ? row.round : batch.rounds) + "/" + batch.rounds + " 轮";
+			return batch.status === "stopping" ? at + " · 正在停止" : batch.status === "stopped" ? at + " · 已停止" : at;
+		}
 		function wbBatchTitles(batch, titles) {
 			if (batch) batch.records.forEach(function (r) { if (r.status === "ok" && r.title) titles[r.title] = true; });
 			return titles;
@@ -2977,6 +2991,8 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			var session = typeof props.useSession === "function" ? props.useSession(function (s) { return s; }) : null;
 			var tick = React.useState(0), live = React.useRef(null), key = wbBatchKey(props.sessionId);
 			var seat = React.useRef({});
+			/* 电脑端浮卡已并进「改哪几篇」条（PickBar）；这里照常驱动批次，只是不再渲染浮卡。手机端不变。 */
+			var mobileCard = useWbMobile();
 			var nodes = snap && snap.legacy && snap.legacy.nodes;
 			var hint = wbBatchHint(Array.isArray(nodes) ? nodes : []);
 			try { hint = hint || sessionStorage.getItem("wb-batch-for-" + key) || ""; } catch (e) { }
@@ -3053,7 +3069,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				};
 			}, [key, hint]);
 			var entry = wbBatches[key], batch = entry && entry.batch;
-			if (!batch || !wbBatchViews[key] || wbBatchViews[key][0] !== seat.current) return null;
+			if (!batch || !mobileCard || !wbBatchViews[key] || wbBatchViews[key][0] !== seat.current) return null;
 			var row = batch.records.find(function (r) { return r.status !== "ok" && r.status !== "failed"; });
 			function stop() {
 				if (!mounted.current || live.current.key !== key || wbBatchKey(props.sessionId) !== key
@@ -3905,12 +3921,43 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				}, []);
 				return s[0];
 			}
-			function PickBar() {
+			function PickBar(props) {
 				useWbPickTick();
+				var sessionId = props && props.sessionId;
+				var mobileBar = useWbMobile();
+				var batch = useWbBatch(sessionId);
+				var barLive = React.useRef(null);
+				barLive.current = { sessionId: sessionId, key: wbBatchKey(sessionId) };
+				React.useEffect(function () {
+					return function () { barLive.current = null; };
+				}, [sessionId]);
 				var drafts = WB_PICK.drafts || [];
 				var done = WB_PICK.done || {};
 				var pending = drafts.filter(function (d) { return done[d.title] !== true; });
-				if (pending.length === 0) return null;
+				/* 轮次段只在电脑端（手机端保留右下浮卡）；有待审草稿或多轮批次任一成立就显示 */
+				var roundText = mobileBar ? "" : wbBatchRoundLabel(batch);
+				var round = null;
+				if (roundText) {
+					var roundKey = wbBatchKey(sessionId), roundEntry = wbBatches[roundKey];
+					var failed = batch.records.filter(function (r) { return r.status === "failed"; });
+					round = h("div", { className: "wb_pkRound", role: "status", "data-wb-batch-status": batch.status },
+						h("span", { className: "wb_pkRoundT", title: roundText }, roundText),
+						batch.status === "running" ? h("button", {
+							type: "button", className: "wb_pkStop", disabled: !!(roundEntry && roundEntry.stopping),
+							onClick: function () {
+								var live = barLive.current;
+								if (!live || live.sessionId !== sessionId || live.key !== roundKey || wbBatchKey(sessionId) !== roundKey) return;
+								var entry = wbBatches[roundKey];
+								if (!entry || !entry.batch || entry.batch.status !== "running" || entry.stopping) return;
+								wbBatchStop(entry, sessionId);
+							},
+						}, "停止本批") : null,
+						failed.length ? h("details", { className: "wb_pkFail" },
+							h("summary", { title: failed.map(function (r) { return "第 " + r.round + " 轮：" + (r.reason || "失败"); }).join("\n") }, failed.length + " 轮失败"),
+							h("ul", null, failed.map(function (r) { return h("li", { key: r.round }, "第 " + r.round + " 轮：" + (r.reason || "失败")); }))) : null,
+						roundEntry && roundEntry.error ? h("span", { className: "wb_pkRoundE", title: roundEntry.error }, roundEntry.error) : null);
+				}
+				if (pending.length === 0) return round ? h("div", { className: "wb_pkRow is-round" }, round) : null;
 				var allOn = pending.every(function (d) { return WB_PICK.sel[d.title] === true; });
 				/* 硬检摘要（R 区检查完成后写入）：红点/绿点的提示文案用真实数 */
 				var hcMap = WB_PICK.hc || null;
@@ -3920,6 +3967,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					if ((c.fail || 0) + (c.proof || 0) + (c.warn || 0) > 0) badN++;
 				});
 				return h("div", { className: "wb_pkRow" },
+					round,
 					h("span", { className: "wb_pkK" }, "改哪几篇"),
 					h("div", { className: "wb_pkChips" },
 						pending.map(function (d, idx) {
