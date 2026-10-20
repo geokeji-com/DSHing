@@ -72,3 +72,23 @@ test('desktop and mobile fold the injected 装配台预填 message by default (1
   assert.match(mobileChat, /font-size:16px;line-height:26px/)
   assert.match(source, /!String\(title\)\.trim\(\)\.startsWith\('【装配台预填'\)/, 'session-title fallback still recognizes the prefix')
 })
+
+test('desktop conversation blocks share the harness width axis W; mobile rules untouched (10-20)', async () => {
+  const { createHash } = await import('node:crypto')
+  const desk = "html:not([data-wb-mobile]) [data-slot='main.conversation'] "
+  const rule = (sel) => { const at = api.CSS.indexOf(desk + sel + '{'); assert.ok(at !== -1, sel); return api.CSS.slice(at, api.CSS.indexOf('}', at) + 1) }
+  assert.match(rule('[data-phase]:has([data-conversation-scroll])'), /--dsh-composer-card-max-width:min\(var\(--dsh-chat-content-width\), calc\(100% - 2 \* var\(--dsh-composer-side-clearance, 16px\)\)\);/, 'composer plan A: card outer edge = message column (W, or the narrower available width), set on ConversationRoot .root (no hashed classes)')
+  assert.match(rule('.wb_pkRow'), /width:calc\(100% - 4 \* var\(--dsh-composer-side-clearance, 16px\)\);/, '改哪几篇 strip shares the card box')
+  const table = rule('.md-table-wide')
+  for (const token of ['width:100% !important', 'max-width:100% !important', 'margin-left:0 !important', 'padding-left:0 !important', 'overflow-x:auto']) assert.ok(table.includes(token), token)
+  assert.match(rule(':is(button[data-turn-process],[data-disclosure-row])'), /\{max-width:100%;\}/)
+  assert.match(rule('.wb_prefoldHead'), /max-width:min\(calc\(var\(--dsh-chat-content-width, 748px\) \* 0\.702\), 100%\)/, 'prefold header cap = harness user bubble cap')
+  // #50 fold logic and markers stay as shipped.
+  assert.match(api.CSS, /\[data-wb-prefold\]:not\(\[data-wb-open\]\) > :not\(\.wb_prefoldHead\)\{display:none !important;\}/)
+  assert.match(source, /var wbPrefoldOpen = new Map\(\);/)
+  // No new width rule leaks into the user bubble or into mobile.
+  assert.doesNotMatch(api.CSS, /html:not\(\[data-wb-mobile\]\)[^{]*_bubble/)
+  const mobile = source.split('\n').filter(l => l.includes('data-wb-mobile]') && !l.includes('html:not([data-wb-mobile])'))
+  assert.equal(mobile.length, 191)
+  assert.equal(createHash('sha256').update(mobile.join('\n')).digest('hex').slice(0, 16), '721ae5a02b269517', 'mobile rules byte-identical to #50 (5bb4f43)')
+})
