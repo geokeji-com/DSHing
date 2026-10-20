@@ -822,6 +822,20 @@ window.__ModuleLoader__.load({
 			 * 锚点全用官方 data-*：data-chat-anchor-key（条目）、data-turn-process（过程折叠总条）、
 			 * data-disclosure-row（过程内每行）。
 			 * 保留原型的浅色样式；主题由 forceLightTheme 统一固定。 */
+			/* —— 装配台预填消息折叠（2026-10-20 泽辰：默认收起，发出即收起、跑完保持收起；点开逐字看全）——
+			 * 只给该条 [data-chat-anchor-key] 打 data-wb-prefold，不碰兄弟节点；头部文字全由 ::before 生成，
+			 * 不进 textContent（任务编号解析/会话标题/历史过滤读到的文本不变）。 */
+			"[data-slot='main.conversation'] [data-wb-prefold]{display:flex !important; flex-direction:column; align-items:flex-end;}",
+			/* !important：chat.node 带内联 display:contents，样式表规则必须 !important 才压得过 */
+			"[data-slot='main.conversation'] [data-wb-prefold]:not([data-wb-open]) > :not(.wb_prefoldHead){display:none !important;}",
+			".wb_root button.wb_prefoldHead, [data-slot='main.conversation'] .wb_prefoldHead{all:unset; box-sizing:border-box; display:flex; align-items:center; gap:8px; width:auto; max-width:min(640px,100%); min-width:0; margin:2px 0 8px; padding:7px 12px; background:#eef2fb; border:1px solid #d6def3; border-radius:12px; color:#002FA7; font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif; font-size:12.5px; line-height:1.5; cursor:pointer; user-select:none; transition:background-color var(--wb-motion-fast,120ms) ease;}",
+			"[data-slot='main.conversation'] .wb_prefoldHead:hover{background:#e3e9f8;}",
+			"[data-slot='main.conversation'] .wb_prefoldHead:focus-visible{outline:2px solid #002FA7; outline-offset:2px;}",
+			"[data-slot='main.conversation'] .wb_prefoldHead .wb_pfT{min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}",
+			"[data-slot='main.conversation'] .wb_prefoldHead .wb_pfC{flex:none; margin-left:auto; font-size:11.5px; font-weight:600;}",
+			"[data-slot='main.conversation'] .wb_prefoldHead .wb_pfT::before, [data-slot='main.conversation'] .wb_prefoldHead .wb_pfC::before{content:attr(data-t);}",
+			"[data-slot='main.conversation'] [data-wb-prefold][data-wb-open] > :not(.wb_prefoldHead){animation:wbFade var(--wb-motion,160ms) var(--wb-ease,ease);}",
+			"@media (prefers-reduced-motion: reduce){[data-slot='main.conversation'] .wb_prefoldHead,[data-slot='main.conversation'] [data-wb-prefold] > *{animation:none !important; transition:none !important;}}",
 			/* —— 过程折叠总条（官方 data-turn-process 按钮，整轮一条）—— */
 			"[data-slot='main.conversation'] button[data-turn-process]{all:unset; box-sizing:border-box; display:flex; align-items:center; gap:8px; width:100%; max-width:640px; margin:2px 0 10px; padding:9px 14px; background:#fff; border:1px solid #e7e9ee; border-radius:13px; cursor:pointer; color:#565c6b; font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif; font-size:13px; line-height:1.6; box-shadow:0 1px 2px rgba(16,24,40,.04);}",
 			"[data-slot='main.conversation'] button[data-turn-process]::before{content:'💡'; font-size:13px; line-height:1;}",
@@ -2359,6 +2373,70 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 				return (library === "articles" ? "文章库" : "知识库") + " · " + (WB_TOOL_LABELS[name] || name.replace(/_/g, " "));
 			}).replace(/\bget_skill\b/g, "读取技能规则");
 		}
+		/* 装配台预填折叠：展开状态只存内存（按 anchor key），刷新/重进会话一律回到收起。 */
+		var wbPrefoldOpen = new Map();
+		function wbPrefoldSummary(t) {
+			var bits = ["📋 装配台初始上下文"];
+			var client = (t.match(/客户：([^\n·—]+)/) || [])[1];
+			if (client && client.trim() !== "") bits.push("客户 " + client.trim());
+			var q = (t.match(/共\s*(\d+)\s*条/) || [])[1];
+			if (q) bits.push(q + " 条问句");
+			var n = t.length;
+			bits.push("约 " + (n >= 1000 ? (Math.round(n / 100) / 10).toFixed(1) + "k" : String(n)) + " 字");
+			return bits.join(" · ");
+		}
+		function wbConvPrefold(root, update) {
+			var items = root.querySelectorAll("[data-chat-anchor-key]");
+			for (var i = 0; i < items.length; i++) (function (el) {
+				var head = el.querySelector(":scope > .wb_prefoldHead");
+				/* Containers of other flow items are never the prompt message itself. */
+				if (el.querySelector("[data-chat-anchor-key]")) {
+					if (head) el.removeChild(head);
+					wbConvAttr(el, "data-wb-prefold", null);
+					wbConvAttr(el, "data-wb-open", null);
+					return;
+				}
+				/* A header left by an older client version carried text nodes; rebuild it. */
+				if (head && (head.textContent || "") !== "") { el.removeChild(head); head = null; }
+				/* The header carries no text nodes, so textContent is exactly the host message. */
+				var t = (el.textContent || "").trim();
+				if (t.indexOf("【装配台预填") !== 0) {
+					if (head) el.removeChild(head);
+					wbConvAttr(el, "data-wb-prefold", null);
+					wbConvAttr(el, "data-wb-open", null);
+					return;
+				}
+				var key = el.getAttribute("data-chat-anchor-key") || "";
+				wbConvAttr(el, "data-wb-prefold", "1");
+				if (!head) {
+					head = document.createElement("button");
+					head.type = "button"; head.className = "wb_prefoldHead";
+					["wb_pfT", "wb_pfC"].forEach(function (name) {
+						var span = document.createElement("span"); span.className = name; span.setAttribute("aria-hidden", "true"); head.appendChild(span);
+					});
+					head.addEventListener("click", function () {
+						var item = head.parentNode, k = item && item.getAttribute ? item.getAttribute("data-chat-anchor-key") || "" : "";
+						if (!item) return;
+						head._wbUpdate(function () {
+							if (wbPrefoldOpen.get(k)) wbPrefoldOpen.delete(k); else wbPrefoldOpen.set(k, true);
+							head._wbSync(item, k);
+						});
+					});
+					el.insertBefore(head, el.firstChild);
+				}
+				head._wbUpdate = update;
+				head._wbSync = function (item, k) {
+					var open = wbPrefoldOpen.get(k) === true;
+					wbConvAttr(item, "data-wb-open", open ? "1" : null);
+					wbConvAttr(head, "aria-expanded", open ? "true" : "false");
+					wbConvAttr(head, "aria-label", (open ? "收起" : "展开") + "装配台初始上下文全文");
+					wbConvAttr(head, "title", open ? "收起" : "展开全文");
+					wbConvAttr(head.children[0], "data-t", wbPrefoldSummary(t));
+					wbConvAttr(head.children[1], "data-t", open ? "▾ 收起" : "▸ 展开全文");
+				};
+				head._wbSync(el, key);
+			})(items[i]);
+		}
 		function wbConvAttr(el, name, value) {
 			if (value === null) {
 				if (el.hasAttribute(name)) el.removeAttribute(name);
@@ -2382,13 +2460,10 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			var root = document.querySelector("[data-slot='main.conversation']");
 			if (previousLoader && (!root || !wbConvInside(root, previousLoader))) wbRemoveLoader(previousLoader);
 			if (!root) return null;
-			/* Remove old-version fold decorations inside update(), without touching clean nodes. */
-			var heads = root.querySelectorAll(".wb_prefoldHead");
-			for (var i = 0; i < heads.length; i++) heads[i].parentNode.removeChild(heads[i]);
-			["data-wb-prefold", "data-wb-open", "data-wb-pref-tail"].forEach(function (name) {
-				var marked = root.querySelectorAll("[" + name + "]");
-				for (var m = 0; m < marked.length; m++) wbConvAttr(marked[m], name, null);
-			});
+			/* 装配台预填：首次出现即收起（微任务早于首帧绘制，不闪全文）；只动该条目本身。 */
+			var tails = root.querySelectorAll("[data-wb-pref-tail]");
+			for (var tl = 0; tl < tails.length; tl++) wbConvAttr(tails[tl], "data-wb-pref-tail", null);
+			wbConvPrefold(root, update);
 			var prows = root.querySelectorAll("[data-disclosure-row]");
 			for (var p = 0; p < prows.length; p++) {
 				var ttl = prows[p].children[1];
