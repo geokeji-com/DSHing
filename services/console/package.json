@@ -1,0 +1,11 @@
+{
+  "name": "dsh-console",
+  "private": true,
+  "type": "module",
+  "description": "内容控制台服务端。实时协同（分享页 + 内部审阅）用 Hocuspocus/Yjs，其余仍是 node:http 零依赖",
+  "dependencies": {
+    "@hocuspocus/server": "4.7.1",
+    "ws": "8.18.3",
+    "yjs": "13.6.33"
+  }
+}
