@@ -5,6 +5,657 @@ window.__ModuleLoader__.load({
 		var exports = module.exports;
 		var React = require("react");
 		var h = React.createElement;
+		var createPortal = require("react-dom").createPortal;
+		/* Keep exiting surfaces mounted for one shared motion interval. Reopening
+		 * cancels disposal; reduced motion also skips the JS retention delay. */
+		function wbAfterMotion(done) {
+			var media = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)');
+			var duration = parseFloat(window.getComputedStyle(document.body).getPropertyValue('--wb-motion-panel')) || 220;
+			var timer;
+			function cancel() { clearTimeout(timer); if (media) media.removeEventListener('change', changed); }
+			function finish() { cancel(); done(); }
+			function changed() { if (media.matches) finish(); }
+			if (media && media.matches) { done(); return function () {}; }
+			timer = setTimeout(finish, duration);
+			if (media) media.addEventListener('change', changed);
+			return cancel;
+		}
+		function WbPresence(p) {
+			var show = !!p.children, present = React.useState(show), last = React.useRef(null);
+			if (show) last.current = p.children;
+			React.useEffect(function () {
+				if (show) { present[1](true); return; }
+				if (!present[0]) return;
+				return wbAfterMotion(function () { present[1](false); });
+			}, [show]);
+			return show || present[0] ? React.cloneElement(last.current, {
+				'data-wb-leave': show ? undefined : '1', inert: show ? undefined : true,
+				'aria-hidden': show ? undefined : true,
+			}) : null;
+		}
+		function WbCollapse(p) {
+			return h('div', {className:'wb_collapse' + (p.className ? ' ' + p.className : ''), 'data-open':p.open ? '1' : '0', 'aria-hidden':!p.open, inert:p.open ? undefined : true},
+				h('div', {className:'wb_collapseInner'}, p.children));
+		}
+		function WbSkeleton(p) {
+			return h('div', {className:'wb_skeleton' + (p.compact ? ' wb_skeletonCompact' : ''), role:'status', 'aria-busy':true},
+				p.label ? h('span', {className:'wb_skeletonLabel'}, p.label) : null,
+				h('div', {className:'wb_skeletonBlocks', 'aria-hidden':true}, [0,1,2].map(function (i) { return h('span', {className:'wb_skeletonLine', key:i}); })));
+		}
+		function wbShowSkeleton(el, label) {
+			el.textContent = '';
+			var skeleton = document.createElement('div'); skeleton.className = 'wb_skeleton';
+			skeleton.setAttribute('role', 'status');
+			var caption = document.createElement('span'); caption.className = 'wb_skeletonLabel'; caption.textContent = label;
+			var blocks = document.createElement('div'); blocks.className = 'wb_skeletonBlocks'; blocks.setAttribute('aria-hidden', 'true');
+			[0,1,2].forEach(function () { var line = document.createElement('span'); line.className = 'wb_skeletonLine'; blocks.appendChild(line); });
+			skeleton.appendChild(caption); skeleton.appendChild(blocks); el.appendChild(skeleton);
+		}
+		/* Mobile adapters: keep the desktop tree and every write handler intact. */
+		var WB_MOBILE = typeof window.matchMedia === 'function'
+			? window.matchMedia('(max-width: 767px)')
+			: { matches: false, addEventListener: function () {}, removeEventListener: function () {} };
+		function useWbMobile() {
+			var st = React.useState(WB_MOBILE.matches);
+			React.useEffect(function () {
+				function changed() { st[1](WB_MOBILE.matches); }
+				WB_MOBILE.addEventListener('change', changed);
+				return function () { WB_MOBILE.removeEventListener('change', changed); };
+			}, []);
+			return st[0];
+		}
+		function wbReviewListSize(value, containerWidth) {
+			/* Below 392px the two minima cannot fit; keep them and allow scrolling. */
+			var max = Math.max(112, Math.min(420, Math.floor(containerWidth) - 280));
+			var width = Number(value);
+			if (value == null || String(value).trim() === '' || !Number.isFinite(width)) width = 152;
+			return { min: 112, max: max, width: Math.max(112, Math.min(max, Math.round(width))) };
+		}
+		function wbReviewListKey(width, key, shift, containerWidth) {
+			var size = wbReviewListSize(width, containerWidth), step = shift ? 32 : 8;
+			switch (key) {
+				case 'ArrowLeft': width = size.width - step; break;
+				case 'ArrowRight': width = size.width + step; break;
+				case 'Home': width = size.min; break;
+				case 'End': width = size.max; break;
+				case 'Enter': width = 152; break;
+				default: return null;
+			}
+			return wbReviewListSize(width, containerWidth).width;
+		}
+		/* Shared by the React review columns (including UnifiedReviewPortal) and
+		 * the legacy DOM overlay. Own only the divider, never the article children. */
+		function wbMountReviewSplitter(cols) {
+			var key = 'wb-review-list-w', width = 152, bar = null, drag = null, resize = null;
+			var root = document.documentElement, body = document.body;
+			function save(reset) {
+				try {
+					if (reset) window.localStorage.removeItem(key);
+					else window.localStorage.setItem(key, String(width));
+				} catch (e) {}
+			}
+			function apply(value) {
+				var size = wbReviewListSize(value, cols.clientWidth);
+				width = size.width;
+				cols.style.setProperty('--wb-review-list-width', width + 'px');
+				bar.setAttribute('aria-valuenow', width);
+				bar.setAttribute('aria-valuemin', size.min);
+				bar.setAttribute('aria-valuemax', size.max);
+			}
+			function finish(ev) {
+				if (!drag || (ev && ev.pointerId != null && ev.pointerId !== drag.id)) return;
+				var prev = drag; drag = null;
+				bar.classList.remove('is-dragging');
+				if (!prev.bodyClass) body.classList.remove('wb_reviewResizing');
+				if (bar.hasPointerCapture(prev.id)) bar.releasePointerCapture(prev.id);
+				if (width !== prev.width) save(false);
+			}
+			function reset() { finish(); apply(152); save(true); }
+			function detach() {
+				if (!bar) return;
+				finish();
+				if (resize) resize.disconnect();
+				window.removeEventListener('blur', finish);
+				bar.remove(); bar = null;
+				cols.classList.remove('wb_reviewSplit');
+				cols.style.removeProperty('--wb-review-list-width');
+			}
+			function sync() {
+				/* The unified shell (.review-mount) stacks a card strip above the preview: no vertical divider there. */
+				if (WB_MOBILE.matches || root.hasAttribute('data-wb-mobile') || (cols.closest && cols.closest('.review-mount'))) { detach(); return; }
+				if (bar) return;
+				try { width = window.localStorage.getItem(key); } catch (e) { width = 152; }
+				bar = document.createElement('div'); bar.className = 'wb_reviewSplitter'; bar.tabIndex = 0;
+				bar.setAttribute('role', 'separator');
+				bar.setAttribute('aria-orientation', 'vertical');
+				bar.setAttribute('aria-label', '调整文章列表宽度');
+				cols.insertBefore(bar, cols.querySelector('.wb_reviewMain'));
+				cols.classList.add('wb_reviewSplit');
+				apply(width);
+				bar.addEventListener('pointerdown', function (ev) {
+					if (ev.button !== 0 || ev.isPrimary === false || drag) return;
+					ev.preventDefault(); bar.focus();
+					bar.setPointerCapture(ev.pointerId);
+					drag = { id: ev.pointerId, x: ev.clientX, width: width, bodyClass: body.classList.contains('wb_reviewResizing') };
+					bar.classList.add('is-dragging'); body.classList.add('wb_reviewResizing');
+				});
+				bar.addEventListener('pointermove', function (ev) {
+					if (drag && ev.pointerId === drag.id) apply(drag.width + ev.clientX - drag.x);
+				});
+				['pointerup', 'pointercancel', 'lostpointercapture'].forEach(function (name) { bar.addEventListener(name, finish); });
+				bar.addEventListener('dblclick', reset);
+				bar.addEventListener('keydown', function (ev) {
+					var next = wbReviewListKey(width, ev.key, ev.shiftKey, cols.clientWidth);
+					if (next === null) return;
+					ev.preventDefault();
+					if (ev.key === 'Enter') reset();
+					else { apply(next); save(false); }
+				});
+				resize = new ResizeObserver(function () { apply(width); }); resize.observe(cols);
+				window.addEventListener('blur', finish);
+			}
+			var mobileObserver = new MutationObserver(sync);
+			mobileObserver.observe(root, { attributes: true, attributeFilter: ['data-wb-mobile'] });
+			WB_MOBILE.addEventListener('change', sync);
+			sync();
+			return function () { mobileObserver.disconnect(); WB_MOBILE.removeEventListener('change', sync); detach(); };
+		}
+		function WbReviewColumns(p) {
+			var ref = React.useRef(null);
+			React.useLayoutEffect(function () { return wbMountReviewSplitter(ref.current); }, []);
+			return h('div', { className: 'wb_rvCols', ref: ref }, p.children);
+		}
+		function wbKeyboardInset(height, viewport) {
+			return !viewport || viewport.scale !== 1 ? 0 : Math.max(0, height - viewport.height - viewport.offsetTop);
+		}
+		function wbMobileViewport(mobile, height, viewport, shellKeyboard) {
+			var inset = mobile ? wbKeyboardInset(height, viewport) : 0;
+			var keyboard = mobile && (shellKeyboard === 'open' || inset > 150);
+			return { inset: inset, keyboard: keyboard, pinned: mobile && !keyboard };
+		}
+		function wbNormalizeLabel(text) {
+			return String(text || '').normalize('NFKC').replace(/\s+/g, ' ').trim();
+		}
+		function wbContextLabel(parts) {
+			var seen = new Set();
+			return parts.map(function(part){return String(part || '').replace(/\s+/g, ' ').trim();}).filter(function(part){
+				var key = wbNormalizeLabel(part);
+				if (!key || seen.has(key)) return false;
+				seen.add(key); return true;
+			}).join(' · ');
+		}
+		function wbStripLeadingTitle(markdown, title) {
+			var text = String(markdown || '');
+			var heading = text.match(/^(?:\uFEFF)?(?:[ \t]*\r?\n)* {0,3}#[ \t]+([^\r\n]*)(?:\r?\n|$)/);
+			if (!heading || !wbNormalizeLabel(title)) return text;
+			var label = heading[1].replace(/[ \t]+#+[ \t]*$/, '');
+			return wbNormalizeLabel(label) === wbNormalizeLabel(title) ? text.slice(heading[0].length).replace(/^[ \t]*\r?\n/, '') : text;
+		}
+		/* Shared desktop/mobile projection of harness, aggregate and local unread facts. */
+		function wbRunStatus(input) {
+			input = input || {};
+			var info = input.statusInfo || {}, summary = input.summary, batch = input.batch || info.batch, session = input.snapshot;
+			var draftsPending = info.drafts_pending === undefined ? input.draftsPending : info.drafts_pending;
+			function status(kind, tone, label, extra, unread) { return {kind:kind, tone:tone, label:label, extra:extra || '', unread:!!unread}; }
+			if (!summary) return status('idle', '', '');
+			var pending = input.pendingInteraction, kind = typeof pending === 'string' ? pending : pending && pending.kind;
+			if (['approval', 'question', 'plan-review'].includes(kind)) return status('attention', 'warn', '等你确认', '等你确认');
+			if (input.attention) return status('attention', 'warn', input.attention, input.attention);
+			var row = batch && (batch.records || []).find(function (r) { return r.status !== 'ok' && r.status !== 'failed'; });
+			var round = batch && Math.min(batch.rounds, Math.max(1, batch.round || (row && row.round) || batch.rounds));
+			var serverRunning = batch && batch.driver === 'server' && batch.status === 'running';
+			if (batch && batch.status === 'running' && !serverRunning && !summary.running && !input.batchDriven) {
+				return status('attention', 'warn', '待继续 第 ' + round + '/' + batch.rounds + ' 轮', '待继续 ' + round + '/' + batch.rounds);
+			}
+			if (summary.running || serverRunning) {
+				var extra = '';
+				if (batch && batch.status === 'running' && batch.rounds > 0) {
+					extra = round + '/' + batch.rounds + ' 轮';
+				}
+				return status('running', 'klein', '写作中' + (extra ? ' ' + extra : ''), extra);
+			}
+			if (!input.failureRead && session && (session.lastAgentError || session.promptError)) return status('failed', 'bad', '失败 · 点开查看原因', '失败', !input.isCurrent);
+			var batchFailed = batch && batch.status === 'failed_partial' && (batch.failed > 0 || (batch.records || []).some(function (r) { return r.status === 'failed'; }));
+			if (batchFailed && !input.batchFailureRead && !input.isCurrent) return status('failed', 'bad', '失败 · 点开查看原因', '失败', true);
+			if (draftsPending > 0) return status('review', 'warn', draftsPending + ' 篇草稿待审', draftsPending + ' 篇待审');
+			if (batchFailed) return status('idle', '', ''); // Acknowledged failures must not fall back to a green completion dot.
+			var finishedAt = input.unread && input.unread[input.id || summary.id];
+			if (!input.isCurrent && finishedAt) {
+				var time = new Date(finishedAt).toLocaleTimeString('zh-CN', {timeZone:'Asia/Shanghai', hour:'2-digit', minute:'2-digit', hour12:false});
+				return status('done', 'ok', '已完成 · 未查看 · ' + time + ' (UTC+8)', '', true);
+			}
+			return status('idle', '', '');
+		}
+		function wbSessionStatus(status) {
+			status = status || wbRunStatus();
+			return Object.assign({}, status, {label:status.kind === 'done' ? '已完成 · 未查看' : status.label});
+		}
+		function wbNeedsViewCount(statuses) {
+			return statuses.filter(function (status) { return ['done', 'failed', 'attention'].includes(status.kind); }).length;
+		}
+		function wbGroupStatus(statuses, open) {
+			if (open) return null;
+			var priority = ['attention', 'running', 'failed', 'review', 'done'];
+			return statuses.reduce(function (best, status) {
+				var rank = priority.indexOf(status.kind);
+				return rank >= 0 && (!best || rank < priority.indexOf(best.kind)) ? status : best;
+			}, null);
+		}
+		function wbTabTitleState(title, count, previous) {
+			// Only recapture when the host changes the title; our own writes keep the exact base.
+			var base = !previous || title !== previous.title ? title.replace(/^\(\d+\) /, '') : previous.base;
+			return {base:base, title:(count > 0 ? '(' + count + ') ' : '') + base};
+		}
+		/* Pure transition: the first observation is a baseline, including completed.
+		 * Remember that bit too so an acknowledged, stale completed flag cannot rearm. */
+		function wbUnreadNext(state, byId, current, now) {
+			var unread = Object.assign(Object.create(null), state.unread), previous = Object.create(null);
+			delete unread[current];
+			Object.keys(byId).forEach(function (id) {
+				var s = byId[id], before = state.previous[id];
+				if (s.running || id === current) delete unread[id];
+				else if (before && (before.running || (s.completed === true && !before.completed)) && !unread[id]) unread[id] = now;
+				previous[id] = {running:!!s.running, completed:s.completed === true};
+			});
+			return {unread:unread, previous:previous};
+		}
+		function wbReadUnread(uid) {
+			var unread = Object.create(null);
+			try {
+				var saved = uid && JSON.parse(localStorage.getItem('wb-unread-' + uid) || '{}');
+				if (saved && typeof saved === 'object' && !Array.isArray(saved)) Object.keys(saved).forEach(function (id) {
+					if (Number.isFinite(saved[id]) && saved[id] > 0) unread[id] = saved[id];
+				});
+			} catch (e) { }
+			return unread;
+		}
+		function wbWriteUnread(uid, unread) {
+			try { if (uid) localStorage.setItem('wb-unread-' + uid, JSON.stringify(unread)); } catch (e) { }
+		}
+		function wbReadBatchSeen(uid) {
+			var seen = Object.create(null);
+			try {
+				var saved = uid && JSON.parse(localStorage.getItem('wb-batch-seen-' + uid) || '{}');
+				if (saved && typeof saved === 'object' && !Array.isArray(saved)) Object.keys(saved).forEach(function (id) {
+					var item = saved[id];
+					if (item && typeof item.batchId === 'string' && Number.isFinite(item.at)) seen[id] = item;
+				});
+			} catch (e) { }
+			return seen;
+		}
+		function wbWriteBatchSeen(state) {
+			try { if (state.uid) localStorage.setItem('wb-batch-seen-' + state.uid, JSON.stringify(state.seenBatches)); } catch (e) { }
+		}
+		function wbBatchWasSeen(batch, seen) {
+			return !!(batch && seen && (seen.batchId === batch.id || (!seen.batchId && Date.parse(batch.savedAt) <= seen.at)));
+		}
+		function WbRunIndicator(p) {
+			return h('span', {className:'wb_runSlot' + (p.mobile ? ' wb_mStatus' : ''), 'aria-hidden':true},
+				p.status.kind === 'running' ? h('span', {className:'wb_ldrSpin wb_runSpin'})
+				: p.status.tone ? h('span', {className:'wb_runDot', 'data-tone':p.status.tone}) : null);
+		}
+		function WbGroupIndicator(p) {
+			var status = wbGroupStatus(p.open ? [] : p.items.map(function (it) { return wbNavStatus(it.id); }), p.open);
+			return status ? h('span', {className:'wb_groupStatus', role:'img', title:status.label, 'aria-label':status.label}, h(WbRunIndicator, {status:status})) : null;
+		}
+		function wbSessionTitle(rec, summary, meta) {
+			var title = summary && !summary.blank && summary.displayTitle;
+			if (title && !String(title).trim().startsWith('【装配台预填')) return title;
+			var topic = String((rec && rec.topic) || '').trim() || String((meta && meta.topic) || '').trim();
+			var client = String((rec && rec.client) || '').trim() || String((meta && meta.client) || '').trim();
+			return topic || (client ? client + ' · 写作会话' : '未命名会话');
+		}
+		function wbClampTitle(text) {
+			return Array.from(String(text || '')).slice(0, 40).join('');
+		}
+		function wbTitleToSave(text, previous) {
+			var title = wbClampTitle(String(text || '').trim()).trim();
+			return title && title !== previous ? title : '';
+		}
+		function wbTitleKey(e, save, cancel) {
+			e.stopPropagation();
+			if (e.isComposing || (e.nativeEvent && e.nativeEvent.isComposing) || e.keyCode === 229) return;
+			if (e.key === 'Enter') { e.preventDefault(); save(); }
+			if (e.key === 'Escape') { e.preventDefault(); cancel(); }
+		}
+		function wbCanRename(id) {
+			var uid = (window.dshUnified && window.dshUnified.store && window.dshUnified.store.state && window.dshUnified.store.state.uid) || wbNavState.uid;
+			return !uid || [wbNavState.map[id], wbNavState.bindings[id]].every(function (rec) {
+				return !rec || rec.owner_uid === undefined || rec.owner_uid === uid;
+			});
+		}
+		async function wbSaveSessionTitle(ctx, id, text, previous, showTitle) {
+			var title = wbTitleToSave(text, previous);
+			if (!title) return;
+			showTitle(title);
+			try {
+				if (!wbCanRename(id)) throw Error();
+				var svc = ctx && ctx.get('sessions');
+				function binding() {
+					var snapshot = svc && svc.list && svc.list.getSnapshot();
+					return snapshot && snapshot.byId && snapshot.byId[id] && svc.binding(id);
+				}
+				var bound = binding();
+				if (!bound && svc && typeof svc.refresh === 'function') { await svc.refresh(); bound = binding(); }
+				if (!bound || !bound.session || !wbCanRename(id)) throw Error();
+				var result = await bound.session.rename(title);
+				if (!result || !result.ok) throw Error();
+			} catch (e) {
+				showTitle(previous);
+				throw Error('重命名失败，请稍后重试');
+			}
+		}
+		function WbSessionRow(p) {
+			var edit = React.useState(false), draft = React.useState(''), menu = React.useState(null), busy = React.useState(false);
+			var editing = React.useRef(false), timer = React.useRef(null), menuRef = React.useRef(null);
+			var allowed = wbCanRename(p.item.id), it = p.item;
+			React.useEffect(function () { return function () { clearTimeout(timer.current); }; }, []);
+			React.useEffect(function () {
+				if (!menu[0]) return;
+				function outside(e) { if (!menuRef.current || !menuRef.current.contains(e.target)) menu[1](null); }
+				function close() { menu[1](null); }
+				function key(e) { if (e.key === 'Escape') { e.preventDefault(); close(); } }
+				document.addEventListener('pointerdown', outside, true);
+				document.addEventListener('keydown', key);
+				window.addEventListener('scroll', close, true);
+				return function () { document.removeEventListener('pointerdown', outside, true); document.removeEventListener('keydown', key); window.removeEventListener('scroll', close, true); };
+			}, [menu[0]]);
+			function start() {
+				clearTimeout(timer.current); menu[1](null);
+				if (!allowed || busy[0] || (wbNavState.renames[it.id] && wbNavState.renames[it.id].saving)) return;
+				delete wbNavState.renameErrors[it.id];
+				editing.current = true; draft[1](it.title); edit[1](true);
+			}
+			function cancel() { editing.current = false; edit[1](false); }
+			async function save() {
+				if (!editing.current) return;
+				cancel(); busy[1](true);
+				try { await wbNavRename(p.ctx, it.id, draft[0], it.title); }
+				catch (e) { /* wbNavRename keeps the row error across search/filter changes. */ }
+				finally { busy[1](false); }
+			}
+			var label = (it.at && it.at.length >= 10 ? collectedDay(it.at).slice(5, 10) + ' · ' : '') + it.title;
+			var status = wbNavStatus(it.id), accessible = [label, status.label].filter(Boolean).join(' · ');
+			return h('div', null,
+				edit[0] ? h('input', {className:'wb_nvRename', 'aria-label':'会话名称', value:draft[0], maxLength:40, autoFocus:true,
+					onFocus:function(e){e.target.select();}, onChange:function(e){draft[1](wbClampTitle(e.target.value));},
+					onKeyDown:function(e){wbTitleKey(e,save,cancel);}, onBlur:save, onClick:function(e){e.stopPropagation();}})
+				: h('button', {type:'button', className:'wb_nvItem'+(it.id===wbNavState.current?' wb_nvCur':''), 'data-unread':status.unread, title:accessible, 'aria-label':accessible,
+					onClick:function(e){if(editing.current)return;clearTimeout(timer.current);if(e.detail===0)p.open(it.id);else if(e.detail===1)timer.current=setTimeout(function(){p.open(it.id);},300);},
+					onDoubleClick:function(e){e.preventDefault();start();},
+					onContextMenu:function(e){e.preventDefault();clearTimeout(timer.current);if(allowed&&!busy[0])menu[1]({x:Math.max(0,Math.min(e.clientX,window.innerWidth-140)),y:Math.max(0,Math.min(e.clientY,window.innerHeight-48))});}},
+					h(WbRunIndicator,{status:status}),h('span',{className:'wb_nvLabel'},label),status.extra?h('small',{className:'wb_nvExtra','data-tone':status.tone},status.extra):null),
+				wbNavState.renameErrors[it.id] ? h('small',{className:'wb_nvRenameError',role:'alert'},wbNavState.renameErrors[it.id]) : null,
+				menu[0] && allowed ? createPortal(h('div',{className:'wb_nvMenu',ref:menuRef,role:'menu',style:{left:menu[0].x,top:menu[0].y}},
+					h('button',{type:'button',role:'menuitem',autoFocus:true,onClick:start},'重命名')),document.body) : null);
+		}
+		function wbInstallMobile() {
+			var root = document.documentElement;
+			var previousFrame = null, previousColumns = '';
+			function viewport() {
+				if (!WB_MOBILE.matches) return;
+				var state = wbMobileViewport(true, window.innerHeight, window.visualViewport, root.dataset.dshKeyboard);
+				root.style.setProperty('--wb-kb', state.inset + 'px');
+				// The shared shell detects input/textarea; the harness uses contenteditable.
+				root.toggleAttribute('data-wb-keyboard', state.keyboard);
+				var vv = window.visualViewport, unzoomed = vv && vv.scale === 1;
+				root.style.setProperty('--wb-vv-top', (unzoomed ? vv.offsetTop : 0) + 'px');
+				root.style.setProperty('--wb-vv-h', (unzoomed ? vv.height : window.innerHeight) + 'px');
+			}
+			function changed() {
+				root.toggleAttribute('data-wb-mobile', WB_MOBILE.matches);
+				if (WB_MOBILE.matches) {
+					// Only this adapter knows the upstream frame structure. CSS handles later mounts.
+					var frame = document.querySelector('[class*="_frame"]');
+					if (frame && !previousFrame) { previousFrame = frame; previousColumns = frame.style.gridTemplateColumns; frame.style.removeProperty('grid-template-columns'); }
+					viewport();
+				} else {
+					if (previousFrame) previousFrame.style.gridTemplateColumns = previousColumns;
+					previousFrame = null;
+					delete root.dataset.wbScene;
+					root.removeAttribute('data-wb-keyboard');
+					if (root.dataset.wbFlow === '1') { delete root.dataset.wbFlow; delete root.dataset.dshChrome; }
+					root.style.removeProperty('--wb-kb');
+					root.style.removeProperty('--wb-vv-top');
+					root.style.removeProperty('--wb-vv-h');
+					wbNavTakeFrame();
+				}
+			}
+			changed(); WB_MOBILE.addEventListener('change', changed);
+			var vv = window.visualViewport;
+			if (vv) { vv.addEventListener('resize', viewport); vv.addEventListener('scroll', viewport); }
+			window.addEventListener('resize', viewport);
+			var keyboardObserver = new MutationObserver(viewport);
+			keyboardObserver.observe(root, {attributes:true, attributeFilter:['data-dsh-keyboard']});
+			return function () {
+				keyboardObserver.disconnect();
+				WB_MOBILE.removeEventListener('change', changed);
+				window.removeEventListener('resize', viewport);
+				if (vv) { vv.removeEventListener('resize', viewport); vv.removeEventListener('scroll', viewport); }
+				if (previousFrame) previousFrame.style.gridTemplateColumns = previousColumns;
+				root.removeAttribute('data-wb-mobile'); delete root.dataset.wbScene;
+				root.removeAttribute('data-wb-keyboard');
+				if (root.dataset.wbFlow === '1') { delete root.dataset.wbFlow; delete root.dataset.dshChrome; }
+			};
+		}
+		function useWbChatLayout(ref) {
+			React.useLayoutEffect(function(){
+				if (!WB_MOBILE.matches || !ref.current) return;
+				var main = ref.current.closest('[data-slot="main.conversation"]');
+				var scroll = main && main.querySelector('[data-conversation-scroll]');
+				var composer = main && main.querySelector('[data-composer-seat]');
+				if (!scroll || !composer) return;
+				var frame = 0, initialized = false, wasKeyboard = false, hadStyle = main.hasAttribute('style');
+				function layout(){
+					frame = 0;
+					if (!WB_MOBILE.matches) return;
+					var state = wbMobileViewport(true, window.innerHeight, window.visualViewport, document.documentElement.dataset.dshKeyboard);
+					var atBottom = scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop <= 4;
+					// The fixed composer is outside normal flow. Size the scrollport to its
+					// actual top, instead of adding keyboard-sized blank transcript padding.
+					var height = Math.max(0, composer.getBoundingClientRect().top - scroll.getBoundingClientRect().top);
+					main.style.setProperty('--wb-chat-scroll-h', height + 'px');
+					if (!initialized || atBottom || (state.keyboard && !wasKeyboard)) scroll.scrollTop = scroll.scrollHeight;
+					initialized = true; wasKeyboard = state.keyboard;
+				}
+				function schedule(){if (!frame) frame = requestAnimationFrame(layout);}
+				var resize = new ResizeObserver(schedule);
+				resize.observe(composer); resize.observe(ref.current); resize.observe(main);
+				var keyboard = new MutationObserver(schedule);
+				keyboard.observe(document.documentElement, {attributes:true, attributeFilter:['data-wb-keyboard','data-dsh-keyboard']});
+				var vv = window.visualViewport;
+				if (vv) {vv.addEventListener('resize',schedule);vv.addEventListener('scroll',schedule);}
+				layout();
+				return function(){
+					cancelAnimationFrame(frame); resize.disconnect(); keyboard.disconnect();
+					if (vv) {vv.removeEventListener('resize',schedule);vv.removeEventListener('scroll',schedule);}
+					main.style.removeProperty('--wb-chat-scroll-h');
+					if (!hadStyle && !main.style.length) main.removeAttribute('style');
+				};
+			},[]);
+		}
+		function useWbScene(mobile, scene) {
+			React.useEffect(function () {
+				if (!mobile) return;
+				var root = document.documentElement;
+				root.dataset.wbScene = scene;
+				if (scene !== 'compose') { root.dataset.dshChrome = 'flow'; root.dataset.wbFlow = '1'; }
+				else if (root.dataset.wbFlow === '1') { delete root.dataset.dshChrome; delete root.dataset.wbFlow; }
+				return function () {
+					if (root.dataset.wbScene === scene) delete root.dataset.wbScene;
+					if (root.dataset.wbFlow === '1') { delete root.dataset.dshChrome; delete root.dataset.wbFlow; }
+				};
+			}, [mobile, scene]);
+		}
+		function wbIcon(name) {
+			var paths = { down: 'M6 9l6 6 6-6', search: 'M21 21l-5-5M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0', menu: 'M4 6h16M4 12h16M4 18h10', back: 'M15 5l-7 7 7 7', close: 'M6 6l12 12M18 6L6 18', next: 'M9 6l6 6-6 6', plus: 'M12 5v14M5 12h14', star: 'M12 3l2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5z' };
+			return h('svg', {width:24,height:24,viewBox:'0 0 24 24',fill:'none',stroke:'currentColor',strokeWidth:2,strokeLinecap:'round',strokeLinejoin:'round','aria-hidden':true}, h('path',{d:paths[name] || paths.next}));
+		}
+		function MobileTopBar(p) {
+			return h('header',{className:'wb_mTop'},
+				p.back ? h('button',{type:'button',className:'wb_mIcon','aria-label':'返回',onClick:p.back},wbIcon('back')) : h(MobileDrawerEntry,{icon:true}),
+				h('div',{className:'wb_mHeading'},h('b',null,p.title),p.sub?h('small',null,p.sub):null),
+				p.more?h('button',{type:'button',className:'wb_mIcon','aria-label':'会话更多操作',onClick:p.more},'⋯'):null);
+		}
+		function MobileDrawerEntry(p) {
+			var count = useWbNeedsViewCount(), label = p.icon ? '打开会话抽屉' : '会话列表';
+			return h('button', {type:'button', className:p.icon ? 'wb_mIcon' : 'wb_mMenuRow',
+				'aria-label':label + (count > 0 ? '，有 ' + count + ' 个会话需要查看' : ''),
+				onClick:function () { if (p.beforeOpen) p.beforeOpen(); wbNavState.drawer = true; wbNavEmit(); }},
+				h('span', {className:'wb_mBadgeAnchor'}, p.icon ? wbIcon('menu') : label,
+					count > 0 ? h('span', {className:'wb_mEntryDot', 'aria-hidden':true}) : null));
+		}
+		function MobileModal(p) {
+			var ref=React.useRef(null);
+			React.useEffect(function(){
+				if(p['data-wb-leave']) return;
+				var previous=document.activeElement, el=ref.current;
+				if(el) el.focus();
+				function key(e){
+					if(e.key==='Escape'){e.preventDefault();p.close();}
+					if(e.key==='Tab' && el){var items=Array.from(el.querySelectorAll('button:not(:disabled),input,textarea,[tabindex="0"]'));var first=items[0],last=items[items.length-1];if(e.shiftKey && (document.activeElement===first || document.activeElement===el)){e.preventDefault();last&&last.focus();}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first&&first.focus();}}
+				}
+				document.addEventListener('keydown',key);
+				return function(){document.removeEventListener('keydown',key);if(previous&&previous.isConnected)previous.focus({preventScroll:true});};
+			},[p['data-wb-leave']]);
+			return createPortal(h('div',{'data-wb-leave':p['data-wb-leave'],inert:p.inert,'aria-hidden':p['aria-hidden'],className:'wb_mScrim',onClick:function(e){if(e.target===e.currentTarget)p.close();}},
+				h('section',{ref:ref,tabIndex:-1,role:'dialog','aria-modal':true,'aria-label':p.title,className:p.full?'wb_mEditor':'wb_mSheet'},
+					!p.full?h('div',{className:'wb_mGrab'}):null,
+					h('div',{className:'wb_mSheetHead'},h('h2',null,p.title),h('button',{type:'button',className:'wb_mIcon','aria-label':'关闭',onClick:p.close},wbIcon('close'))),p.children)),document.body);
+		}
+		function MobileAssembly(p) {
+			var sheet=React.useState(false), editor=React.useState(''), addText=React.useState(''), fileError=React.useState('');
+			var close=function(){editor[1]('');};
+			var setClient=function(c){p.onClient({target:{value:customerId(c)}});};
+			function chip(label,on,click,key){return h('button',{type:'button',key:key||label,className:'wb_mChip','aria-pressed':on,onClick:click},on?'✓ '+label:label);}
+			function segment(items,value,set){return h('div',{className:'wb_mSegment'},items.map(function(item){return h('button',{type:'button',key:item[0],'aria-pressed':value===item[0],onClick:function(){set(item[0]);}},item[1]);}));}
+			var empty=p.clients.status==='ready'&&p.clients.customers.length===0;
+			var contextText=wbContextLabel([p.clientName,p.lineName,p.periodName]);
+			var topicRef=React.useRef(null);
+			React.useLayoutEffect(function(){
+				function grow(){var el=topicRef.current;if(!WB_MOBILE.matches||!el)return;el.style.height='72px';el.style.height=Math.max(72,el.scrollHeight+2)+'px';}
+				grow(); window.addEventListener('resize',grow);
+				return function(){window.removeEventListener('resize',grow);};
+			},[p.topic,p.base,p.mode]);
+			var layers=[['personal','个人层'],['middle','个人中间层'],['public','公共层'],['other','其他技能']];
+			function skillLayer(s){var raw=String(s.layer||'');return raw==='personal'||raw==='个人'?'personal':raw==='middle'||raw==='_middle'||raw.indexOf('中')>=0?'middle':raw==='public'||raw==='公共'?'public':'other';}
+			var weakQuestions = p.weakGaps && p.weakGaps.status === 'ready' ? (p.weakRows || p.weakGaps.questions || []) : [];
+			var weakPanel = p.weakGaps && p.weakGaps.status === 'loading'
+				? h(WbSkeleton,{label:'薄弱问句加载中…'})
+				: p.weakGaps && p.weakGaps.status === 'error'
+					? h('div',{className:'wb_mWeakEmpty'},'薄弱问句暂时无法加载，请稍后刷新')
+					: weakQuestions.length === 0
+						? h('div',{className:'wb_mWeakEmpty'},'这一期没有可选的薄弱问句')
+						: h('div',{className:'wb_mWeakList','aria-label':'薄弱问句'},
+							weakQuestions.map(function(q){
+								var name=String(q.question||''); var on=(p.weakPicked||[]).indexOf(name)>=0;
+								var gap=function(label,value,key){
+									return h('span',{className:'wb_mWeakGap',key:key||label},
+										h('span',{className:'wb_mWeakGapLabel'},label),
+										h('span',{className:'wb_gapNum','data-sign':gapSign(value),title:gapTitle(label,value)},gapText(value)));
+								};
+								var platformGaps=Array.isArray(q.platforms)?q.platforms:[];
+								return h('div',{key:name,className:'wb_mWeakRow'+(on?' is-on':''),role:'checkbox','aria-checked':on?'true':'false',tabIndex:0,
+									onPointerDown:function(e){if(typeof p.rowDown==='function')p.rowDown(name,e);},
+									onPointerEnter:function(){if(typeof p.rowEnter==='function')p.rowEnter(name);},
+									onKeyDown:function(e){if(e.key===' '||e.key==='Enter'){e.preventDefault();if(typeof p.pickSet==='function')p.pickSet(name,!on);}}},
+									h('input',{type:'checkbox',checked:on,'aria-label':'选定 '+name,onChange:function(e){e.stopPropagation();if(typeof p.pickSet==='function')p.pickSet(name,e.target.checked);}}),
+									h('div',{className:'wb_mWeakDetails'},
+										h('div',{className:'wb_mWeakQuestion'},h('span',{className:'wb_mWeakQ'},name),h('span',{className:'wb_mWeakRoot'},q.root||'—')),
+										h('div',{className:'wb_mWeakGaps'},gap('综合',q.summary&&q.summary.gap,'summary'),platformGaps.map(function(item){return gap(item.name,item.gap,item.name);})))
+								);
+							}));
+			return h('div',{className:'wb_mAssembly'},h(MobileTopBar,{title:'新建任务'}),
+				h('div',{className:'wb_mForm'},
+					h('button',{type:'button',className:'wb_mContext',disabled:!!window.dshUnified,onClick:function(){sheet[1](true);}},h('span',{className:'wb_mAvatar'},(p.clientName||'客').slice(0,1)),h('span',{className:'wb_mGrow'},h('small',null,'写给'),h('b',null,contextText||(empty?'请选择客户':p.clients.status==='loading'?'客户加载中…':'请选择客户'))),wbIcon('next')),
+					p.clients.status==='loading'?h(WbSkeleton,{label:'客户加载中…'}):null,
+					empty?h('div',{className:'wb_mEmpty'},h('b',null,'还没有分配给你的客户'),h('p',null,'联系管理员')):null,
+					p.clients.status==='error'?h('div',{className:'wb_mEmpty',role:'status'},'客户暂时无法加载，请稍后刷新重试'):null,
+					h('h3',null,'主题'),segment([['weak','薄弱问句'],['free','自己输入']],p.mode,p.setMode),
+					p.mode==='weak'?h('div',{className:'wb_mWeakWrap'},p.unified ? h('button',{type:'button',className:'wb_recommend',onClick:p.recommend},'选推荐的 3 条') : null,h('div',{className:'wb_mWeakStat'},'已选定 '+String(p.selectedCount||0)+' 条 · 共 '+String(weakQuestions.length)+' 条'),weakPanel,h('div',{className:'wb_mWeakSource'},'数据来源：Support · 薄弱问句（全局标准 v4，和 Support 页面数字一致）'),h('textarea',{className:'wb_mTopic',ref:topicRef,'aria-label':'补充要求',placeholder:'补充要求（选填）…',value:p.base,onChange:function(e){p.setBase(e.target.value);},rows:2})):h('textarea',{className:'wb_mTopic',ref:topicRef,'aria-label':'主题',placeholder:'想写什么选题，直接打。',value:p.topic,onChange:function(e){p.setTopic(e.target.value);},rows:2}),
+					h('h3',null,'怎么写'),segment([['copy','仿写'+(p.refCount?' '+p.refCount:'')],['skill','用模板'+(p.pickedTotal?' '+p.pickedTotal:'')]],p.refTab,p.setRefTab),
+					p.refTab==='copy'?h(React.Fragment,null,
+						h('div',{className:'wb_mReferences',key:'copy'},p.refs.urls.map(function(url,i){return h('div',{className:'wb_mReference',key:i},h('span',{className:'wb_mRefIcon'},'↗'),h('span',{className:'wb_mGrow'},url),h('button',{type:'button',className:'wb_mIcon','aria-label':'删除参考链接',onClick:function(){p.setRefText(p.refs.urls.filter(function(_,j){return j!==i;}).concat(p.refs.body?[p.refs.body]:[]).join('\n'));}},wbIcon('close')));}),
+						p.refs.body?h('div',{className:'wb_mReference'},h('span',{className:'wb_mRefIcon'},'▤'),h('span',{className:'wb_mGrow'},'粘贴的正文'),h('small',null,p.refs.body.length+' 字'),h('button',{type:'button',className:'wb_mIcon','aria-label':'删除参考正文',onClick:function(){p.setRefText(p.refs.urls.join('\n'));}},wbIcon('close'))):null,
+						h('button',{type:'button',className:'wb_mAdd',onClick:function(){addText[1]('');fileError[1]('');editor[1]('reference');}},wbIcon('plus'),'添加链接、正文或文件')),
+						h('div',{className:'wb_mChips wb_mStyles'},REF_STYLES.map(function(s){return chip(s,p.refStyle===s,function(){p.setRefStyle(s);});})))
+					:h('div',{className:'wb_mSkills',key:'skill'},p.skills.status==='loading'?h(WbSkeleton,{label:'技能加载中…'}):p.skills.status==='error'?h('p',null,'技能暂时无法加载，请稍后重试'):p.skills.skills.length===0?h('p',null,'还没有可用模板'):layers.map(function(layer){var list=p.skills.skills.filter(function(s){return skillLayer(s)===layer[0];});return list.length?h('section',{key:layer[0]},h('small',null,layer[1]),h('div',{className:'wb_mChips'},list.map(function(s){var n=p.counts[s.name]||0;return h('button',{type:'button',key:s.name,className:'wb_mChip','aria-pressed':n>0,title:s.description,onClick:function(e){p.addOne(s.name,e.currentTarget);}},skillDisplay(s.name),n>0?h('span',{className:'wb_skBadge',role:'button',tabIndex:0,'aria-label':'减少 '+skillDisplay(s.name)+' 1 篇',onClick:function(e){e.stopPropagation();p.minusOne(s.name);},onKeyDown:function(e){if(e.key==='Enter'||e.key===' '){e.preventDefault();e.stopPropagation();p.minusOne(s.name);}}},String(n)):null);}))):null;})),
+					h('button',{type:'button',className:'wb_mExtra',onClick:function(){editor[1]('base');}},h('b',null,'补充要求'),h('span',{className:'wb_mGrow'},p.base||'选填'),wbIcon('next'))),
+				h('div',{className:'wb_mAction wb_mAboveTabs'},p.pickedTotal>0?h('span',{className:'wb_skTags'},p.pickedEntries.map(function(s){return h('button',{type:'button',key:s.name,className:'wb_skTag',title:'点一下减 1 篇',onClick:function(){p.minusOne(s.name);}},skillDisplay(s.name),h('span',{className:'wb_skBadge'},String(s.count)));})):null,p.sending?h('p',{role:'status'},p.sending):null,h('button',{type:'button',className:'wb_mPrimary wb_mStart',disabled:!p.clientName||!!p.sending,onClick:p.dispatch},wbIcon('star'),'开始生文')),
+				h(WbPresence,null,sheet[0]?h(MobileModal,{title:'写给谁',close:function(){sheet[1](false);}},
+					h('small',{className:'wb_mCaption'},'客户'),p.clients.status==='loading'?h(WbSkeleton,{label:'客户加载中…'}):empty?h('div',{className:'wb_mEmpty'},'还没有分配给你的客户 · 联系管理员'):h('div',{role:'radiogroup','aria-label':'客户'},p.clients.customers.map(function(c){var on=customerId(c)===p.pick.key;var bits=[];if(typeof c.files==='number')bits.push('知识库 '+c.files+' 条');if(on&&p.articles.status==='ready')bits.push('文章库 '+p.articles.articles.length+' 篇');return h('button',{type:'button',role:'radio','aria-checked':on,key:customerId(c),className:'wb_mClient',onClick:function(){setClient(c);}},h('span',{className:'wb_mAvatar'},customerName(c).slice(0,1)),h('span',{className:'wb_mGrow'},h('b',null,customerName(c)),h('small',null,bits.join(' · ')||'\u00a0')),h('span',{className:'wb_mRadio','data-on':on?'1':'0'},on?'✓':''));})),
+					!empty?h(React.Fragment,null,h('small',{className:'wb_mCaption'},'产品线'),h('div',{className:'wb_mChips'},p.lines.length?p.lines.map(function(l){return chip(l.name||l.id,p.pick.line===String(l.id),function(){p.onLine({target:{value:String(l.id)}});},l.id);}):h('p',null,'暂无产品线')),h('small',{className:'wb_mCaption'},'期数'),h('div',{className:'wb_mChips'},p.periods.length?p.periods.map(function(v){return chip(v.name||v.id,p.pick.period===String(v.id),function(){p.setPick({key:p.pick.key,line:p.pick.line,period:String(v.id)});},v.id);}):h('p',null,'暂无期数'))):null,
+					h('button',{type:'button',className:'wb_mPrimary',disabled:!p.clientName,onClick:function(){sheet[1](false);}},'确定')):null),
+				h(WbPresence,null,editor[0]?h(MobileModal,{full:true,title:editor[0]==='base'?'补充要求':'添加参考',close:close},
+					h('textarea',{'aria-label':editor[0]==='base'?'补充要求':'参考链接或正文',placeholder:editor[0]==='base'?'还有什么写作要求？':'一行一个链接，或粘贴正文',value:editor[0]==='base'?p.base:addText[0],onChange:function(e){(editor[0]==='base'?p.setBase:addText[1])(e.target.value);}}),
+					editor[0]==='reference'?h('label',{className:'wb_mFile'},'选择文本文件（.txt / .md）',h('input',{type:'file',accept:'.txt,.md,text/plain,text/markdown',onChange:function(e){var f=e.target.files[0];if(!f)return;if(f.size>1024*1024){fileError[1]('请选择 1 MB 以内的文本文件');return;}f.text().then(function(text){addText[1](function(old){return [old,text].filter(Boolean).join('\n');});});}})):null,
+					fileError[0]?h('p',{role:'status'},fileError[0]):null,
+					h('button',{type:'button',className:'wb_mPrimary',onClick:function(){if(editor[0]==='reference')p.setRefText([p.refText,addText[0]].filter(Boolean).join('\n'));close();}},'完成')):null));
+		}
+
+
+		function MobileDrawer(p) {
+			var start=React.useRef(0), ref=React.useRef(null);
+			React.useEffect(function(){if(p['data-wb-leave'])return;var previous=document.activeElement;ref.current&&ref.current.focus();function key(e){if(e.key==='Escape')p.close();if(e.key==='Tab'){var items=Array.from(ref.current.querySelectorAll('button,input'));var first=items[0],last=items[items.length-1];if(e.shiftKey&&(document.activeElement===first||document.activeElement===ref.current)){e.preventDefault();last.focus();}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first.focus();}}}document.addEventListener('keydown',key);return function(){document.removeEventListener('keydown',key);if(previous&&previous.isConnected)previous.focus({preventScroll:true});};},[p['data-wb-leave']]);
+			return createPortal(h('div',{'data-wb-leave':p['data-wb-leave'],inert:p.inert,'aria-hidden':p['aria-hidden'],className:'wb_mScrim',onClick:function(e){if(e.target===e.currentTarget)p.close();}},
+				h('aside',{className:'wb_mDrawer',ref:ref,tabIndex:-1,role:'dialog','aria-modal':true,'aria-label':'会话列表',onTouchStart:function(e){start.current=e.touches[0].clientX;},onTouchEnd:function(e){if(start.current-e.changedTouches[0].clientX>70)p.close();}},
+					h('div',{className:'wb_mDrawerHead'},h('b',null,'生文 Agent'),h('button',{type:'button',className:'wb_mIcon','aria-label':'关闭会话抽屉',onClick:p.close},wbIcon('close'))),
+					h('div',{className:'wb_mDrawerTools'},h('button',{type:'button',className:'wb_mPrimary',onClick:p.compose},wbIcon('plus'),'新建任务'),h('label',{className:'wb_mSearch'},wbIcon('search'),h('input',{type:'search','aria-label':'搜索会话',placeholder:'搜索会话',value:wbNavState.q,onChange:function(e){wbNavState.q=e.target.value;wbNavEmit();}}))),
+					h('div',{className:'wb_mTree'},p.names.map(function(name){var open=wbNavState.open[name]!==false;return h('section',{key:name},h('button',{type:'button',className:'wb_mGroup','aria-expanded':open,onClick:function(){wbNavState.open[name]=!open;wbNavEmit();}},h('span',{className:'wb_mAvatar'},name.slice(0,1)),h('b',null,name),h('small',null,p.groups[name].length),h(WbGroupIndicator,{open:open,items:p.groups[name]}),wbIcon(open?'down':'next')),h(WbCollapse,{open:open},p.groups[name].map(function(it){var run=wbNavStatus(it.id),status=wbSessionStatus(run),day=it.at?collectedDay(it.at).slice(5,10).replace('-','月')+'日':'';return h('button',{key:it.id,type:'button',className:'wb_mSession','data-unread':run.unread,title:run.label,'aria-label':[it.title,run.label].filter(Boolean).join(' · '),'aria-current':it.id===wbNavState.current,onClick:function(){p.openSession(it.id);}},h(WbRunIndicator,{status:run,mobile:true}),h('span',{className:'wb_mGrow'},h('b',null,it.title),h('small',null,day,day&&status.label?' · ':'',h('span',{'data-tone':status.tone},status.label))));})));}),p.names.length===0?h('p',{className:'wb_mEmpty'},wbNavState.q?'没有匹配的会话':'还没有会话，点上方新建任务'):null),
+					h('div',{className:'wb_mAccount'},h('span',{className:'wb_mAvatar'},p.me.label.slice(0,1)),h('div',null,h('b',null,p.me.label),p.me.sub?h('small',null,p.me.sub):null)))),document.body);
+		}
+		function MobileQuickPrompts(p) {
+			var mobile=useWbMobile();
+			if(!mobile || !p.inputActions) return null;
+			return h('div',{className:'wb_mQuick'},['再写 1 篇','换个语气'].map(function(text){return h('button',{type:'button',className:'wb_mChip',key:text,onClick:function(){p.inputActions.setDraft(text);var el=document.querySelector('[data-slot="conversation.composer.bar"] [contenteditable]');if(el)el.focus();}},text);}));
+		}
+		function wbMobileProgress(nodes, legacy, drafts, done, meta, batch) {
+			// Last successful todo_write is authoritative, including an empty list.
+			for (var i=nodes.length-1;i>=0;i--) {
+				var node=nodes[i];
+				if(node.kind==='tool-result'&&node.call&&node.call.name==='todo_write'&&node.isError!==true){
+					try { var todos=JSON.parse(node.call.argsRaw||'{}').todos;
+						if(Array.isArray(todos)) return todos.filter(function(t){return t.content;}).map(function(t){return [t.status==='completed'?'done':t.status==='in_progress'?'run':'wait',String(t.content)];});
+					} catch(e) { }
+					break;
+				}
+			}
+			var titles=wbWrittenTitles(nodes), progress=wbWriteProgress(meta,batch,titles);
+			var confirmed=Object.keys(done||{}).filter(function(t){return titles[t]&&done[t];}).length;
+			var running=!!(legacy&&(legacy.partial||(legacy.runningCalls&&legacy.runningCalls.length)));
+			var rows=[progress.done>0?wbWriteProgressRow(progress):[running?'run':'wait',running?'写作中':'已停止，尚无文章产物']];
+			var pending=(drafts||[]).filter(function(d){return titles[d.title]&&!(done&&done[d.title]);}).length;
+			if(pending)rows.push(['wait',pending+' 篇草稿待审核']);
+			if(confirmed)rows.push(['done','已入库 '+confirmed+' 篇']);
+			return rows;
+		}
+		function MobileChatHeader(p) {
+			var chatRef=React.useRef(null);
+			useWbScene(true, 'chat');
+			useWbChatLayout(chatRef);
+			var menu=React.useState(false), preset=React.useState(false), rename=React.useState(false), newTitle=React.useState(""), renameError=React.useState(""), renaming=React.useState(false);
+			useWbPickTick();
+			var batch=useWbBatch(p.sessionId);
+			var rows=wbMobileProgress(p.nodes||[],p.legacy,WB_PICK.drafts,WB_PICK.done,p.meta,batch);
+			var meta=p.meta||{}, binding=wbNavState.bindings[p.sessionId]||{};
+			var title=(wbNavState.renames[p.sessionId]&&wbNavState.renames[p.sessionId].title)||wbSessionTitle(meta, wbNavState.sessions && wbNavState.sessions[p.sessionId] || {displayTitle:p.title}, binding);
+			async function saveTitle(){
+				if(renaming[0])return;
+				renaming[1](true);
+				try{await wbNavRename(WbCtx,p.sessionId,newTitle[0],title);rename[1](false);}
+				catch(e){renameError[1](e.message);}
+				finally{renaming[1](false);}
+			}
+			var refCount=meta.refs?((meta.refs.urls||[]).length+(meta.refs.body?1:0)):0;
+			var sub=wbContextLabel([meta.client||binding.client,meta.line,meta.period,refCount?'仿写 '+refCount+' 篇':'']);
+			var completed=rows.filter(function(row){return row[0]==='done';}).length;
+			return h('div',{className:'wb_mChat',ref:chatRef},h(MobileTopBar,{title:title,sub:sub,back:function(){var layout=WbCtx&&WbCtx.get?WbCtx.get('layout'):null;if(layout)layout.selectPanel(WORKBENCH_KEY);},more:function(){menu[1](true);}}),
+				h('div',{className:'wb_mPinned'},rows.length?h('details',{className:'wb_mProgress'},h('summary',null,h('span',null,'任务进度'),h('small',null,completed+'/'+rows.length),wbIcon('down')),h('div',{className:'wb_mChecklist'},rows.map(function(row,i){return h('div',{className:'wb_trow',key:i},h('span',{className:'wb_ticon','data-s':row[0]},row[0]==='done'?'✓':row[0]==='run'?'◷':'○'),h('span',null,row[1]));}))):null,
+					h(ReviewTabBody,Object.assign({},p.reviewProps,{mobileInline:true}))),
+				h(WbPresence,null,menu[0]?h(MobileModal,{title:'会话操作',close:function(){menu[1](false);}},wbCanRename(p.sessionId)?h('button',{type:'button',className:'wb_mMenuRow',onClick:function(){menu[1](false);newTitle[1](title);renameError[1]('');rename[1](true);}},'重命名'):null,h('button',{type:'button',className:'wb_mMenuRow',onClick:function(){menu[1](false);preset[1](true);}},'这次发起时的预设'),h(MobileDrawerEntry,{beforeOpen:function(){menu[1](false);}}),h('button',{type:'button',className:'wb_mMenuRow',onClick:function(){menu[1](false);preset[1]('desktop');}},'在电脑上打开')):null),
+				h(WbPresence,null,rename[0]?h(MobileModal,{title:'重命名',close:function(){rename[1](false);}},h('input',{className:'wb_mRename',value:newTitle[0],maxLength:40,autoFocus:true,disabled:renaming[0],'aria-label':'会话名称',onFocus:function(e){e.target.select();},onChange:function(e){newTitle[1](wbClampTitle(e.target.value));},onKeyDown:function(e){wbTitleKey(e,saveTitle,function(){rename[1](false);});}}),renameError[0]?h('p',{role:'alert'},renameError[0]):null,h('button',{type:'button',className:'wb_mPrimary',disabled:renaming[0],onClick:saveTitle},'保存')):null),
+				h(WbPresence,null,preset[0]?h(MobileModal,{title:preset[0]==='desktop'?'在电脑上打开':'这次发起时的预设',close:function(){preset[1](false);}},h('div',{className:'wb_mPreset'},preset[0]==='desktop'?'在电脑上登录同一账号，从会话列表打开「'+title+'」。':[meta.client,meta.line,meta.period,meta.topic,meta.refs&&meta.refs.style,(meta.skills||[]).map(skillDisplay).join('、'),meta.base].filter(Boolean).join('\n')||'此会话没有装配台预设')):null));
+		}
 
 		/* ==================================================================
 		 * dsh-workbench — browser half.
@@ -17,6 +668,28 @@ window.__ModuleLoader__.load({
 		 * 1. **没接的一律留空，不塞假数据。** 薄弱问句库、skill 列表现在都没接，
 		 *    就渲染原型里那块表格/那排标签的**壳**加一句空态说明，不放编造的行。
 		 *    假数据会让人误以为接了，然后照着假形状去写后端。
+		 * 2. **只落在 DSH 的扩展点上。** 新的 `main` 面板 + `sidebar.panellist`
+		 *    + Noah 同构 `shell.overlay` 左栏。root / conversation / composer 仍不碰原生行为。
+		 *    WB-SUP P1：正式绑定索引仍保留；左树用 overlay 呈现客户分组，
+		 *    仍禁止用脆弱的 hash 类名刮官方 DOM。
+		 *
+		 * 类名全是自己的 `wb_` 前缀：CSS 是手写的（本包没有 tsdown 构建，
+		 * 没有 class-name hashing 可依赖），手机适配的集中 suffix 选择器例外见 Upstream compatibility boundary。
+		 *
+		 * 令牌照搬 workbench/原型v2暂定版/styles.css:8-80。
+		 * ================================================================== */
+
+
+		/* ==================================================================
+		 * dsh-workbench — browser half.
+		 *
+		 * 装配台（原型的 Landing 页）：A1 给谁写 / A2 主题 / A3 工作区 /
+		 * A4 拖杆 / A5 怎么写 / A6 底座 / A7 放大编辑。
+		 *
+		 * 两条硬规矩
+		 * ----------
+		 * 1. **没有数据就留空，不塞假数据。** 薄弱问句和 skill 都由各自接口提供，
+		 *    请求失败时只显示可解释的空态，不放编造的行。
 		 * 2. **只落在 DSH 的扩展点上。** 新的 `main` 面板 + `sidebar.panellist`
 		 *    一行 + 一个会话域的接力挂件。root / conversation / composer /
 		 *    sidebar.workspaces 一个都不碰，标准流程永远一点即达。
@@ -35,13 +708,50 @@ window.__ModuleLoader__.load({
 		 *   面板与 R 区     面板接线 / 文章审核 tab / 机器检查占位
 		 * ================================================================== */
 
+		/* DSH is deliberately light-only.  Keep the host harness and any
+		 * persisted Appearance choice from reintroducing a dark skin. */
+		function forceLightTheme() {
+			if (typeof document === "undefined" || !document.documentElement) return;
+			var root = document.documentElement;
+			var observer = null;
+			var observerOptions = { attributes: true, attributeFilter: ["data-dsh-theme", "data-ds-dark-theme", "class", "style"] };
+			function normalize() {
+				if (observer) observer.disconnect();
+				var body = document.body;
+				if (root.getAttribute("data-dsh-theme") !== "light") root.setAttribute("data-dsh-theme", "light");
+				root.removeAttribute("data-ds-dark-theme");
+				root.classList.remove("dark");
+				if (root.style.getPropertyValue("color-scheme") !== "light" || root.style.getPropertyPriority("color-scheme") !== "important") root.style.setProperty("color-scheme", "light", "important");
+				if (body) {
+					if (body.hasAttribute("data-dsh-theme") && body.getAttribute("data-dsh-theme") !== "light") body.setAttribute("data-dsh-theme", "light");
+					body.removeAttribute("data-ds-dark-theme");
+					body.classList.remove("dark");
+					if (body.style.getPropertyValue("color-scheme") !== "light" || body.style.getPropertyPriority("color-scheme") !== "important") body.style.setProperty("color-scheme", "light", "important");
+				}
+				if (observer) {
+					observer.observe(root, observerOptions);
+					if (body) observer.observe(body, observerOptions);
+				}
+			}
+			normalize();
+			if (window.__DSH_FORCE_LIGHT_THEME__ || typeof MutationObserver !== "function") return;
+			window.__DSH_FORCE_LIGHT_THEME__ = true;
+			observer = new MutationObserver(normalize);
+			observer.observe(root, observerOptions);
+			if (document.body) observer.observe(document.body, observerOptions);
+			window.__DSH_FORCE_LIGHT_THEME_OBSERVER__ = observer;
+		}
+		forceLightTheme();
+
 		var CSS = [
+			"html,body{color-scheme:light!important;}",
+			"[data-theme-toggle],[data-theme-switch],[data-theme-picker],button[aria-label*=\"主题\"],button[title*=\"主题\"]{display:none!important;}",
 			/* ---- tokens (原型 styles.css:8-80) ------------------------------
 			 * On `body`, not on our own root: this is the product palette, and
-			 * the conversation skin needs it too. Dark hangs off the attribute
-			 * DSH's own ThemePresenter writes, so it follows the user's
-			 * light/dark choice instead of inventing a second switch. */
+			 * the conversation skin needs it too. The light palette is fixed so
+			 * host Appearance changes cannot create a mixed skin. */
 			"body{",
+			"  --wb-klein:#002FA7; --wb-motion:200ms; --wb-motion-fast:150ms; --wb-motion-panel:220ms; --wb-ease:cubic-bezier(0.2, 0, 0, 1);",
 			"  --wb-bg:#ffffff; --wb-side:#f6f7f9; --wb-elev:#ffffff; --wb-elev2:#eef1f5;",
 			"  --wb-line:#e2e5ea; --wb-line-soft:#edeff3;",
 			"  --wb-text:#1d2129; --wb-strong:#000000; --wb-dim:#5b626e; --wb-dim2:#98a0ac;",
@@ -53,14 +763,6 @@ window.__ModuleLoader__.load({
 			"  --wb-pop:0 8px 24px rgba(16,24,40,.14);",
 			"  --wb-font:-apple-system,\"PingFang SC\",\"Hiragino Sans GB\",\"Microsoft YaHei\",sans-serif;",
 			"  --wb-mono:ui-monospace,SFMono-Regular,Menlo,monospace;",
-			"body[data-ds-dark-theme]{",
-			"  --wb-bg:#14161b; --wb-side:#171a20; --wb-elev:#1c2028; --wb-elev2:#232833;",
-			"  --wb-line:#2b3140; --wb-line-soft:#232836;",
-			"  --wb-text:#e7e9ef; --wb-strong:#ffffff; --wb-dim:#9aa2b4; --wb-dim2:#6b7385;",
-			"  --wb-accent:#4d7cfe; --wb-accent-bg:#141d2e; --wb-accent-line:#26364f;",
-			"  --wb-accent-glow:rgba(77,124,254,.15);",
-			"  --wb-ok:#3ecf8e; --wb-ok-bg:#12241d; --wb-warn:#f0b429; --wb-bad:#ff7b7b; --wb-bad-bg:#3a1f1f;",
-			"  --wb-shadow:none; --wb-pop:0 8px 24px rgba(0,0,0,.55);",
 			"}",
 
 			/* ---- C 区皮肤（会话页）------------------------------------------
@@ -89,10 +791,11 @@ window.__ModuleLoader__.load({
 			"  border-bottom:1px solid var(--wb-line-soft); background:var(--wb-bg);",
 			"}",
 			"[data-slot='conversation.composer.bar']{ --dsw-specific-input-major:var(--wb-elev); }",
+
 			/* 会话页美化（2026-10-13 晚 · 气泡轮）：预填简报气泡 / 过程折叠卡 / 工具与思考胶囊 / 表格修复。
 			 * 锚点全用官方 data-*：data-chat-anchor-key（条目）、data-turn-process（过程折叠总条）、
 			 * data-disclosure-row（过程内每行）、data-wb-prefold（我们打的预填标）。
-			 * wb 变量在会话页无效（不在 .wb_root 下），颜色写死，暗色单独一套。 */
+			 * 保留原型的浅色样式；主题由 forceLightTheme 统一固定。 */
 			/* —— 预填简报气泡 —— */
 			"[data-slot='main.conversation'] [data-wb-prefold]{background:#eef3ff; border:1px solid #d7e3ff; border-radius:14px; padding:6px 10px; max-width:640px; margin:2px 0 10px;}",
 			/* !important：chat.node 带内联 display:contents，样式表规则必须 !important 才压得过 */
@@ -103,33 +806,26 @@ window.__ModuleLoader__.load({
 			"[data-slot='main.conversation'] .wb_prefoldHead .wb_pfT{overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}",
 			"[data-slot='main.conversation'] .wb_prefoldHead .wb_pfTag{flex:none; background:#fff; border:1px solid #d7e3ff; border-radius:99px; padding:0 8px; font-size:11px; font-weight:600;}",
 			"[data-slot='main.conversation'] .wb_prefoldHead .wb_pfC{flex:none; margin-left:auto; font-size:11px;}",
-			"body[data-ds-dark-theme] [data-slot='main.conversation'] [data-wb-prefold]{background:#232a3d; border-color:#31406080;}",
-			"body[data-ds-dark-theme] [data-slot='main.conversation'] .wb_prefoldHead{color:#8ab0ff;}",
-			"body[data-ds-dark-theme] [data-slot='main.conversation'] .wb_prefoldHead .wb_pfTag{background:#1a2030; border-color:#31406080; color:#8ab0ff;}",
 			/* —— 过程折叠总条（官方 data-turn-process 按钮，整轮一条）—— */
 			"[data-slot='main.conversation'] button[data-turn-process]{all:unset; box-sizing:border-box; display:flex; align-items:center; gap:8px; width:100%; max-width:640px; margin:2px 0 10px; padding:9px 14px; background:#fff; border:1px solid #e7e9ee; border-radius:13px; cursor:pointer; color:#565c6b; font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif; font-size:13px; line-height:1.6; box-shadow:0 1px 2px rgba(16,24,40,.04);}",
 			"[data-slot='main.conversation'] button[data-turn-process]::before{content:'💡'; font-size:13px; line-height:1;}",
 			"[data-slot='main.conversation'] button[data-turn-process] svg{margin-left:auto; flex:none; color:#8b91a0;}",
 			"[data-slot='main.conversation'] button[data-turn-process]:hover{background:#fcfcfd;}",
-			"body[data-ds-dark-theme] [data-slot='main.conversation'] button[data-turn-process]{background:#1e222a; border-color:#2b3140; color:#9aa3b2; box-shadow:none;}",
-			"body[data-ds-dark-theme] [data-slot='main.conversation'] button[data-turn-process]:hover{background:#232833;}",
 			/* —— 过程内行胶囊（工具调用 / 思考 / 上下文注入，官方 data-disclosure-row）—— */
 			"[data-slot='main.conversation'] [data-disclosure-row]{background:#fafafc; border:1px solid #eceef2; border-radius:12px; padding:7px 12px; margin:0 0 6px; max-width:640px; box-shadow:0 1px 2px rgba(16,24,40,.03);}",
 			"[data-slot='main.conversation'] [data-disclosure-row] > span:nth-child(2){color:#8b91a0; flex:none;}",
 			"[data-slot='main.conversation'] [data-disclosure-row] > span:first-child{color:#8b91a0;}",
 			"[data-slot='main.conversation'] [data-disclosure-row].wb_thinkRow > span:first-child{color:#a08cff;}",
-			"body[data-ds-dark-theme] [data-slot='main.conversation'] [data-disclosure-row]{background:#1b1f27; border-color:#262c38; box-shadow:none;}",
-			"body[data-ds-dark-theme] [data-slot='main.conversation'] [data-disclosure-row] > span:first-child{color:#6b7686;}",
-			"body[data-ds-dark-theme] [data-slot='main.conversation'] [data-disclosure-row].wb_thinkRow > span:first-child{color:#a08cff;}",
 			/* —— 进行中（流式）：过程行全部隐藏，只留加载气泡；完成后官方折叠接管 —— */
 			"[data-slot='main.conversation'][data-wb-running] [data-disclosure-row],",
 			"[data-slot='main.conversation'][data-wb-running] button[data-turn-process],",
 			"[data-slot='main.conversation'][data-wb-running] [data-chat-flow-kind='reasoning']{display:none !important;}",
-			".wb_ldr{display:flex; align-items:center; gap:10px; background:#fff; border:1px solid #e7e9ee; border-radius:13px; padding:11px 16px; margin:8px 0; max-width:640px; color:#565c6b; font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif; font-size:13px; box-shadow:0 1px 2px rgba(16,24,40,.04);}",
-			".wb_ldrSpin{width:14px; height:14px; flex:none; border:2px solid #dbe2ef; border-top-color:#3b6df6; border-radius:50%; animation:wbSpin .8s linear infinite;}",
+			/* Direct child of the unpadded conversation slot: reserve a full inset
+			 * inside its scroll/clip boundary, without changing the host overflow. */
+			".wb_ldr{box-sizing:border-box;display:flex;flex:0 0 auto;align-items:center;gap:10px;background:#fff;border:1px solid #e7e9ee;border-radius:13px;padding:11px 16px;margin:8px 16px;max-width:min(640px,calc(100% - 32px));min-width:0;overflow:visible;color:#565c6b;font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;font-size:13px;box-shadow:0 2px 8px rgba(0,47,167,.05);animation:wbEnter var(--wb-motion) var(--wb-ease);}",
+			".wb_ldrSpin{display:inline-block;box-sizing:border-box;width:18px;height:18px;flex:0 0 18px;border:0;border-radius:50%;corner-shape:round;background:conic-gradient(from 0deg,rgba(0,47,167,.15) 0deg 90deg,var(--wb-klein) 270deg 360deg);-webkit-mask:radial-gradient(farthest-side,transparent calc(100% - 2px),#000 calc(100% - 1.5px));mask:radial-gradient(farthest-side,transparent calc(100% - 2px),#000 calc(100% - 1.5px));animation:wbSpin .8s linear infinite;}",
+			".wb_ldrT{min-width:0;overflow-wrap:anywhere;}",
 			"@keyframes wbSpin{to{transform:rotate(360deg)}}",
-			"body[data-ds-dark-theme] .wb_ldr{background:#1e222a; border-color:#2b3140; color:#9aa3b2; box-shadow:none;}",
-			"body[data-ds-dark-theme] .wb_ldrSpin{border-color:#333a48; border-top-color:#7ea0ff;}",
 			/* —— 进行中思考淡化 —— */
 			"[data-slot='main.conversation'] [data-chat-flow-kind='reasoning']{opacity:.55;}",
 			/* —— 正文表格：完整显示 + 轻装饰。
@@ -138,7 +834,8 @@ window.__ModuleLoader__.load({
 			"[data-slot='main.conversation'] table{table-layout:auto; width:100%; max-width:100%; border-collapse:collapse;}",
 			"[data-slot='main.conversation'] td, [data-slot='main.conversation'] th{white-space:normal !important; word-break:break-word; overflow-wrap:anywhere; vertical-align:top;}",
 			"[data-slot='main.conversation'] th{border-bottom:2px solid #cfdcff; background:#eef3ff; text-align:left;}",
-			"body[data-ds-dark-theme] [data-slot='main.conversation'] th{border-bottom-color:#2b3140; background:#232833;}",
+
+			"[data-slot='main.conversation'] [data-wb-pref-tail]{display:none !important;}",
 
 			/* ---- 工作台自己的壳 ---------------------------------------------- */
 			".wb_root{",
@@ -215,7 +912,7 @@ window.__ModuleLoader__.load({
 			"  border:none; outline:none; background:transparent; font:14px/1.7 var(--wb-font);",
 			"}",
 
-			/* A3 表格（结构照原型，行留空 —— 数据没接就不放行） */
+			/* A3 表格（结构照原型，行由 capture-words 数据驱动） */
 			".wb_tbl{width:100%; border-collapse:collapse; table-layout:fixed;}",
 			".wb_tbl th{",
 			"  position:sticky; top:0; z-index:1; text-align:left; font-size:11px; font-weight:500;",
@@ -298,6 +995,9 @@ window.__ModuleLoader__.load({
 			".wb_tblGap tbody tr{cursor:pointer;}",
 			".wb_tblGap tbody tr:hover{background:var(--wb-side);}",
 			".wb_gapQ{line-height:1.6; color:var(--wb-text);}",
+			".wb_tickMeta{display:block; color:var(--wb-dim2); font-size:10px; line-height:1.3; user-select:text; -webkit-user-select:text;}",
+			".wb_source{padding:7px 14px 3px; color:var(--wb-dim2); font-size:10.5px;}",
+			".wb_tickError{color:var(--wb-bad,#d9483b); font-size:10.5px;}",
 			".wb_gapMeta .wb_warn{color:var(--wb-bad,#d9483b);}",
 			".wb_gapEmpty{padding:14px; color:var(--wb-dim); font-size:12px;}",
 			/* 放大看（⤢）：全屏浮层，表格铺开。 */
@@ -386,10 +1086,20 @@ window.__ModuleLoader__.load({
 			".wb_nvSearch{border:1px solid #e5e7eb;border-radius:8px;padding:6px 10px;font-size:12.5px;outline:none;background:#fff;}",
 			".wb_nvTree{flex:1 1 auto;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:2px;}",
 			".wb_nvHint{padding:10px 6px;font-size:12px;color:#9ca3af;}",
-			".wb_nvGroupName{width:100%;border:none;background:none;text-align:left;font-size:12.5px;font-weight:600;color:#374151;cursor:pointer;padding:6px 6px;border-radius:6px;}",
+			".wb_nvGroupName{display:flex;align-items:center;gap:6px;width:100%;border:none;background:none;text-align:left;font-size:12.5px;font-weight:600;color:#374151;cursor:pointer;padding:6px 6px;border-radius:6px;}",
 			".wb_nvGroupName:hover{background:#eef2f7;}",
-			".wb_nvItem{width:100%;border:none;background:none;text-align:left;font-size:12.5px;color:#4b5563;cursor:pointer;padding:6px 6px 6px 18px;border-radius:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}",
+			".wb_groupStatus{display:inline-flex;flex:none;margin-left:auto;}",
+			".wb_nvItem{display:flex;align-items:center;gap:6px;width:100%;border:none;background:none;text-align:left;font-size:12.5px;color:#4b5563;cursor:pointer;padding:6px 6px 6px 18px;border-radius:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}",
 			".wb_nvItem:hover{background:#eef2f7;color:#111827;}",
+			".wb_nvLabel{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;}.wb_nvItem[data-unread=true] .wb_nvLabel{font-weight:600;}",
+			".wb_nvExtra{flex:none;font-size:11.5px;font-variant-numeric:tabular-nums;}",
+			".wb_runSlot{display:inline-flex;align-items:center;justify-content:center;flex:0 0 14px;width:14px;height:14px;}.wb_ldrSpin.wb_runSpin{width:12px;height:12px;flex:0 0 12px;}",
+			".wb_runDot{width:6px;height:6px;border-radius:50%;corner-shape:round;background:currentColor;}.wb_runDot[data-tone=ok]{box-shadow:0 0 0 2px rgba(18,160,106,.18);}",
+			".wb_nv [data-tone=klein],.wb_mSession [data-tone=klein],.wb_groupStatus [data-tone=klein]{color:var(--wb-klein);}.wb_nv [data-tone=ok],.wb_mSession [data-tone=ok],.wb_groupStatus [data-tone=ok]{color:var(--wb-ok);}.wb_nv [data-tone=bad],.wb_mSession [data-tone=bad],.wb_groupStatus [data-tone=bad]{color:var(--wb-bad);}.wb_nv [data-tone=warn],.wb_mSession [data-tone=warn],.wb_groupStatus [data-tone=warn]{color:var(--wb-warn);}",
+			".wb_nvRename{width:100%;box-sizing:border-box;padding:5px 8px;border:1px solid #93c5fd;border-radius:6px;font:inherit;}",
+			".wb_nvRenameError{display:block;padding:2px 8px;color:#b91c1c;font-size:12px;}",
+			".wb_nvMenu{position:fixed;z-index:10000;min-width:132px;padding:4px;background:#fff;border:1px solid #e5e7eb;border-radius:8px;box-shadow:0 4px 16px #0002;}",
+			".wb_nvMenu button{width:100%;padding:7px 12px;border:0;border-radius:4px;background:none;text-align:left;color:#374151;cursor:pointer;}.wb_nvMenu button:hover,.wb_nvMenu button:focus{background:#eef2f7;}",
 			".wb_nvCur,.wb_nvItem.wb_nvCur{background:#e8f0fe;color:#1d4ed8;}",
 
 			/* 挑篇条（原型 pick-row）：改哪几篇 + 编号格子 + 全选 + 红绿点（机器检查未接，置灰） */
@@ -415,6 +1125,7 @@ window.__ModuleLoader__.load({
 			".wb_task{padding:8px 20px 6px;border-bottom:1px solid var(--wb-line-soft);display:flex;flex-direction:column;gap:2px;background:var(--wb-bg);}",
 			".wb_taskRow{display:flex;align-items:baseline;gap:10px;min-width:0;}",
 			".wb_taskRow2{display:flex;gap:12px;font-size:12px;color:var(--wb-dim);min-width:0;overflow:hidden;}",
+			".wb_reviewOpen{margin-left:8px;font-size:12px;padding:2px 10px;cursor:pointer;}",
 			".wb_taskHead{display:inline-flex;gap:6px;align-items:baseline;min-width:0;}",
 			".wb_taskClient{font-weight:600;font-size:13.5px;color:var(--wb-strong);}",
 			".wb_taskDim{color:var(--wb-dim2);font-size:12px;}",
@@ -516,6 +1227,17 @@ window.__ModuleLoader__.load({
 			".wb_rvEmpty2{padding:20px 14px;color:#9ca3af;font-size:12.5px;}",
 			".wb_rvCols{flex:1;display:flex;min-height:0;border-top:1px solid #eef0f3;}",
 			".wb_rv .wb_reviewList{flex:0 0 152px;width:152px;max-width:152px;min-height:0;overflow-y:auto;padding:0;gap:0;border-right:1px solid #eef0f3;background:#fafbfc;}",
+			/* Splitter mounts only in the native DSHing review panel (never inside the unified .review-mount strip). */
+			"html:not([data-wb-mobile]) .wb_reviewSplit{display:flex;flex-direction:row;overflow-x:auto;}",
+			"html:not([data-wb-mobile]) .wb_reviewSplit>.wb_reviewList{box-sizing:border-box;display:block;flex:0 0 var(--wb-review-list-width,152px);width:var(--wb-review-list-width,152px);max-width:var(--wb-review-list-width,152px);max-height:none;overflow-x:hidden;overflow-y:auto;padding:0;border-right:0;}",
+			"html:not([data-wb-mobile]) .wb_reviewSplit>.wb_reviewList>.wb_ri{min-width:0;max-width:100%;}",
+			"html:not([data-wb-mobile]) .wb_reviewSplit>.wb_reviewMain{box-sizing:border-box;flex:1 1 0;min-width:280px;}",
+			".wb_reviewSplitter{position:relative;z-index:1;flex:0 0 8px;width:8px;margin:0 -4px;align-self:stretch;cursor:col-resize;touch-action:none;user-select:none;outline:none;}",
+			".wb_reviewSplitter::after{content:'';position:absolute;top:0;bottom:0;left:50%;transform:translateX(-50%);width:1px;background:#eef0f3;transition:background-color var(--wb-motion,200ms) var(--wb-ease),width var(--wb-motion,200ms) var(--wb-ease);}",
+			".wb_reviewSplitter:hover::after,.wb_reviewSplitter:focus::after,.wb_reviewSplitter.is-dragging::after{width:2px;background:var(--wb-klein);}",
+			".wb_reviewSplitter:focus-visible{outline:2px solid var(--wb-klein);outline-offset:-2px;}",
+			"body.wb_reviewResizing,body.wb_reviewResizing *{cursor:col-resize!important;user-select:none!important;-webkit-user-select:none!important;}body.wb_reviewResizing .wb_reviewMain iframe{pointer-events:none!important;}",
+			"html[data-wb-mobile] .wb_reviewSplitter{display:none;}",
 			".wb_rv .wb_reviewItem{display:none;}",
 			".wb_ri{display:flex;align-items:center;gap:6px;width:100%;text-align:left;padding:6px 8px;font-size:11.5px;color:#4b5563;cursor:pointer;border-bottom:1px solid #f1f2f4;}",
 			".wb_ri:hover{background:#f3f4f6;color:#111827;}",
@@ -564,6 +1286,7 @@ window.__ModuleLoader__.load({
 			"}",
 			".wb_chipBtn:hover{border-color:var(--wb-accent-line); color:var(--wb-accent);}",
 			".wb_chipBtn[data-on='1']{background:var(--wb-accent-bg); border-color:var(--wb-accent-line); color:var(--wb-accent); font-weight:600;}",
+
 			/* 技能加购（点几下 = 写几篇，2026-10-13 定）：角标 + 弹动 + 飞入 + 输入区标签行。 */
 			".wb_chipBtn{position:relative;}",
 			".wb_skBadge{",
@@ -572,7 +1295,7 @@ window.__ModuleLoader__.load({
 			"  font-weight:600; text-align:center; box-shadow:0 1px 3px rgba(0,0,0,.28); cursor:pointer;",
 			"}",
 			".wb_skBadge:hover{filter:brightness(.88);}",
-			".wb_bump{animation:wb_bump .32s ease;}",
+			".wb_bump{animation:wb_bump var(--wb-motion) var(--wb-ease);}",
 			"@keyframes wb_bump{0%{transform:scale(1);}35%{transform:scale(1.14);}100%{transform:scale(1);}}",
 			".wb_fly{",
 			"  position:fixed; width:10px; height:10px; border-radius:50%; background:var(--wb-accent);",
@@ -590,6 +1313,11 @@ window.__ModuleLoader__.load({
 			".wb_skTag:hover{filter:brightness(.95);}",
 			".wb_skTag .wb_skBadge{top:auto; bottom:-7px; right:-7px;}",
 			"@media (prefers-reduced-motion: reduce){ .wb_bump{animation:none;} }",
+
+			"html[data-wb-mobile] .wb_mChip{position:relative;}",
+			"html[data-wb-mobile] .wb_mAction .wb_skTags{display:flex; gap:14px; overflow-x:auto; padding:7px 7px 14px;}",
+			"html[data-wb-mobile] .wb_mAction .wb_skTag{flex:none;}",
+			"html[data-wb-mobile] .wb_mAssembly:has(.wb_skTags) .wb_mForm{padding-bottom:144px;}",
 
 			/* A6 底座 + A7 放大 */
 			".wb_base{flex:0 0 auto; position:relative; display:flex; flex-direction:column; gap:6px;}",
@@ -650,8 +1378,243 @@ window.__ModuleLoader__.load({
 			".wb_emptyT{font-size:13px;}",
 			".wb_emptyS{font-size:11.5px; color:var(--wb-dim2); line-height:1.7; max-width:46em;}",
 			".wb_bad{color:var(--wb-bad);}",
+
+			/* Motion: short feedback, 220ms surfaces, transform-only waiting shimmer.
+			 * Durations/easing follow Ant Design's restrained interaction patterns. */
+			"@keyframes wbEnter{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}",
+			"@keyframes wbFade{from{opacity:0}to{opacity:1}}",
+			"@keyframes wbFadeOut{from{opacity:1}to{opacity:0}}",
+			"@keyframes wbSurfaceIn{from{opacity:0;transform:translate3d(var(--wb-enter-x,0px),var(--wb-enter-y,16px),0)}to{opacity:1;transform:none}}",
+			"@keyframes wbSurfaceOut{from{opacity:1;transform:none}to{opacity:0;transform:translate3d(var(--wb-enter-x,0px),var(--wb-enter-y,16px),0)}}",
+			"@keyframes wbShimmer{from{transform:translateX(-100%)}to{transform:translateX(100%)}}",
+			".wb_skeleton{box-sizing:border-box;width:100%;min-width:0;padding:14px;color:var(--wb-dim);font-size:12.5px;}",
+			".wb_skeletonLabel{display:block;margin-bottom:10px;}.wb_skeletonBlocks{display:grid;gap:10px;}",
+			".wb_skeletonLine{display:block;position:relative;overflow:hidden;height:12px;border-radius:6px;background:rgba(0,47,167,.06);}.wb_skeletonLine:last-child{width:65%;}",
+			".wb_skeletonLine::after{content:'';position:absolute;inset:0;background:linear-gradient(90deg,transparent,rgba(255,255,255,.85),transparent);animation:wbShimmer 1.4s var(--wb-ease) infinite;}",
+			".wb_skeletonCompact{width:160px;max-width:100%;padding:0;}.wb_skeletonCompact .wb_skeletonBlocks{grid-template-columns:2fr 1fr 1fr;gap:6px;}.wb_skeletonCompact .wb_skeletonLine:last-child{width:100%;}",
+			".wb_empty>.wb_skeleton{max-width:480px;}.wb_skeletonCompact .wb_skeletonLabel{margin-bottom:4px;font-size:inherit;}",
+			".wb_root button,button:is([class^='wb_'],[class*=' wb_']),.wb_mScrim button,.wb_mSegment button,.wb_ri,.wb_mWeakRow,.wb_tblGap td,.wb_sel select{transition:background-color var(--wb-motion-fast) var(--wb-ease),border-color var(--wb-motion-fast) var(--wb-ease),color var(--wb-motion-fast) var(--wb-ease),box-shadow var(--wb-motion-fast) var(--wb-ease),opacity var(--wb-motion-fast) var(--wb-ease),transform var(--wb-motion-fast) var(--wb-ease);}",
+			"button:is([class^='wb_'],[class*=' wb_']):active:not(:disabled),.wb_mSegment button:active:not(:disabled){transform:scale(.97);}",
+			"button:is(.wb_send,.wb_go,.wb_nvNew,.wb_rvConfirmAll,.wb_mPrimary):hover:not(:disabled){box-shadow:0 3px 10px rgba(0,47,167,.18);}",
+			"button:is(.wb_rvConfirm,.wb_rvCheck,.wb_editBtn,.wb_editCancel,.wb_mIcon,.wb_mChip):hover:not(:disabled){border-color:var(--wb-klein);color:var(--wb-klein);}",
+			"html[data-wb-mobile] .wb_mSession:hover,html[data-wb-mobile] .wb_mGroup:hover{background:rgba(0,47,167,.05);}.wb_nvItem,.wb_mSession,.wb_ri,.wb_mReviewItem{animation:wbEnter var(--wb-motion) var(--wb-ease);}",
+			"button[class*='wb_'][aria-busy='true']{cursor:wait;opacity:.65;}button[class*='wb_'][aria-busy='true']::before{content:'';display:inline-block;box-sizing:border-box;width:14px;height:14px;margin-right:6px;vertical-align:-2px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;corner-shape:round;animation:wbSpin .8s linear infinite;}",
+			".wb_go[aria-busy='true']::before{position:absolute;margin:0;}.wb_go[aria-busy='true']{font-size:0;}",
+			".wb_workBody,.wb_refBd,.wb_mReferences,.wb_mSkills,.wb_mWeakWrap,.wb_mTopic,.wb_reviewText,.wb_mArticle{animation:wbFade var(--wb-motion) var(--wb-ease);}",
+			".wb_empty,.wb_skEmpty,.wb_mEmpty,.wb_mWeakEmpty,.wb_reviewMsg:not(:empty),.wb_editMsg:not(:empty),.wb_nvRenameError,.wb_tickError,.wb_bad:not(:empty),.wb_mAssembly [role='status'],.wb_mScrim [role='alert'],.wb_nvMenu,.wb_platMenu,.wb_modelMenu{animation:wbEnter var(--wb-motion) var(--wb-ease);}",
+			".wb_mScrim,.wb_zoomMask,.wb_confirmMask,.wb_reviewWrap{animation:wbFade var(--wb-motion-panel) var(--wb-ease);}",
+			".wb_mSheet,.wb_mEditor,.wb_mDrawer,.wb_mReview,.wb_zoomSheet,.wb_confirmCard,.wb_review,.wb_rv{animation:wbSurfaceIn var(--wb-motion-panel) var(--wb-ease);}",
+			".wb_mDrawer{--wb-enter-x:-24px;--wb-enter-y:0px;}.wb_rv{--wb-enter-x:12px;--wb-enter-y:0px;}",
+			"[data-wb-leave='1']:is(.wb_mScrim,.wb_zoomMask,.wb_confirmMask,.wb_reviewWrap){animation:wbFadeOut var(--wb-motion-panel) var(--wb-ease) forwards;pointer-events:none;}",
+			"[data-wb-leave='1']>:is(.wb_mSheet,.wb_mEditor,.wb_mDrawer,.wb_zoomSheet,.wb_confirmCard,.wb_review),.wb_mReview[data-wb-leave='1']{animation:wbSurfaceOut var(--wb-motion-panel) var(--wb-ease) forwards;pointer-events:none;}",
+			".wb_collapse{display:grid;grid-template-rows:0fr;opacity:0;flex:0 0 auto;transition:grid-template-rows var(--wb-motion-panel) var(--wb-ease),opacity var(--wb-motion-panel) var(--wb-ease);}.wb_collapse[data-open='1']{grid-template-rows:1fr;opacity:1;}.wb_collapseInner{min-height:0;overflow:hidden;}",
+			".wb_rvCollapse .wb_collapseInner{transform:translateY(-6px);transition:transform var(--wb-motion-panel) var(--wb-ease);}.wb_rvCollapse[data-open='1'] .wb_collapseInner{transform:none;}",
+			".wb_ref>.wb_collapse{flex:1;min-height:0;}.wb_ref>.wb_collapse>.wb_collapseInner{display:flex;flex-direction:column;}.wb_ref[data-open='0']{min-height:0;}",
+			".wb_mProgress summary svg,.wb_rvChev,[data-slot='main.conversation'] [data-disclosure-row] svg{transition:transform var(--wb-motion) var(--wb-ease),color var(--wb-motion) var(--wb-ease);}",
+			"[data-slot='main.conversation'] :is(button[data-turn-process],[data-disclosure-row]){transition:background-color var(--wb-motion-fast) var(--wb-ease),opacity var(--wb-motion) var(--wb-ease);}",
+			".wb_mProgress[open] .wb_mChecklist,[data-slot='main.conversation'] [data-wb-open]>:not(.wb_prefoldHead),[data-slot='main.conversation'] [data-disclosure-row]{animation:wbFade var(--wb-motion) var(--wb-ease);}",
+			"@supports selector(details::details-content){.wb_mProgress::details-content{opacity:0;transition:opacity var(--wb-motion) var(--wb-ease),content-visibility var(--wb-motion) allow-discrete;}.wb_mProgress[open]::details-content{opacity:1;}}",
+			/* Progressive intrinsic-height interpolation; older engines retain the fold. */
+			"@supports (interpolate-size:allow-keywords){[data-slot='main.conversation'] [data-wb-prefold]{interpolate-size:allow-keywords;height:auto;max-height:none;overflow:hidden;transition:height var(--wb-motion) var(--wb-ease);}[data-slot='main.conversation'] [data-wb-prefold]:not([data-wb-open]){height:37px;max-height:none;}}",
+			"html[data-wb-mobile][data-wb-scene='compose'] dsh-tabbar a{transition:opacity var(--wb-motion-fast) var(--wb-ease),transform var(--wb-motion-fast) var(--wb-ease);}html[data-wb-mobile][data-wb-scene='compose'] dsh-tabbar a:active{opacity:.7;transform:scale(.96);}",
+			"@media (prefers-reduced-motion: reduce){[class^='wb_'],[class*=' wb_'],[class^='wb_']::before,[class^='wb_']::after,[class*=' wb_']::before,[class*=' wb_']::after,.wb_root *,.wb_mScrim *,.wb_mProgress *,[data-slot='main.conversation'] [data-wb-prefold],[data-slot='main.conversation'] [data-wb-open]>*,[data-slot='main.conversation'] button[data-turn-process],[data-slot='main.conversation'] [data-disclosure-row],[data-slot='main.conversation'] [data-disclosure-row] *,html[data-wb-mobile][data-wb-scene='compose'] dsh-tabbar a{animation:none!important;transition:none!important;scroll-behavior:auto!important;}.wb_mProgress::details-content{transition:none!important;}.wb_ldrSpin{transform:none;}.wb_fly{display:none;}}",
 		].join("\n");
 
+		/* Mobile CSS: tokens/components adapted from screens/ds.css. */
+		CSS += `
+/* Derived from mobile-redesign/screens/ds.css. Runtime colors come from PR-1 tokens.css. */
+html[data-wb-mobile] body{--wb-bg:var(--dsh-bg,#f5f3ee);--wb-text:var(--dsh-ink,#0e1430);--wb-accent:var(--dsh-blue,#002fa7);--wb-accent-ink:var(--dsh-blue-ink,var(--wb-accent));--wb-line:var(--dsh-line,#e9e6e0);--wb-dim:var(--dsh-ink-2,#4a5170);--wb-dim2:var(--dsh-ink-3,#8b90a6);--wb-elev:var(--dsh-card,#fff);--wb-side:var(--wb-bg);--wb-content:100%;color:var(--wb-text)}
+html[data-wb-mobile] :is(.wb_mAssembly,.wb_mScrim,.wb_mDrawer,.wb_mChat,.wb_mReview){box-sizing:border-box;font:16px/24px var(--wb-font);color:var(--wb-text)}
+html[data-wb-mobile] :is(.wb_mAssembly,.wb_mScrim,.wb_mDrawer,.wb_mChat,.wb_mReview) *{box-sizing:border-box}
+html[data-wb-mobile] :is(.wb_mAssembly,.wb_mScrim,.wb_mDrawer,.wb_mChat,.wb_mReview) :is(button,input,textarea){font:inherit;color:inherit}
+html[data-wb-mobile] button{cursor:pointer}
+html[data-wb-mobile] .wb_mAssembly{height:100%;display:flex;flex-direction:column;background:var(--wb-bg);overflow:hidden}
+html[data-wb-mobile] .wb_mTop{flex:none;height:52px;display:flex;align-items:center;gap:4px;padding:0 8px 0 4px;background:var(--wb-bg)}
+html[data-wb-mobile] .wb_mHeading{flex:1;min-width:0;display:flex;flex-direction:column}
+html[data-wb-mobile] .wb_mHeading b{font-size:20px;line-height:28px;font-weight:750;white-space:nowrap;text-overflow:ellipsis;overflow:hidden}
+html[data-wb-mobile] .wb_mHeading small{font-size:13px;line-height:16px;white-space:nowrap;text-overflow:ellipsis;overflow:hidden;color:var(--wb-dim2)}
+html[data-wb-mobile] .wb_mIcon{border:0;background:transparent;flex:0 0 44px;width:44px;height:44px;display:grid;place-items:center;padding:0;border-radius:12px;font-size:24px!important}
+html[data-wb-mobile] .wb_mBadgeAnchor{position:relative;display:inline-flex;align-items:center}
+html[data-wb-mobile] .wb_mEntryDot{position:absolute;right:-3px;top:-3px;width:8px;height:8px;border-radius:50%;corner-shape:round;background:var(--wb-bad);box-shadow:0 0 0 1.5px #fff;pointer-events:none}
+html[data-wb-mobile] .wb_mForm{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;padding:16px 16px 96px}
+html[data-wb-mobile] .wb_mForm h3{font-size:17px;line-height:24px;margin:24px 4px 10px;font-weight:700}
+html[data-wb-mobile] .wb_mContext{display:flex;align-items:center;gap:12px;width:100%;text-align:left;border:0;background:var(--dsh-card,#fff);border-radius:var(--dsh-r-m,14px);padding:16px;box-shadow:var(--dsh-shadow-1,0 1px 2px #0e14300f)}
+html[data-wb-mobile] .wb_mGrow{flex:1;min-width:0}
+html[data-wb-mobile] .wb_mContext b{font-weight:650;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;overflow-wrap:anywhere;line-height:24px}
+html[data-wb-mobile] :is(.wb_mContext,.wb_mClient) small{display:block;font-size:13px;line-height:18px;color:var(--wb-dim2)}
+html[data-wb-mobile] .wb_mContext>svg{color:var(--wb-dim2);flex:none}
+html[data-wb-mobile] .wb_mAvatar{width:40px;height:40px;border-radius:12px;background:var(--wb-accent);color:var(--dsh-on-accent,#fff);display:grid;place-items:center;font-size:17px;font-weight:750;flex:none}
+html[data-wb-mobile] .wb_mSegment{display:flex;padding:2px;gap:2px;border-radius:12px;background:var(--dsh-sunken,#efece6);margin-bottom:12px}
+html[data-wb-mobile] .wb_mSegment button{flex:1;position:relative;min-width:0;height:44px;min-height:44px;border:0;border-radius:9px;background:transparent;font-size:15px;font-weight:600;color:var(--wb-dim)}
+html[data-wb-mobile] .wb_mSegment button::after{content:'';position:absolute;inset:-4px 0}
+html[data-wb-mobile] .wb_mSegment button[aria-pressed=true]{background:var(--dsh-card,#fff);color:var(--wb-text);box-shadow:var(--wb-soft-shadow,0 1px 2px #0e14300f)}
+html[data-wb-mobile] .wb_mTopic{display:block;width:100%;resize:none;min-height:72px;max-height:40vh;overflow-y:auto;font-size:16px!important;border:1px solid var(--wb-line);border-radius:var(--dsh-r-m,14px);padding:12px 16px;background:var(--dsh-card,#fff);outline-color:var(--wb-accent-ink)}
+html[data-wb-mobile] .wb_mEmpty{padding:16px;border-radius:14px;background:var(--dsh-card,#fff);color:var(--wb-dim);margin-top:12px}
+html[data-wb-mobile] .wb_mEmpty p{margin:0;font-size:15px;line-height:24px}
+html[data-wb-mobile] .wb_mLink{border:0;background:transparent;color:var(--wb-accent-ink)!important;min-height:44px;padding:8px 0;font-weight:600!important}
+html[data-wb-mobile] .wb_mReferences{border-radius:14px;background:var(--dsh-card,#fff);box-shadow:var(--wb-soft-shadow,0 1px 2px #0e14300f);overflow:hidden}
+html[data-wb-mobile] .wb_mReference{display:flex;align-items:center;gap:10px;padding:8px 4px 8px 16px;min-height:64px;border-bottom:1px solid var(--wb-line)}
+html[data-wb-mobile] .wb_mReference .wb_mGrow{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+html[data-wb-mobile] .wb_mReference small{font-size:13px;color:var(--wb-dim2);white-space:nowrap}
+html[data-wb-mobile] .wb_mRefIcon{display:grid;place-items:center;flex:none;width:36px;height:36px;border-radius:10px;background:var(--dsh-blue-50,#eef2fd);color:var(--wb-accent-ink)}
+html[data-wb-mobile] .wb_mAdd{display:flex;align-items:center;gap:12px;border:0;background:transparent;min-height:56px;padding:12px 16px;width:100%;text-align:left;color:var(--wb-accent-ink)!important;font-weight:600!important}
+html[data-wb-mobile] .wb_mChips{display:flex;flex-wrap:wrap;gap:8px;padding:2px 0}
+html[data-wb-mobile] .wb_mStyles{margin-top:12px}
+/* Mobile weak-question cards keep the full touch target and selection semantics. */
+html[data-wb-mobile] .wb_mWeakWrap{display:flex;flex-direction:column;gap:8px;margin:0 0 12px}
+html[data-wb-mobile] .wb_mWeakStat{font-size:14px;line-height:22px;color:var(--wb-dim2);font-weight:600}
+html[data-wb-mobile] .wb_mWeakList{display:flex;flex-direction:column;gap:8px;max-height:42dvh;overflow:auto;overscroll-behavior:contain}
+html[data-wb-mobile] .wb_mWeakRow{flex:0 0 auto;display:grid;grid-template-columns:44px minmax(0,1fr);align-items:start;gap:8px;min-height:56px;padding:8px 10px;border:1px solid var(--wb-line);border-radius:var(--dsh-r-s,10px);background:var(--dsh-card,#fff);text-align:left;touch-action:pan-y;user-select:none;cursor:pointer}
+html[data-wb-mobile] .wb_mWeakRow.is-on{border-color:var(--wb-accent-ink);background:var(--dsh-blue-50,#eef2fd)}
+html[data-wb-mobile] .wb_mWeakRow input{width:24px;height:24px;margin:2px 0 0;accent-color:var(--wb-accent);}
+html[data-wb-mobile] .wb_mWeakDetails{min-width:0;display:flex;flex-direction:column;gap:4px}
+html[data-wb-mobile] .wb_mWeakQuestion{display:flex;align-items:baseline;gap:8px;min-width:0}
+html[data-wb-mobile] .wb_mWeakQ{font-size:16px;line-height:24px;overflow-wrap:anywhere}
+html[data-wb-mobile] .wb_mWeakRoot{flex:none;font-size:13px;line-height:20px;color:var(--wb-dim2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:8em}
+html[data-wb-mobile] .wb_mWeakGaps{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}
+html[data-wb-mobile] .wb_mWeakGap{display:inline-flex;align-items:center;gap:3px;min-height:22px;padding:1px 5px;border-radius:6px;background:var(--wb-side);font-size:12px;line-height:18px;white-space:nowrap;text-decoration:none!important}
+html[data-wb-mobile] .wb_mWeakGapLabel{color:var(--wb-dim2)}
+html[data-wb-mobile] .wb_mWeakSource{color:var(--wb-dim2);font-size:11px;line-height:18px;overflow-wrap:anywhere}
+html[data-wb-mobile] .wb_mWeakEmpty{padding:16px;border:1px dashed var(--wb-line);border-radius:var(--dsh-r-s,10px);color:var(--wb-dim2);font-size:15px}
+/* Gap chips are inline-flex controls; keep inherited link styles from drawing marks between them. */
+html[data-wb-mobile] .wb_mWeakWrap,html[data-wb-mobile] .wb_mWeakList,html[data-wb-mobile] .wb_mWeakRow,html[data-wb-mobile] .wb_mWeakDetails,html[data-wb-mobile] .wb_mWeakQuestion,html[data-wb-mobile] .wb_mWeakQ,html[data-wb-mobile] .wb_mWeakRoot,html[data-wb-mobile] .wb_mWeakGaps,html[data-wb-mobile] .wb_mWeakSource,html[data-wb-mobile] .wb_mWeakEmpty{ text-decoration:none!important }
+html[data-wb-mobile] .wb_mWeakGap{ text-decoration:none!important }
+html[data-wb-mobile] .wb_mWeakGapLabel,html[data-wb-mobile] .wb_mWeakGap .wb_gapNum{ text-decoration:none!important }
+html[data-wb-mobile] .wb_mChip{position:relative;min-height:44px;max-width:100%;padding:7px 14px;border:1px solid var(--wb-line);border-radius:999px;background:var(--dsh-card,#fff);font-size:15px!important;overflow-wrap:anywhere}
+html[data-wb-mobile] .wb_mChip::after{content:'';position:absolute;inset:-2px 0}
+html[data-wb-mobile] .wb_mChip[aria-pressed=true]{border-color:var(--wb-accent-ink);background:var(--dsh-blue-50,#eef2fd);color:var(--wb-accent-ink)}
+html[data-wb-mobile] .wb_mStyles .wb_mChip[aria-pressed=true]{border-color:var(--wb-text);background:var(--wb-text);color:var(--dsh-on-accent,#fff)}
+html[data-wb-mobile] .wb_mSkills section{margin:16px 0}
+html[data-wb-mobile] .wb_mSkills small{display:block;margin:8px 0;color:var(--wb-dim2);font-size:13px}
+html[data-wb-mobile] .wb_mExtra{display:flex;align-items:center;gap:10px;width:100%;text-align:left;background:var(--dsh-card,#fff);border:0;border-radius:14px;padding:12px 16px;margin-top:24px;min-height:56px}
+html[data-wb-mobile] .wb_mExtra span{overflow:hidden;white-space:nowrap;text-overflow:ellipsis;color:var(--wb-dim2);font-size:14px}
+html[data-wb-mobile] .wb_mAction{position:fixed;left:0;right:0;bottom:var(--wb-kb,0px);padding:12px 16px calc(12px + env(safe-area-inset-bottom));border-top:1px solid var(--wb-line);background:var(--dsh-tabbar-bg,rgba(255,255,255,.96));backdrop-filter:blur(20px);z-index:1100}
+html[data-wb-mobile] .wb_mAboveTabs{bottom:calc(var(--dsh-tabbar-h,52px) + env(safe-area-inset-bottom) + var(--wb-notice-h,0px));padding-bottom:12px}
+html[data-wb-mobile] .wb_mAction p{margin:0 0 8px;font-size:13px}
+html[data-wb-mobile] .wb_mPrimary{display:flex;align-items:center;justify-content:center;gap:8px;height:52px;min-height:52px;width:100%;border:0;border-radius:16px;background:var(--wb-accent);color:var(--dsh-on-accent,#fff)!important;font-size:17px!important;font-weight:700!important}
+html[data-wb-mobile] .wb_mPrimary:disabled{background:var(--dsh-ink-4,#b9bccb);cursor:default}
+html[data-wb-mobile] .wb_mScrim{position:fixed;inset:0;background:var(--dsh-scrim,rgba(14,20,48,.45));z-index:16000;display:flex;align-items:flex-end}
+html[data-wb-mobile] .wb_mSheet{background:var(--dsh-card,#fff);border-radius:28px 28px 0 0;padding:8px 20px calc(16px + env(safe-area-inset-bottom));width:100%;max-height:calc(var(--wb-vv-h,100dvh) - 20px);overflow:auto;overscroll-behavior:contain;outline:none}
+html[data-wb-mobile] .wb_mGrab{width:36px;height:5px;border-radius:3px;background:var(--dsh-ink-4,#b9bccb);margin:0 auto 12px}
+html[data-wb-mobile] .wb_mSheetHead{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+html[data-wb-mobile] .wb_mSheetHead h2{font-size:20px;font-weight:800;margin:0}
+html[data-wb-mobile] .wb_mMenuRow{display:flex;align-items:center;width:100%;min-height:52px;text-align:left;padding:12px 0;margin:0;border:0;border-radius:0;background:transparent}
+html[data-wb-mobile] .wb_mMenuRow+.wb_mMenuRow{border-top:1px solid var(--dsh-line-2,#f1efea)}
+html[data-wb-mobile] .wb_mCaption{display:block;color:var(--wb-dim2);font-size:13px;margin:20px 0 10px}
+html[data-wb-mobile] .wb_mClient{display:flex;width:100%;align-items:center;text-align:left;gap:12px;padding:8px 0;border:0;border-bottom:1px solid var(--dsh-line-2,#f1efea);background:var(--dsh-card,#fff);min-height:60px}
+html[data-wb-mobile] .wb_mClient b{display:block;line-height:24px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+html[data-wb-mobile] .wb_mClient small{min-height:18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+html[data-wb-mobile] .wb_mClient>.wb_mRadio{display:grid;place-items:center;flex:none;width:26px;height:26px;border-radius:50%!important;corner-shape:round;border:2px solid var(--dsh-ink-4,#b9bccb)}
+html[data-wb-mobile] .wb_mRadio[data-on='1']{background:var(--wb-accent);border-color:var(--wb-accent);color:var(--dsh-on-accent,#fff)}
+html[data-wb-mobile] .wb_mSheet>.wb_mPrimary{margin-top:24px}
+html[data-wb-mobile] .wb_mEditor{position:absolute;top:var(--wb-vv-top,0px);left:0;right:0;height:var(--wb-vv-h,100dvh);background:var(--dsh-card,#fff);padding:8px 16px calc(16px + env(safe-area-inset-bottom));display:flex;flex-direction:column;gap:12px}
+html[data-wb-mobile] .wb_mEditor textarea{flex:1;min-height:80px;resize:none;border:1px solid var(--wb-line);padding:16px;border-radius:14px;outline-color:var(--wb-accent-ink)}
+html[data-wb-mobile] .wb_mFile{font-size:14px;display:flex;flex-direction:column;gap:8px}
+html[data-wb-mobile] .wb_mFile input{max-width:100%}
+html[data-wb-mobile] .wb_mDrawer{position:fixed;left:0;top:0;bottom:0;width:min(328px,calc(100vw - 32px));padding-top:env(safe-area-inset-top);background:var(--wb-bg);border-radius:0 24px 24px 0;box-shadow:12px 0 40px var(--wb-drawer-shadow,#0e143033);display:flex;flex-direction:column;overflow:hidden;outline:none}
+html[data-wb-mobile] .wb_mDrawerHead{display:flex;align-items:center;padding:4px 8px 4px 20px;height:52px;flex:none}
+html[data-wb-mobile] .wb_mDrawerHead b{flex:1;font-size:20px}
+html[data-wb-mobile] .wb_mDrawerTools{padding:4px 16px 0}
+html[data-wb-mobile] .wb_mSearch{position:relative;display:flex;align-items:center;margin-top:16px;color:var(--dsh-ink-3,#8b90a6)}
+html[data-wb-mobile] .wb_mSearch>svg{position:absolute;left:12px;pointer-events:none}
+html[data-wb-mobile] .wb_mSearch input{box-sizing:border-box;width:100%;height:44px!important;min-height:44px;font-size:16px!important;background:var(--dsh-card,#fff);border:1px solid var(--wb-line);border-radius:var(--dsh-r-s,10px);padding:0 12px 0 44px;margin:0}
+html[data-wb-mobile] .wb_mTree{padding:16px 8px;overflow:auto;flex:1;min-height:0;overscroll-behavior:contain}
+html[data-wb-mobile] .wb_mGroup{display:flex;align-items:center;gap:8px;width:100%;min-height:48px;padding:8px;border:0;background:none;text-align:left}
+html[data-wb-mobile] .wb_mGroup b{flex:1;min-width:0;font-size:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+html[data-wb-mobile] .wb_mGroup small{flex:none;font-size:13px;color:var(--dsh-ink-3,#8b90a6)}
+html[data-wb-mobile] .wb_mGroup>svg{flex:none;width:24px;height:24px;color:var(--dsh-ink-3,#8b90a6)}
+html[data-wb-mobile] .wb_mGroup .wb_mAvatar{width:28px;height:28px;font-size:13px;border-radius:8px}
+html[data-wb-mobile] .wb_mSession{display:flex;align-items:flex-start;gap:12px;width:100%;min-height:64px;padding:10px 12px;text-align:left;border:0;border-radius:14px;background:none}
+html[data-wb-mobile] .wb_mSession[aria-current=true]{background:var(--dsh-card,#fff);box-shadow:var(--wb-soft-shadow,0 1px 2px #0e14300f)}
+html[data-wb-mobile] .wb_mSession[aria-current=true] b{color:var(--wb-accent-ink);font-weight:700}
+html[data-wb-mobile] .wb_mSession b{display:block;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-size:16px;line-height:22px;font-weight:500}
+html[data-wb-mobile] .wb_mSession small{display:block;margin-top:2px;font-size:14px;line-height:20px;color:var(--wb-dim2)}
+html[data-wb-mobile] .wb_mStatus{margin-top:4px}
+html[data-wb-mobile] .wb_mSession[data-unread=true] b{font-weight:600}
+html[data-wb-mobile] .wb_mAccount{display:flex;align-items:center;gap:12px;padding:16px 20px calc(16px + env(safe-area-inset-bottom));border-top:1px solid var(--wb-line);flex:none}
+html[data-wb-mobile] .wb_mAccount small{display:block;color:var(--wb-dim2);font-size:13px;overflow-wrap:anywhere}
+html[data-wb-mobile] .wb_mAccount .wb_mAvatar{border-radius:50%;corner-shape:round;background:var(--dsh-blue-50,#eef2fd);color:var(--wb-accent-ink)}
+html[data-wb-mobile] .wb_mChat .wb_mTop{background:var(--dsh-card,#fff);border-bottom:1px solid var(--wb-line)}
+html[data-wb-mobile] .wb_mChat .wb_mHeading b{font-size:17px;line-height:22px}
+html[data-wb-mobile] .wb_mPinned{position:relative;display:flex;align-items:center;gap:8px;height:56px;padding:4px 16px;background:var(--dsh-card,#fff);border-bottom:1px solid var(--wb-line)}
+html[data-wb-mobile] .wb_mPinned:empty{display:none}
+html[data-wb-mobile] .wb_mProgress{flex:1;min-width:0;margin:0;padding:0;font-size:16px;line-height:24px}
+html[data-wb-mobile] .wb_mProgress summary{display:flex;align-items:center;gap:4px;list-style:none;font-weight:700;cursor:pointer;min-height:48px;white-space:nowrap}
+html[data-wb-mobile] .wb_mProgress summary::-webkit-details-marker{display:none}
+html[data-wb-mobile] .wb_mProgress summary::marker{content:''}
+html[data-wb-mobile] .wb_mProgress summary small{font-size:13px;color:var(--dsh-ink-3,#8b90a6)}
+html[data-wb-mobile] .wb_mProgress summary svg{flex:none;width:24px;height:24px}
+html[data-wb-mobile] .wb_mProgress[open] summary svg{transform:rotate(180deg)}
+html[data-wb-mobile] .wb_mChecklist{position:absolute;top:100%;left:16px;right:16px;z-index:1200;max-height:calc(var(--wb-vv-h,100dvh) * .4);overflow:auto;overscroll-behavior:contain;padding:16px;border-radius:var(--dsh-r-m,14px);background:var(--dsh-card,#fff);box-shadow:var(--dsh-shadow-2,0 8px 24px #0e14301a)}
+html[data-wb-mobile] .wb_mProgress .wb_trow{padding:3px 0;font-size:16px;gap:10px}
+html[data-wb-mobile] .wb_mProgress .wb_ticon{width:22px;height:22px;flex:none;border-radius:50%;corner-shape:round;font-size:18px;display:grid;place-items:center}
+html[data-wb-mobile] .wb_mProgress .wb_ticon[data-s=done]{background:var(--dsh-green,#14a05a);color:var(--dsh-on-accent,#fff)}
+html[data-wb-mobile] .wb_mPinned .wb_mPending{display:flex;align-items:center;justify-content:center;gap:4px;min-width:0;max-width:60%;min-height:48px;margin:0 0 0 auto;padding:0 8px;border:0;border-radius:var(--dsh-r-s,10px);background:var(--dsh-orange-50,#fff1e6);color:var(--dsh-orange-700,#d9480f)}
+html[data-wb-mobile] .wb_mPending small{font-size:13px;line-height:18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+html[data-wb-mobile] .wb_mPending b{font-size:16px;white-space:nowrap}
+html[data-wb-mobile] .wb_mPending svg{flex:none;width:24px;height:24px}
+html[data-wb-mobile]:is([data-wb-keyboard],[data-dsh-keyboard='open']) .wb_mPinned{display:none}
+html[data-wb-mobile] .wb_mReview{position:fixed;inset:0;z-index:15000;background:var(--wb-bg);display:flex;flex-direction:column}
+html[data-wb-mobile] .wb_mReviewList{overflow:auto;min-height:0;flex:1;padding:16px 16px 108px}
+html[data-wb-mobile] .wb_mArticle{background:var(--dsh-card,#fff);overflow:auto;min-height:0;flex:1;padding:20px 20px 110px;font-size:17px;line-height:30px;overflow-wrap:anywhere}
+html[data-wb-mobile] .wb_mArticle h1{font-size:24px;line-height:34px;margin:0 0 20px}
+html[data-wb-mobile] .wb_mReviewItem{display:block;width:100%;padding:16px;margin-bottom:12px;min-height:72px;border:0;border-radius:14px;background:var(--dsh-card,#fff);text-align:left}
+html[data-wb-mobile] .wb_mReviewItem b{display:block;line-height:24px}
+html[data-wb-mobile] .wb_mReviewItem small{color:var(--wb-dim2);font-size:14px}
+html[data-wb-mobile] .wb_mPreset{white-space:pre-wrap;overflow-wrap:anywhere}
+/* Upstream compatibility boundary. All hashed-class suffix selectors live here;
+   public data-slot contracts are preferred. Never match a concrete build hash.
+   Keep grid children in their columns: display:none on a column shifts auto-placement. */
+html[data-wb-mobile] [class*='_frame'],html[data-wb-mobile] [class*='frame']{grid-template-columns:0 minmax(0,1fr) 0!important;width:100vw;max-width:100vw;min-width:0}
+html[data-wb-mobile] [class*='_sidebarCol'],html[data-wb-mobile] [class*='_rightbarCol'],html[data-wb-mobile] [class*='sidebarCol'],html[data-wb-mobile] [class*='rightbarCol']{width:0!important;min-width:0!important;max-width:0!important;flex:0 0 0!important;overflow:hidden!important;visibility:hidden}
+html[data-wb-mobile] [class*='_centerCol'],html[data-wb-mobile] [class*='centerCol']{width:100%!important;min-width:0;max-width:100vw}
+html[data-wb-mobile] .wb_mAssembly{width:100%;min-width:0;max-width:100vw}
+html[data-wb-mobile] [data-slot='main.conversation']{--dsh-content-font-size:16px;--dsh-chat-content-width:100%;--dsh-composer-side-clearance:0px;background:var(--dsh-card,#fff);min-width:0}
+html[data-wb-mobile][data-wb-scene='chat'] [data-slot='main.conversation']{position:fixed;top:var(--wb-vv-top,0px);left:0;right:0;height:var(--wb-vv-h,100dvh)}
+html[data-wb-mobile] [data-slot='conversation.session.header']{flex:none;min-width:0;border-bottom:0}
+html[data-wb-mobile] [class*='_composerSeat']{position:fixed!important;left:0;right:0;bottom:calc(var(--wb-kb,0px) + var(--wb-notice-h,0px))!important;box-sizing:border-box;width:100%;z-index:1100!important;background:var(--dsh-card,#fff)!important;padding:10px 12px calc(10px + env(safe-area-inset-bottom));border-top:1px solid var(--wb-line)}
+html[data-wb-mobile] [class*='_composerStack']{width:100%;max-width:none}
+html[data-wb-mobile] [data-slot='conversation.composer.bar']{padding:0;--dsw-specific-input-major:var(--wb-bg)}
+html[data-wb-mobile] [data-slot='conversation.composer.bar'] [contenteditable]{font-size:16px!important;line-height:24px;min-height:24px;max-height:120px;padding:0}
+html[data-wb-mobile] [data-slot='conversation.composer.bar'] button{min-height:44px;min-width:44px}
+html[data-wb-mobile] [data-slot='conversation.input.model'],html[data-wb-mobile] [data-composer-stats],html[data-wb-mobile] .wb_pick{display:none!important}
+html[data-wb-mobile] [data-conversation-scroll]{flex:none!important;height:var(--wb-chat-scroll-h,100%);padding-bottom:0!important;min-width:0}
+html[data-wb-mobile] [data-slot='conversation.view']{min-width:0;overflow-wrap:anywhere}
+html[data-wb-mobile] [data-slot='conversation.chat.node']{font-size:16px;line-height:26px;min-width:0;max-width:100%}
+html[data-wb-mobile] [class*='_userRow']{justify-content:flex-end}
+html[data-wb-mobile] [class*='_userStack']{max-width:88%;border-radius:20px 20px 6px 20px;background:var(--wb-accent);color:var(--dsh-on-accent,#fff);padding:10px 14px}
+html[data-wb-mobile] [class*='_userStack'] *{color:inherit;background:transparent}
+html[data-wb-mobile] [data-slot='conversation.chat.node'] pre{overflow:auto;max-width:100%}
+html[data-wb-mobile] .wb_grip{display:none}
+html[data-wb-mobile]:has(.impersonation-banner){--wb-notice-h:36px}
+.wb_batch{position:fixed;z-index:100;bottom:100px;right:24px;max-width:min(420px,90vw);padding:12px;display:flex;flex-wrap:wrap;gap:10px;background:var(--wb-bg);color:var(--dsh-ink-1,#25252b);border:1px solid var(--wb-line);border-radius:10px;box-shadow:0 4px 18px #0002}
+.wb_batch ul{flex-basis:100%;margin:0;padding-left:20px;max-height:180px;overflow:auto}
+html[data-wb-mobile] .wb_mRename{width:100%;min-height:48px;border:1px solid var(--wb-line);border-radius:12px;padding:10px}
+html[data-wb-mobile] .wb_mQuick{display:flex;gap:8px;margin:0 0 10px;font:14px/20px var(--wb-font)}
+html[data-wb-mobile][data-wb-keyboard] .wb_mQuick{display:none}
+html[data-wb-mobile][data-wb-keyboard] [class*='_composerSeat']{bottom:var(--wb-kb,0px)!important}
+html[data-wb-mobile] [data-slot='conversation.input.dock'] div:has(>button[class*='_header']){display:none}
+html[data-wb-mobile] [data-slot='conversation.composer.dock']{display:none!important}
+html[data-wb-mobile] [data-slot='conversation.composer.bar']>[class*='_root']{padding:0}
+html[data-wb-mobile] [data-slot='conversation.composer.bar'] [class*='_card']{display:grid;grid-template-columns:44px minmax(0,1fr) 44px;gap:8px;padding:0;background:var(--dsh-card,#fff);box-shadow:none;max-width:none;align-items:end}
+html[data-wb-mobile] [data-slot='conversation.composer.bar'] [class*='_scroll']{box-sizing:border-box;grid-column:2;grid-row:1;padding:10px 14px;background:var(--wb-bg);border-radius:22px;max-height:144px;min-height:44px}
+html[data-wb-mobile] [data-slot='conversation.composer.bar'] [class*='_row']{display:contents}
+html[data-wb-mobile] [data-slot='conversation.composer.bar'] [class*='_tools']{grid-column:1;grid-row:1;padding:0}
+html[data-wb-mobile] [data-slot='conversation.composer.bar'] [class*='_trailing']{grid-column:3;grid-row:1;padding:0}
+html[data-wb-mobile] [data-slot='conversation.composer.bar'] [class*='_trailing']>span,html[data-wb-mobile] [data-slot='conversation.composer.bar'] [class*='_modes'],html[data-wb-mobile] [data-slot='conversation.composer.bar'] button[aria-label='指令']{display:none}
+html[data-wb-mobile] [data-slot='conversation.composer.bar'] [class*='_primary']{width:44px;height:44px;border-radius:50%;background:var(--wb-accent);color:var(--dsh-on-accent,#fff)}
+html[data-wb-mobile] [data-slot='conversation.composer.bar'] [class*='_primary']:disabled{background:var(--dsh-ink-4,#b9bccb)}
+html[data-wb-mobile] [data-slot='conversation.composer.bar'] [class*='_placeholder']{inset:0;font-size:0;line-height:24px;white-space:nowrap;text-overflow:ellipsis;overflow:hidden}
+html[data-wb-mobile] [data-slot='conversation.composer.bar'] [class*='_placeholder']::after{content:'继续追问，或让它改写…';font-size:16px}
+html[data-wb-mobile] [class*='_userStack'] [class*='_bubble']{padding:0}
+
+html[data-wb-mobile] .wb_mPinned .wb_mPending[data-ready='1']{background:var(--dsh-green-50,#e6f6ee);color:var(--dsh-green,#14a05a)}
+html[data-wb-mobile] [data-slot='conversation.composer.bar'] button[aria-label='添加附件']{display:grid!important;place-items:center;border-radius:50%;background:var(--wb-bg)}
+html[data-wb-mobile] [data-slot='conversation.composer.bar'] button[aria-label='添加附件'] svg{display:none}
+html[data-wb-mobile] [data-slot='conversation.composer.bar'] button[aria-label='添加附件']::after{content:'＋';font-size:24px}
+html[data-wb-mobile] [data-slot='conversation.chat.node'] div[class*='_markdown']{font-size:16px;line-height:26px}
+html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
+`;
 		/* The official client-package CSS pattern: one tag, keyed by
 		 * data-plugin-css, injected from apply() — HMR removes
 		 * <style data-plugin=...> tags on a reload, so a top-level injection
@@ -673,6 +1636,21 @@ window.__ModuleLoader__.load({
 		var WORKBENCH_KEY = "workbench";
 
 		/* ---- 工作台后端 API（路径收口，别再散写魔法串）---------------- */
+		/* articles / sora-articles 以及自定义 MCP 服务别名共用同一写入识别。 */
+		var WB_WRITE_TOOL_RE = /^mcp__.+__write_article$/;
+		function wbIsSuccessfulWrite(node) {
+			return !!(node && node.kind === "tool-result" && node.call
+				&& WB_WRITE_TOOL_RE.test(String(node.call.name || "")) && node.isError !== true);
+		}
+		/* writeCount 是当前 user turn 内的成功写入数；首次快照只建基线。
+		 * openedTurn 由调用方保存，关闭面板不清除；停止后的历史回放不触发。 */
+		function wbReviewAutoOpenDecision(prev, next) {
+			var sameTurn = prev && prev.turnKey === next.turnKey;
+			var increase = !!(prev && prev.sessionId === next.sessionId && next.turnKey > 0
+				&& next.turnKey >= prev.turnKey && next.writeCount > (sameTurn ? prev.writeCount : 0)
+				&& (next.running || (sameTurn && prev.running)));
+			return { open: !next.batchActive && increase && prev.openedTurn !== next.turnKey, refresh: increase };
+		}
 		var WB_API = {
 			clients: "/api/workbench/clients",
 			skills: "/api/workbench/skills",
@@ -680,20 +1658,31 @@ window.__ModuleLoader__.load({
 			clientMap: "/api/workbench/client-map",
 			assignGroup: "/api/workbench/assign-client-group",
 			taskMeta: "/api/workbench/task-meta",
+			batch: "/api/workbench/batch",
+			serverBatch: "/api/v1/workbench/batch",
+			batchConfig: "/api/v1/workbench/batch-config",
+			sessionStatus: "/api/workbench/session-status",
 			taskStatus: "/api/workbench/task-status",
+			sessionClient: "/api/workbench/session-client",
 			drafts: "/api/workbench/drafts",
 			draft: "/api/workbench/draft",
 			confirmDraft: "/api/workbench/confirm-draft",
 			check: "/api/workbench/check",
-			/* 薄弱问句（2026-10-10）：宿主带密钥调外部接口，这里只拿结果。 */
-			weakDir: "/api/workbench/weak-dir",
-			weakGaps: "/api/workbench/weak-gaps",
+			/* 薄弱问句（Support · capture-words v4）：同源、按 ACL 过滤。 */
+			captureWordsClients: "/api/v1/capture-words/clients",
+			captureWords: "/api/v1/capture-words",
+			captureWordsTicks: "/api/v1/capture-words/ticks",
+			/* 语义别名，方便表格逻辑和宿主调试时按旧分区名查路由。 */
+			weakDir: "/api/v1/capture-words/clients",
+			weakGaps: "/api/v1/capture-words",
+			weakTicks: "/api/v1/capture-words/ticks",
 			/* 会话创建（2026-10-12）：绕开 Session Intent 向导页。 */
 			sessionCreate: "/api/workbench/session-create",
 		};
 
 		/* ---- sessionStorage 键收口（登记链路 / 布局记忆共用）----------- */
 		var WB_KEY = {
+			weakSelection: "wb-weak-selection-", // 本标签页的装配草稿，按 uid / 客户 / 业务线 / 期数隔离
 			pendingMeta: "wb-pending-meta",       // 装配台 → PromptRelay：任务编号
 			pendingClient: "wb-pending-client",   // 装配台 → PromptRelay：客户
 			pendingTopic: "wb-pending-topic",     // 装配台 → PromptRelay：主题
@@ -701,7 +1690,6 @@ window.__ModuleLoader__.load({
 			metaFor: "wb-meta-for-",              // 前缀 + sessionId
 			navW: "wb-nav-w",                     // 自绘侧栏宽度
 			rightbarW: "wb-rightbar-w",           // 右栏宽度
-			weakPicked: "wb-weak-picked",         // 薄弱问句已选清单（换客户/换筛选/刷新都不丢）
 			modelLast: "wb-model-last",           // 上次用的模型（装配台下拉的默认值）
 			modelPending: "wb-model-pending",     // 装配台 → PromptRelay：本次任务选的模型
 			effortLast: "wb-effort-last",         // 上次的思考强度（装配台下拉的默认值）
@@ -754,50 +1742,114 @@ window.__ModuleLoader__.load({
 		 * 客户下拉就空了 —— 整个装配台等于不能用。所以这里失败自动重试，
 		 * 最后一次失败才报错（报错文案里给「重试」按钮）。 */
 		var CLIENTS_PATH = WB_API.clients;
+		var wbWorkspaceInfo = null;
+		var wbWorkspaceFetch = null;
+		var WB_WORKSPACE_ERROR = "个人工作区暂不可用，请稍后重试";
+		var WB_SESSION_GUARD = Symbol.for("dsh-workbench.personal-session-guard");
 		var CLIENTS_RETRY_DELAYS = [1200, 3000];
+
+		function wbCacheWorkspace(body) {
+			if (body && body.ok === true && body.uid !== undefined) wbNavState.uid = body.uid || "";
+			var info = body && body.workspace;
+			var personal = info && info.personal;
+			wbWorkspaceInfo = personal && typeof personal.id === "string" && personal.id !== ""
+				&& typeof personal.path === "string" && personal.path !== "" && Array.isArray(info.legacySharedIds)
+				&& info.legacySharedIds.indexOf(personal.id) === -1 ? info : null;
+			return body;
+		}
+
+		function wbFetchClients() {
+			return fetch(CLIENTS_PATH, { headers: { accept: "application/json" } })
+				.then(readWorkbenchList).then(wbCacheWorkspace);
+		}
+
+		async function wbRequireWorkspace() {
+			if (wbWorkspaceInfo) return wbWorkspaceInfo;
+			if (!wbWorkspaceFetch) {
+				wbWorkspaceFetch = (async function () {
+					// A missing field can mean the previous impl was still loaded. Retry once.
+					for (var attempt = 0; attempt < 2; attempt++) {
+						try { await wbFetchClients(); } catch (error) { /* retry / fail closed */ }
+						if (wbWorkspaceInfo) return wbWorkspaceInfo;
+					}
+					throw new Error(WB_WORKSPACE_ERROR);
+				})();
+			}
+			try { return await wbWorkspaceFetch; }
+			finally { wbWorkspaceFetch = null; }
+		}
+
+		function wbInstallSessionGuard(ctx) {
+			var workspace, original, descriptor, wrapped;
+			var guard = {}, attempted = false;
+			var active = true;
+			try {
+				workspace = ctx.get("uiWorkspace");
+				original = workspace && workspace.startSession;
+				if (typeof original !== "function") throw new Error("uiWorkspace.startSession 不可用");
+				if (original[WB_SESSION_GUARD]) return function () {};
+				descriptor = Object.getOwnPropertyDescriptor(workspace, "startSession");
+				wrapped = function () {
+					var receiver = this, args = Array.prototype.slice.call(arguments);
+					function start(info) {
+						if (!active) return;
+						if (args[0] == null || info.legacySharedIds.indexOf(args[0]) !== -1) args[0] = info.personal.id;
+						return original.apply(receiver, args);
+					}
+					if (wbWorkspaceInfo) return start(wbWorkspaceInfo);
+					return wbRequireWorkspace().then(start).catch(function () {
+						if (active) window.alert(WB_WORKSPACE_ERROR);
+					});
+				};
+				wrapped[WB_SESSION_GUARD] = guard;
+				attempted = true;
+				workspace.startSession = wrapped;
+				if (workspace.startSession[WB_SESSION_GUARD] !== guard) throw new Error("startSession 不可写或被代理");
+			} catch (error) {
+				if (attempted) {
+					try {
+						if (descriptor) Object.defineProperty(workspace, "startSession", descriptor);
+						else delete workspace.startSession;
+					} catch (restoreError) { /* frozen/proxied service: best effort */ }
+				}
+				console.warn("[dsh-workbench] 无法安装新会话工作区保护：", error);
+				return function () { active = false; };
+			}
+			return function () {
+				active = false;
+				try {
+					if (workspace.startSession[WB_SESSION_GUARD] !== guard) return;
+					if (descriptor) Object.defineProperty(workspace, "startSession", descriptor);
+					else delete workspace.startSession;
+				} catch (error) { console.warn("[dsh-workbench] 无法恢复新会话入口：", error); }
+			};
+		}
 
 		function useClients() {
 			var state = React.useState({ status: "loading", customers: [], error: "", detail: "", uid: "" });
 			var setValue = state[1];
-			/* 手动重试：改这个数就重新跑一次 effect。 */
-			var retryS = React.useState(0);
-			var retry = retryS[0], setRetry = retryS[1];
 			React.useEffect(function () {
 				var alive = true;
-				setValue({ status: "loading", customers: [], error: "", detail: "", uid: "" });
-				function attempt(index) {
-					if (!alive) return;
-					fetch(CLIENTS_PATH, { headers: { accept: "application/json" } })
-						.then(readJson)
-						.then(function (body) {
-							if (!alive) return;
-							if (body && body.ok === true) {
-								setValue({ status: "ready", customers: body.customers || [], error: "", detail: "", uid: body.uid || "" });
-								return;
-							}
-							var error = (body && body.error) || "unknown";
-							var detail = (body && body.detail) || "";
-							/* 只有"宿主说它连不上知识库"才值得重试；形状不认识之类重试也没用。 */
-							if ((error === "mcp-error" || error === "unreachable") && index < CLIENTS_RETRY_DELAYS.length) {
-								setTimeout(function () { attempt(index + 1); }, CLIENTS_RETRY_DELAYS[index]);
-								return;
-							}
-							setValue({ status: "error", customers: [], error: error, detail: detail, uid: "" });
-						})
-						.catch(function (e) {
-							if (!alive) return;
-							var detail = String(e && e.message ? e.message : e);
-							if (index < CLIENTS_RETRY_DELAYS.length) {
-								setTimeout(function () { attempt(index + 1); }, CLIENTS_RETRY_DELAYS[index]);
-								return;
-							}
-							setValue({ status: "error", customers: [], error: "unreachable", detail: detail, uid: "" });
-						});
-				}
-				attempt(0);
+				wbFetchClients()
+					.then(function (body) {
+						if (!alive) return;
+						if (body && body.ok === true) {
+							setValue({ status: "ready", customers: body.customers || [], error: "", detail: "", uid: body.uid || "" });
+						} else {
+							setValue({
+								status: "error", customers: [],
+								error: (body && body.error) || "unknown",
+								detail: (body && body.detail) || "",
+								uid: (body && body.uid) || "",
+							});
+						}
+					})
+					.catch(function (error) {
+						if (!alive) return;
+						setValue({ status: "error", customers: [], error: "unreachable", detail: String(error && error.message ? error.message : error), uid: "" });
+					});
 				return function () { alive = false; };
-			}, [retry]);
-			state[0].retry = function () { setRetry(retry + 1); };
+			}, []);
 			return state[0];
 		}
 
@@ -811,6 +1863,29 @@ window.__ModuleLoader__.load({
 			return response.json().catch(function () {
 				return { ok: false, error: "route-missing", detail: "HTTP " + response.status + " · 不是 JSON" };
 			});
+		}
+
+		function readWorkbenchList(response) {
+			if (response.status === 403 || response.status === 404) return { ok: true, index: {}, map: {}, customers: [] };
+			return readJson(response);
+		}
+
+		/* Supplement server ACLs with the authoritative customer list, never stored display names. */
+		function wbAuthorizedRecords(records, customers) {
+			var keys = new Set(), names = new Set();
+			(customers || []).forEach(function (c) {
+				keys.add(customerId(c));
+				names.add(customerName(c).replace(/[/\\]/g, ""));
+			});
+			var visible = Object.create(null);
+			Object.keys(records || {}).forEach(function (id) {
+				var rec = records[id];
+				if (!rec || typeof rec !== "object") return;
+				var key = String(rec.client_key || "");
+				if (key !== "" ? !keys.has(key) : rec.client && !names.has(String(rec.client).replace(/[/\\]/g, ""))) return;
+				visible[id] = rec;
+			});
+			return visible;
 		}
 
 		/* 技能目录：dsh-skill-remote 注册的 provider，宿主用 ctx.skills.list() 读。 */
@@ -857,20 +1932,127 @@ window.__ModuleLoader__.load({
 			return state[0];
 		}
 
-		/* ---- 薄弱问句：可查客户目录（知识库客户 → 万湖 ID + 采集日）------
-		 * 打开装配台查一次，本次会话内复用；目录本身在宿主侧缓存 180 秒。
-		 * 对不上的客户（没配映射、或不在 45 天窗口内）照样返回，前端自己置灰。 */
+		/* ---- 薄弱问句：capture-words v4 目录与问句 ---------------------- */
+		function captureError(response, fallback) {
+			var status = Number(response && response.status) || 0;
+			return response.json().catch(function () { return {}; }).then(function (body) {
+				body = body && typeof body === "object" ? body : {};
+				var error = body.error || fallback || "unknown";
+				if (status === 401 || status === 403) error = "not-allowed";
+				else if (status === 404) error = "no-data";
+				return {
+					ok: false,
+					error: error,
+					detail: body.detail || (status ? "HTTP " + status : ""),
+				};
+			});
+		}
+
+		function readCaptureJson(response) {
+			if (!response.ok) return captureError(response, "route-missing");
+			return response.json().catch(function () {
+				return { ok: false, error: "route-missing", detail: "HTTP " + response.status + " · 不是 JSON" };
+			});
+		}
+
+		function mapCaptureWordDir(body) {
+			var customers = [];
+			var unmapped = [];
+			var list = body && Array.isArray(body.customers) ? body.customers : [];
+			for (var index = 0; index < list.length; index++) {
+				var item = list[index] && typeof list[index] === "object" ? list[index] : {};
+				var clientKey = String(item.clientKey || "");
+				var name = String(item.name || clientKey);
+				var mapped = item.mapped === true;
+				var rawLines = Array.isArray(item.lines) ? item.lines : [];
+				var lines = rawLines.map(function (line) {
+					line = line && typeof line === "object" ? line : {};
+					return {
+						name: String(line.name || line.enterprise_id || ""),
+						id: String(line.enterprise_id || ""),
+						enterprise_id: String(line.enterprise_id || ""),
+						is_default: line.is_default === true,
+						collectedAt: "",
+						inWindow: mapped,
+					};
+				});
+				if (!mapped) { unmapped.push(name); continue; }
+				customers.push({
+					id: clientKey || name,
+					clientKey: clientKey,
+					name: name,
+					collectedAt: "",
+					inWindow: mapped,
+					lines: lines,
+				});
+			}
+			return { customers: customers, unmapped: unmapped };
+		}
+
+		function mapCaptureQuestions(body) {
+			return (body && Array.isArray(body.questions) ? body.questions : []).map(function (question) {
+				return Object.assign({}, question, { qid: question && question.qid });
+			});
+		}
+
+		function weakPickedFromTicks(ticks, questions) {
+			var byQid = {};
+			var current = Array.isArray(questions) ? questions : [];
+			for (var questionIndex = 0; questionIndex < current.length; questionIndex++) {
+				var question = current[questionIndex];
+				if (question && question.qid !== undefined && question.qid !== null) byQid[String(question.qid)] = question.question;
+			}
+			var out = [];
+			var saved = Array.isArray(ticks) ? ticks : [];
+			for (var tickIndex = 0; tickIndex < saved.length; tickIndex++) {
+				var tick = saved[tickIndex] || {};
+				var text = byQid[String(tick.qid)] || String(tick.question || "");
+				if (text !== "" && out.indexOf(text) < 0) out.push(text);
+			}
+			return out;
+		}
+
+		function readWeakSelection(key) {
+			try {
+				var names = JSON.parse(sessionStorage.getItem(key));
+				if (Array.isArray(names) && names.every(function (name) { return typeof name === "string"; })) return names;
+			} catch (error) { /* storage unavailable */ }
+			return null;
+		}
+		function saveWeakSelection(key, names) {
+			try { sessionStorage.setItem(key, JSON.stringify(names)); } catch (error) { /* in-memory selection still works */ }
+		}
+		function useWeakSelection(key, suggestion) {
+			var state = React.useState(function () { return { key: key, names: readWeakSelection(key) }; });
+			var value = state[0].key === key ? state[0] : { key: key, names: readWeakSelection(key) };
+			React.useEffect(function () {
+				// Shared ticks are only an initial suggestion, including an empty suggestion.
+				if (value.names === null && suggestion !== null) state[1]({ key: key, names: suggestion });
+				else if (state[0] !== value) state[1](value);
+			}, [key, value.names, suggestion]);
+			React.useEffect(function () {
+				if (state[0].key === key && state[0].names !== null) saveWeakSelection(key, state[0].names);
+			}, [key, state[0]]);
+			return [value.names || [], function (update) {
+				state[1](function (previous) {
+					var names = (previous.key === key ? previous.names : readWeakSelection(key)) || [];
+					return { key: key, names: typeof update === "function" ? update(names) : update };
+				});
+			}];
+		}
+
 		function useWeakDir() {
 			var state = React.useState({ status: "loading", customers: [], unmapped: [], error: "", detail: "" });
 			var setValue = state[1];
 			React.useEffect(function () {
 				var alive = true;
-				fetch(WB_API.weakDir, { headers: { accept: "application/json" } })
-					.then(readJson)
+				fetch(WB_API.weakDir, { credentials: "same-origin", headers: { accept: "application/json" } })
+					.then(readCaptureJson)
 					.then(function (body) {
 						if (!alive) return;
 						if (body && body.ok === true) {
-							setValue({ status: "ready", customers: body.customers || [], unmapped: body.unmapped || [], error: "", detail: "" });
+							var mapped = mapCaptureWordDir(body);
+							setValue({ status: "ready", customers: mapped.customers, unmapped: mapped.unmapped, error: "", detail: "" });
 						} else {
 							setValue({ status: "error", customers: [], unmapped: [], error: (body && body.error) || "unknown", detail: (body && body.detail) || "" });
 						}
@@ -883,50 +2065,84 @@ window.__ModuleLoader__.load({
 			return state[0];
 		}
 
-		/* ---- 薄弱问句：某个客户本期全部问句 ----------------------------
-		 * 只在「薄弱问句」模式下、且这个客户真的可查时才请求。
-		 * `error === "no-data"` 是正常业务态（这个客户最近没采集），不是故障。 */
-		function useWeakGaps(clientId, enabled) {
-			var state = React.useState({ status: "idle", collectedAt: "", taskId: "", excluded: null, questions: [], error: "", detail: "" });
+		/* ---- 薄弱问句：某个客户/业务线全部问句 -------------------------- */
+		function useWeakGaps(clientKey, enterprise, enabled) {
+			var state = React.useState({ status: "idle", collectedAt: "", computedAt: "", taskId: "", excluded: null, questions: [], error: "", detail: "" });
 			var setValue = state[1];
 			var tickS = React.useState(0);
 			var tick = tickS[0], setTick = tickS[1];
-			/* 「刷新」按下后这一次请求带 fresh=1，绕过宿主 5 分钟缓存，直接从数据服务取。 */
-			var freshRef = React.useRef(false);
 			React.useEffect(function () {
-				var blank = { status: "idle", collectedAt: "", taskId: "", excluded: null, questions: [], error: "", detail: "" };
-				if (!enabled || clientId === "") { setValue(blank); return undefined; }
+				var blank = { status: "idle", collectedAt: "", computedAt: "", taskId: "", excluded: null, questions: [], error: "", detail: "" };
+				if (!enabled || clientKey === "") { setValue(blank); return undefined; }
 				var alive = true;
-				var query = WB_API.weakGaps + "?client_id=" + encodeURIComponent(clientId) + (freshRef.current ? "&fresh=1" : "");
-				freshRef.current = false;
-				setValue({ status: "loading", collectedAt: "", taskId: "", excluded: null, questions: [], error: "", detail: "" });
-				fetch(query, { headers: { accept: "application/json" } })
-					.then(readJson)
+				var query = WB_API.weakGaps + "?client=" + encodeURIComponent(clientKey) + "&enterprise=" + encodeURIComponent(enterprise || "");
+				setValue({ status: "loading", collectedAt: "", computedAt: "", taskId: "", excluded: null, questions: [], error: "", detail: "" });
+				fetch(query, { credentials: "same-origin", headers: { accept: "application/json" } })
+					.then(readCaptureJson)
 					.then(function (body) {
 						if (!alive) return;
 						if (body && body.ok === true) {
 							setValue({
-								status: "ready",
+								status: "ready", clientKey: clientKey, enterprise: enterprise,
 								collectedAt: body.collectedAt || "",
+								capturePeriod: body.clientId || enterprise || "",
+								computedAt: body.computedAt || "",
 								taskId: body.taskId || "",
-								excluded: (typeof body.excluded === "number" ? body.excluded : null),
-								questions: body.questions || [],
+								excluded: body.excluded === null ? null : (typeof body.excluded === "number" ? body.excluded : null),
+								questions: mapCaptureQuestions(body),
 								error: "", detail: "",
 							});
 						} else {
 							setValue({
-								status: "error", collectedAt: "", taskId: "", excluded: null, questions: [],
+								status: "error", collectedAt: "", computedAt: "", taskId: "", excluded: null, questions: [],
 								error: (body && body.error) || "unknown", detail: (body && body.detail) || "",
 							});
 						}
 					})
 					.catch(function (e) {
-						if (alive) setValue({ status: "error", collectedAt: "", taskId: "", excluded: null, questions: [], error: "unreachable", detail: String(e && e.message ? e.message : e) });
+						if (alive) setValue({ status: "error", collectedAt: "", computedAt: "", taskId: "", excluded: null, questions: [], error: "unreachable", detail: String(e && e.message ? e.message : e) });
 					});
 				return function () { alive = false; };
-			}, [clientId, enabled, tick]);
-			state[0].refresh = function () { freshRef.current = true; setTick(tick + 1); };
+			}, [clientKey, enterprise, enabled, tick]);
+			state[0].refresh = function () { setTick(tick + 1); };
 			return state[0];
+		}
+
+		function weakTicksFetch(clientKey, enterprise) {
+			var query = WB_API.weakTicks + "?client=" + encodeURIComponent(clientKey) + "&enterprise=" + encodeURIComponent(enterprise || "");
+			return fetch(query, { credentials: "same-origin", headers: { accept: "application/json" } }).then(readCaptureJson);
+		}
+		function useWeakTicks(clientKey, enterprise, enabled) {
+			var initial = { status: "idle", ticks: [], error: "", detail: "" };
+			var state = React.useState(initial);
+			var value = state[0], setValue = state[1];
+			React.useEffect(function () {
+				var alive = true;
+				var blank = { status: "idle", ticks: [], error: "", detail: "" };
+				if (!enabled || clientKey === "") { setValue(blank); return undefined; }
+				function load() {
+					weakTicksFetch(clientKey, enterprise).then(function (body) {
+						if (!alive) return;
+						if (body && body.ok !== false) setValue({ status: "ready", clientKey: clientKey, enterprise: enterprise, ticks: Array.isArray(body.ticks) ? body.ticks : [], error: "", detail: "" });
+						else setValue({ status: "error", ticks: [], error: (body && body.error) || "unknown", detail: (body && body.detail) || "" });
+					}).catch(function (e) {
+						if (alive) setValue({ status: "error", ticks: [], error: "unreachable", detail: String(e && e.message ? e.message : e) });
+					});
+				}
+				load();
+				var timer = setInterval(function () {
+					if (typeof document === "undefined" || document.visibilityState === "visible" || document.visibilityState === undefined) load();
+				}, 30000);
+				var onVisibility = function () { if (typeof document === "undefined" || document.visibilityState === "visible") load(); };
+				if (typeof document !== "undefined") document.addEventListener("visibilitychange", onVisibility);
+				return function () {
+					alive = false;
+					clearInterval(timer);
+					if (typeof document !== "undefined") document.removeEventListener("visibilitychange", onVisibility);
+				};
+			}, [clientKey, enterprise, enabled]);
+
+			return value;
 		}
 
 		/** 薄弱问句那两条路由的人话报错。 */
@@ -952,7 +2168,7 @@ window.__ModuleLoader__.load({
 			if (gap === null || gap === undefined) return "−";
 			if (gap === 0) return "−";
 			var shown = String(Math.round(Math.abs(gap) * 100) / 100);
-			return (gap > 0 ? "-" : "+") + shown + "%";
+			return (gap > 0 ? "-" : "+") + shown + (window.dshUnified ? "" : "%");
 		}
 		/* 差额 > 0 = 我们落后 → 红；< 0 = 我们领先 → 绿；0 / 没采集 → 浅灰 −。 */
 		function gapSign(gap) {
@@ -967,13 +2183,27 @@ window.__ModuleLoader__.load({
 			if (gap === 0) return platformName + "：持平";
 			return platformName + "：" + (gap > 0 ? "我们落后 " : "我们领先 ") + String(Math.round(Math.abs(gap) * 100) / 100) + " 个百分点";
 		}
-		/** 采集时间（ISO，UTC）→ 北京时间的 YYYY-MM-DD。 */
+		/** 带时区的 ISO 时间转北京时间；无时区的本地时间保持原值。 */
+		function beijingStamp(iso) {
+			var text = String(iso || "");
+			if (!/[T ]\d{2}:\d{2}.*(?:Z|[+-]\d{2}:?\d{2})$/i.test(text)) return text;
+			var d = new Date(text);
+			if (isNaN(d.getTime())) return text;
+			return new Date(d.getTime() + 8 * 3600 * 1000).toISOString();
+		}
 		function collectedDay(iso) {
+			return beijingStamp(iso).slice(0, 10);
+		}
+		function tickStamp(iso) {
 			if (!iso) return "";
 			var d = new Date(iso);
-			if (isNaN(d.getTime())) return String(iso).slice(0, 10);
+			if (isNaN(d.getTime())) return String(iso);
 			var beijing = new Date(d.getTime() + 8 * 3600 * 1000);
-			return beijing.toISOString().slice(0, 10);
+			var month = String(beijing.getUTCMonth() + 1).padStart(2, "0");
+			var day = String(beijing.getUTCDate()).padStart(2, "0");
+			var hour = String(beijing.getUTCHours()).padStart(2, "0");
+			var minute = String(beijing.getUTCMinutes()).padStart(2, "0");
+			return month + "/" + day + " " + hour + ":" + minute;
 		}
 
 		function clientsErrorText(error, detail) {
@@ -1030,22 +2260,17 @@ window.__ModuleLoader__.load({
 			return "";
 		}
 
-		/* ---- 会话页美化（2026-10-13）----------------------------------------
-		 * 只依赖官方 data-* 属性锚点（哈希类名无关），3s 一轮幂等处理：
-		 *  1) 装配台预填长消息 → 折叠成一行简报卡，点击展开全文；
-		 *  2) 工具调用行的工具名 → 说人话（mcp__sora-knowledge__read_kb_file → 知识库 · 读文件）。
-		 * React 重渲染会还原文本/删掉卡片，tick 重扫幂等补回。
-		 * 已完成轮次的过程折叠是官方自带的（store 无记录=收起），我们不碰。 */
-		var WB_TOOL_LABELS = [   /* 长名在前，防止短名替换吃掉长名前缀 */
-			["mcp__sora-knowledge__list_kb_files", "知识库 · 列文件清单"],
-			["mcp__sora-knowledge__read_kb_file", "知识库 · 读文件"],
-			["mcp__sora-articles__write_article", "文章库 · 写入草稿"],
-			["mcp__sora-articles__list_articles", "文章库 · 列文章"],
-			["mcp__sora-articles__confirm", "文章库 · 确认入库"],
-			["mcp__sora-articles__get", "文章库 · 读文章"],
-			["mcp__sora-knowledge__read_kb", "知识库 · 整库读取"],
-			["get_skill", "读取技能规则"],
-		];
+		/* Conversation decorations use the host's public data-* anchors. Completed
+		 * process groups remain owned by the host; only their appearance changes. */
+		var WB_TOOL_LABELS = {
+			list_kb_files: "列文件清单", read_kb_file: "读文件", read_kb: "整库读取",
+			write_article: "写入草稿", list_articles: "列文章", confirm: "确认入库", get: "读文章", read_article: "读文章",
+		};
+		function wbHumanizeToolNames(text) {
+			return String(text).replace(/\bmcp__(?:sora-)?(articles|knowledge)__([\w-]+)\b/g, function (_, library, name) {
+				return (library === "articles" ? "文章库" : "知识库") + " · " + (WB_TOOL_LABELS[name] || name.replace(/_/g, " "));
+			}).replace(/\bget_skill\b/g, "读取技能规则");
+		}
 		function wbPrefoldSummary(t) {
 			var bits = ["装配台简报"];
 			var client = (t.match(/客户：([^\s——，。]+)/) || [])[1];
@@ -1058,114 +2283,148 @@ window.__ModuleLoader__.load({
 			bits.push("点击查看全文");
 			return bits.join(" · ");
 		}
-		function wbConvTick() {
+		function wbConvAttr(el, name, value) {
+			if (value === null) {
+				if (el.hasAttribute(name)) el.removeAttribute(name);
+			} else if (el.getAttribute(name) !== value) el.setAttribute(name, value);
+		}
+		function wbConvText(el, value) {
+			if (el.textContent !== value) el.textContent = value;
+		}
+		function wbRemoveLoader(ldr) {
+			if (!ldr) return;
+			clearInterval(ldr._wbLi);
+			if (ldr.parentNode) {
+				wbConvAttr(ldr.parentNode, "data-wb-running", null);
+				ldr.parentNode.removeChild(ldr);
+			}
+		}
+		function wbConvTick(update, previousLoader) {
 			var root = document.querySelector("[data-slot='main.conversation']");
-			if (!root) return;
-			/* 容器里每个消息条目都带 data-chat-anchor-key（官方 ChatView 写死），用它定位。
-			 * 倒序找「最内层」的预填条目（外层容器的 textContent 也以预填开头，
-			 * 但折叠必须作用在气泡本尊上才收得住）；内部已折叠的外层直接跳过。 */
+			if (previousLoader && (!root || previousLoader.parentNode !== root)) wbRemoveLoader(previousLoader);
+			if (!root) return null;
 			var items = root.querySelectorAll("[data-chat-anchor-key]");
 			for (var i = items.length - 1; i >= 0; i--) {
 				(function (el) {
-					var t = (el.textContent || "").trim();
-					var fresh = !el.getAttribute("data-wb-prefold");
-					if (fresh) {
-						if (el.querySelector("[data-wb-prefold]")) return;
-						if (t.indexOf("【装配台预填") !== 0) return;
+					var head = el.querySelector(":scope > .wb_prefoldHead");
+					var t = Array.prototype.filter.call(el.childNodes, function (node) { return node !== head; })
+						.map(function (node) { return node.textContent || ""; }).join("").trim();
+					if (!el.hasAttribute("data-wb-prefold")) {
+						if (el.querySelector("[data-wb-prefold]") || t.indexOf("【装配台预填") !== 0) return;
 					}
-					/* 官方把一条消息拆成多个平级块：锚点块（带标题行）只是第一块，
-					 * 其余块是它的兄弟。收起时把「锚点之后、下一条消息之前」的兄弟一并藏掉，
-					 * 展开时恢复。每轮 tick 都补（React 重渲染会丢我们的标记）。 */
-					var open = el.getAttribute("data-wb-open") ? true : false;
-					var sibs = el.parentElement ? el.parentElement.children : [];
+					/* The host can split one message into sibling blocks. Include those
+					 * in both the summary and the fold, stopping at the next anchor. */
+					var tails = [], sibs = el.parentElement ? el.parentElement.children : [];
 					var sidx = Array.prototype.indexOf.call(sibs, el);
-					if (sidx > -1) {
-						for (var y = sidx + 1; y < sibs.length; y++) {
-							var yb = sibs[y];
-							if (yb.getAttribute && yb.getAttribute("data-chat-anchor-key")) break;
-							if (open) yb.removeAttribute("data-wb-pref-tail");
-							else yb.setAttribute("data-wb-pref-tail", "1");
-						}
+					for (var y = sidx + 1; sidx > -1 && y < sibs.length; y++) {
+						var tail = sibs[y];
+						if (tail.hasAttribute("data-chat-anchor-key") || tail.querySelector("[data-chat-anchor-key]")) break;
+						tails.push(tail);
+						t += "\n" + (tail.textContent || "");
 					}
-					if (!fresh) return;
-					el.setAttribute("data-wb-prefold", "1");
-					var head = document.createElement("button");
-					head.type = "button";
-					head.className = "wb_prefoldHead";
-					var txt = document.createElement("span"); txt.className = "wb_pfT";
-					var tag = document.createElement("span"); tag.className = "wb_pfTag"; tag.textContent = "已注入";
-					var chev = document.createElement("span"); chev.className = "wb_pfC";
-					function sync() {
-						txt.textContent = wbPrefoldSummary(t);
-						chev.textContent = el.getAttribute("data-wb-open") ? "▴" : "▾";
+					wbConvAttr(el, "data-wb-prefold", "1");
+					if (!head) {
+						head = document.createElement("button");
+						head.type = "button"; head.className = "wb_prefoldHead";
+						["wb_pfT", "wb_pfTag", "wb_pfC"].forEach(function (name) {
+							var span = document.createElement("span"); span.className = name; head.appendChild(span);
+						});
+						head.addEventListener("click", function () {
+							head._wbUpdate(function () {
+								wbConvAttr(el, "data-wb-open", el.hasAttribute("data-wb-open") ? null : "1");
+								head._wbSync();
+							});
+						});
+						el.insertBefore(head, el.firstChild);
 					}
-					head.addEventListener("click", function () {
-						if (el.getAttribute("data-wb-open")) el.removeAttribute("data-wb-open");
-						else el.setAttribute("data-wb-open", "1");
-						sync();
-					});
-					sync();
-					head.appendChild(txt); head.appendChild(tag); head.appendChild(chev);
-					el.insertBefore(head, el.firstChild);
+					/* Refresh the closure when React replaces message fragments. */
+					head._wbUpdate = update;
+					head._wbSync = function () {
+						var open = el.hasAttribute("data-wb-open");
+						tails.forEach(function (tail) { wbConvAttr(tail, "data-wb-pref-tail", open ? null : "1"); });
+						wbConvAttr(head, "aria-expanded", open ? "true" : "false");
+						wbConvText(head.children[0], wbPrefoldSummary(t));
+						wbConvText(head.children[1], "已注入");
+						wbConvText(head.children[2], open ? "▴" : "▾");
+					};
+					head._wbSync();
 				})(items[i]);
 			}
-			/* 过程行打标：思考行图标紫色、其余灰（官方 disclosure-row 的第 2 个子 span 是标题） */
 			var prows = root.querySelectorAll("[data-disclosure-row]");
 			for (var p = 0; p < prows.length; p++) {
-				if (prows[p].getAttribute("data-wb-tagged")) continue;
 				var ttl = prows[p].children[1];
 				if (!ttl) continue;
-				var tx = (ttl.textContent || "").trim();
-				if (tx === "思考") prows[p].classList.add("wb_thinkRow");
-				prows[p].setAttribute("data-wb-tagged", "1");
+				var think = (ttl.textContent || "").trim() === "思考";
+				if (prows[p].classList.contains("wb_thinkRow") !== think) prows[p].classList.toggle("wb_thinkRow", think);
 			}
-			/* —— 游戏加载画面模式：进行中只显示氛围气泡，真实过程藏起来 ——
-			 * 进行中判据：页面有「停止生成」按钮（跑的时候有、跑完消失）。
-			 * 完成后移除标记，官方折叠自动接管（已完成轮次收成「N 次工具调用」）。 */
-			var running = false;
-			var btns = root.ownerDocument.querySelectorAll("button");
+			/* The host's stop button exists only while the agent is running. */
+			var running = false, btns = root.ownerDocument.querySelectorAll("button");
 			for (var b = 0; b < btns.length; b++) {
-				var btx = btns[b].textContent || "";
-				if (btx.indexOf("停止生成") !== -1) { running = true; break; }
+				var label = (btns[b].textContent || "") + " " + (btns[b].getAttribute("aria-label") || "") + " " + (btns[b].getAttribute("title") || "");
+				if (label.indexOf("停止生成") !== -1) { running = true; break; }
 			}
-			if (running) root.setAttribute("data-wb-running", "1");
-			else root.removeAttribute("data-wb-running");
+			wbConvAttr(root, "data-wb-running", running ? "1" : null);
 			var ldr = root.querySelector(":scope > .wb_ldr");
 			if (running && !ldr) {
-				ldr = document.createElement("div");
-				ldr.className = "wb_ldr";
-				var sp = document.createElement("span"); sp.className = "wb_ldrSpin";
+				ldr = document.createElement("div"); ldr.className = "wb_ldr";
+				ldr.setAttribute("role", "status"); ldr.setAttribute("aria-label", "Agent 正在处理"); ldr.setAttribute("aria-live", "off");
+				var sp = document.createElement("span"); sp.className = "wb_ldrSpin"; sp.setAttribute("aria-hidden", "true");
 				var lb = document.createElement("span"); lb.className = "wb_ldrT";
 				ldr.appendChild(sp); ldr.appendChild(lb);
 				var phrases = ["正在查资料", "正在做选题", "正在搭文章骨架", "正在码字", "正在核对事实", "正在打磨标题"];
-				var pi = Math.floor(Math.random() * phrases.length);
-				lb.textContent = "Agent " + phrases[pi];
-				ldr._wbLi = setInterval(function () {
-					pi = (pi + 1) % phrases.length;
-					var tgt = ldr.querySelector(".wb_ldrT");
-					if (tgt) tgt.textContent = "Agent " + phrases[pi];
+				var pi = window.dshUnified ? 3 : Math.floor(Math.random() * phrases.length);
+				wbConvText(lb, "Agent " + phrases[pi]);
+				if (!window.dshUnified) ldr._wbLi = setInterval(function () {
+					if (!ldr.isConnected) { clearInterval(ldr._wbLi); return; }
+					update(function () {
+						pi = (pi + 1) % phrases.length;
+						wbConvText(lb, "Agent " + phrases[pi]);
+					});
 				}, 2200);
 				root.appendChild(ldr);
-			} else if (!running && ldr) {
-				if (ldr._wbLi) clearInterval(ldr._wbLi);
-				if (ldr.parentNode) ldr.parentNode.removeChild(ldr);
-			}
-			/* 工具名说人话：全容器扫文本节点（跳过预填条目，避免把它的通配串换掉） */
-			var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
-			var tn;
+			} else if (!running && ldr) { wbRemoveLoader(ldr); ldr = null; }
+			if(window.dshUnified && ldr){clearInterval(ldr._wbLi);wbConvText(ldr.querySelector(".wb_ldrT"), "Agent 正在码字");}
+			/* Preserve the raw tools in the injected prompt, including split tails. */
+			var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false), tn;
 			while ((tn = walker.nextNode())) {
-				var d = tn.data;
-				if (d.indexOf("mcp__sora-") === -1 && d.indexOf("get_skill") === -1) continue;
-				var skip = false, anc = tn.parentElement;
-				while (anc && anc !== root) {
-					if (anc.getAttribute && anc.getAttribute("data-wb-prefold")) { skip = true; break; }
-					anc = anc.parentElement;
-				}
-				if (skip) continue;
-				var out = d;
-				for (var L = 0; L < WB_TOOL_LABELS.length; L++) out = out.split(WB_TOOL_LABELS[L][0]).join(WB_TOOL_LABELS[L][1]);
-				if (out !== d) tn.data = out;
+				if (!tn.parentElement || tn.parentElement.closest("[data-wb-prefold],[data-wb-pref-tail]")) continue;
+				var out = wbHumanizeToolNames(tn.data);
+				if (out !== tn.data) tn.data = out;
 			}
+			return ldr;
+		}
+		function wbInstallConversation() {
+			if (typeof document === "undefined" || !document.body || typeof MutationObserver !== "function") return;
+			if (window.__wbConversationCleanup) window.__wbConversationCleanup();
+			var queued = false, disposed = false, loader = null;
+			/* Never observe style/class: host layout and theme observers own those.
+			 * Disconnect around ALL writes (fold clicks and loader rotation too).
+			 * A microtask coalesces host mutations without waiting for first paint (~80ms). */
+			var options = { childList: true, subtree: true, characterData: true, attributes: true,
+				attributeFilter: ["data-chat-anchor-key", "data-disclosure-row", "data-wb-open", "aria-label", "title"] };
+			function update(write) {
+				if (disposed) return;
+				observer.disconnect();
+				try { write(); }
+				finally { if (!disposed) observer.observe(document.body, options); }
+			}
+			function tick() {
+				queued = false;
+				update(function () { loader = wbConvTick(update, loader); });
+			}
+			function schedule() {
+				if (disposed || queued) return;
+				queued = true;
+				queueMicrotask(tick);
+			}
+			var observer = new MutationObserver(schedule);
+			function dispose() {
+				disposed = true; observer.disconnect(); wbRemoveLoader(loader);
+				if (window.__wbConversationCleanup === dispose) delete window.__wbConversationCleanup;
+			}
+			window.__wbConversationCleanup = dispose;
+			tick();
+			return dispose;
 		}
 
 		/* 宿主那半边负责归一化，但线上可能同时跑着两个版本的宿主代码
@@ -1182,10 +2441,494 @@ window.__ModuleLoader__.load({
 			return bits.join(" · ");
 		}
 
+		function buildTaskMetaPayload(opts) {
+			opts = opts || {};
+			var payload = {
+				client_key: String(opts.client_key || ""),
+				client: String(opts.client || ""),
+				business_line_id: String(opts.business_line_id || ""),
+				service_period_id: String(opts.service_period_id || ""),
+				line: String(opts.line || ""),
+				period: String(opts.period || ""),
+				mode: opts.mode,
+				topic: opts.topic,
+				refs: opts.refs,
+				skills: opts.skills,
+				base: opts.base,
+			};
+			if (wbClampRounds(opts.rounds) > 1) { payload.rounds = wbClampRounds(opts.rounds); if (opts.batch_id) payload.batch_id = opts.batch_id; }
+			return payload;
+		}
+
+		function selectedSessionQuestions(questions, ticks, picked, clientKey) {
+			var records = (questions || []).concat(ticks || []), seen = {};
+			return picked.map(function (name) {
+				var item = records.find(function (q) { return q.question === name && q.qid; });
+				if (!item || seen[item.qid]) return null;
+				seen[item.qid] = true;
+				return { qid: item.qid, question: item.question, client_key: clientKey };
+			}).filter(Boolean);
+		}
+
+		function questionLinkPrompt(sessionId, bind, response) {
+			if (!response || !response.article_question_links || response.article_question_links.version !== 1 || !bind.questions || !bind.questions.length) return "";
+			return "\n\n【文章问句关联】本会话 session_id=" + JSON.stringify(sessionId) + "；问句清单=" + JSON.stringify(bind.questions) +
+				"。write_article 的工具 schema 支持 question_context 时，每次写稿必须带 question_context.session_id；把选题分配表的第 N 篇、覆盖的问句转换为结构化参数 article_no:N, assignment:[{article_no:N,qids:[该行覆盖问句的qid]}]，放入 question_context。只复制分配表的明确映射，不从标题或正文猜测；没有分配表时仅带 session_id，由服务端关联本会话全部问句。工具 schema 没有 question_context 时不要传此参数。";
+		}
+
+		function bindSessionClient(sessionId, bind) {
+			if (!sessionId || !bind) return Promise.resolve(null);
+			return fetch("/api/workbench/session-client", {
+				method: "POST",
+				headers: { "content-type": "application/json", accept: "application/json" },
+				body: JSON.stringify({
+					session_id: sessionId,
+					client_key: bind.client_key || "",
+					client: bind.client || "",
+					meta_id: bind.meta_id || "",
+					business_line_id: bind.business_line_id || "",
+					service_period_id: bind.service_period_id || "",
+					line: bind.line || "", period: bind.period || "",
+					topic: bind.topic || "",
+					questions: bind.questions || [],
+					capture_period: bind.capture_period || "",
+					capture_task_id: bind.capture_task_id || "",
+					collected_at: bind.collected_at || "",
+				}),
+			})
+				.then(function (r) { return r.json().catch(function () { return {}; }); })
+				.then(function (body) {
+					if (!body || body.ok !== true) {
+						console.warn("[dsh-workbench] session-client 绑定未成功：", body && (body.error || body.detail) || "unknown");
+						return;
+					}
+					/* Noah 兼容登记：保留 topic，旧壳/左树也能读到。 */
+					fetch(WB_API.assignGroup, {
+						method: "POST", headers: { "content-type": "application/json", accept: "application/json" },
+						body: JSON.stringify({ session: sessionId, client: bind.client || "", client_key: bind.client_key || "", topic: bind.topic || "", meta_id: bind.meta_id || "" }),
+					}).catch(function () { });
+					try { window.dispatchEvent(new Event("wb-session-bound")); } catch (e) { /* */ }
+					return body;
+				})
+				.catch(function (e) {
+					console.warn("[dsh-workbench] session-client 绑定失败（会话暂进未归类）：", String(e && e.message ? e.message : e));
+				});
+		}
+
+		function openSessionBestEffort(ctx, sessionId) {
+			if (!sessionId) return false;
+			var workspace = ctx && typeof ctx.get === "function" ? ctx.get("uiWorkspace") : null;
+			if (workspace) {
+				var methods = ["openSession", "selectSession", "focusSession", "activateSession"];
+				for (var i = 0; i < methods.length; i++) {
+					if (typeof workspace[methods[i]] === "function") {
+						try { workspace[methods[i]](sessionId); return true; } catch (e) { /* try next */ }
+					}
+				}
+			}
+			console.warn("[dsh-workbench] 无法打开会话 " + sessionId + "：宿主未暴露 openSession/selectSession");
+			return false;
+		}
+
+
 		function Empty(props) {
 			return h("div", { className: "wb_empty" },
 				h("div", { className: "wb_emptyT" + (props.bad ? " wb_bad" : "") }, props.title),
-				props.sub ? h("div", { className: "wb_emptyS" }, props.sub) : null);
+				props.sub ? h("div", { className: "wb_emptyS" }, props.sub) : null,
+				props.loading ? h(WbSkeleton, {}) : null);
+		}
+
+		/* 多轮编排：持久化后再发送；轮次标记与宿主会话状态用于恢复和推进。 */
+		function wbClampRounds(value) {
+			var n = Number(value);
+			return Number.isFinite(n) ? Math.max(1, Math.min(20, Math.floor(n))) : 1;
+		}
+		function wbRoundMarker(batch, round) { return "[生文批次：" + batch.id + "；第 " + round + "/" + batch.rounds + " 轮]"; }
+		function wbRoundPrompt(text, batch, round) {
+			if (!batch || wbClampRounds(batch.rounds) === 1) return text;
+			round = round || 1;
+			text = text.replace(/^(\d+\. 技能：[^\n]+，写 )\d+( 篇。)$/gm, function (_, before, after) { return before + "1" + after; })
+				.replace("以上技能的篇数以装配台点选为准；补充要求里明确说了不同的篇数时，以补充要求为准。", "本轮合计写 1 篇；保留所选技能，结合适用规则完成同一篇文章，不按技能分别产稿。")
+				.replace("各类型的篇数按上面点选的数量执行；补充要求里另有安排时，以补充要求为准。", "分配表只能有第 1 篇一行，合并覆盖问句；本轮总共写 1 篇。")
+				.replace("，仅当用户明确说「直接入库」时例外", "");
+			var history = (batch.records || []).filter(function (r) { return r.round < round; }).map(function (r) {
+				return "第 " + r.round + " 轮｜标题：" + (r.title || "未产出") + "｜角度：" + (r.angle || "未提供") + "｜" + r.status;
+			}).join("\n") || "无（首轮）";
+			return text + "\n\n" + wbRoundMarker(batch, round) + "\n前轮标题与角度（仅供避重）：\n" + history
+				+ "\n本轮重新完整执行以上生文流程，沿用同一客户、问句、补充要求、技能与参考材料。选择与前轮明显不同的写作角度和文章结构，不重复标题、论点组织或段落，不覆盖已有文章。"
+				+ "\n本轮数量硬规则优先于技能正文、点选篇数和补充要求中的数量：写 1 篇，且只产出一篇草稿。本轮只调用一次 write_article，必须 draft:true，不得直接入库。依赖不足则报告失败原因，不能编造；不要审核。"
+				+ "\nwrite_article 的 schema 支持 question_context 时必须包含 " + JSON.stringify({ session_id: batch.session_id, batch_id: batch.id, round: round, article_no: 1 })
+				+ "；有选题分配表时另带 assignment:[{article_no:1,qids:[明确覆盖问句的qid]}]，不猜测映射。问句清单：" + JSON.stringify(batch.questions || [])
+				+ "。schema 不支持时不传 question_context。\n结束时在汇报最后单独写一行：本轮角度：…（概括本轮视角与结构）。";
+		}
+		function wbBatchText(node) {
+			if (!node) return "";
+			if (node.kind === "turn-error") return String(node.message || "本轮生成失败");
+			if (typeof node.content === "string") return node.content;
+			var blocks = Array.isArray(node.blocks) ? node.blocks : Array.isArray(node.content) ? node.content : [];
+			return blocks.filter(function (b) { return b && (b.kind === "text" || b.type === "text"); }).map(function (b) { return b.text || ""; }).join("\n");
+		}
+		function wbBatchHint(nodes) {
+			for (var i = 0; i < nodes.length; i++) {
+				var m = nodes[i].kind === "user" && wbBatchText(nodes[i]).match(/\[生文批次：(wbb-[a-z0-9-]+)；第 \d+\/\d+ 轮\]/);
+				if (m) return m[1];
+				var context = wbWriteContext(nodes[i]);
+				if (context && /^wbb-[a-z0-9-]+$/.test(context.batch_id || "")) return context.batch_id;
+			}
+			return "";
+		}
+		function wbWriteContext(node) {
+			if (wbIsSuccessfulWrite(node)) {
+				try { return JSON.parse(node.call.argsRaw || "{}").question_context; } catch (e) { }
+			}
+			return null;
+		}
+		function wbBatchTurn(nodes, batch, round) {
+			var start = nodes.findIndex(function (n) { return n.kind === "user" && wbBatchText(n).includes(wbRoundMarker(batch, round)); });
+			if (start >= 0) start++;
+			else {
+				// A reloaded history window may start after the user prompt.
+				start = nodes.findIndex(function (n) {
+					var q = wbWriteContext(n);
+					return q && q.session_id === batch.session_id && q.batch_id === batch.id && q.round === round;
+				});
+				if (start < 0) return null;
+			}
+			var end = start;
+			while (end < nodes.length && nodes[end].kind !== "user") end++;
+			return nodes.slice(start, end);
+		}
+		function wbBatchResult(nodes, row) {
+			var writes = nodes.filter(wbIsSuccessfulWrite), title = "", angle = "", reason = "";
+			var assistant = nodes.filter(function (n) { return n.kind === "assistant"; }).map(wbBatchText).join("\n");
+			var angles = Array.from(assistant.matchAll(/(?:^|\n)本轮角度[：:]\s*([^\n]+)/g));
+			if (angles.length) angle = angles[angles.length - 1][1].trim();
+			var nonDraft = false;
+			writes.forEach(function (write) {
+				var args = {};
+				try { args = JSON.parse(write.call.argsRaw || "{}") || {}; } catch (e) { }
+				if (!title) title = String(args.title || args.file || "").replace(/\.md$/i, "").trim();
+				if (args.draft !== true) nonDraft = true;
+			});
+			var calls = nodes.filter(function (n) { return n.kind === "tool-result" && n.call && WB_WRITE_TOOL_RE.test(n.call.name); });
+			if (!writes.length) {
+				var error = nodes.filter(function (n) { return n.isError || n.kind === "turn-error"; }).map(wbBatchText).join(" ");
+				reason = (error || assistant || "本轮结束，未成功写入草稿").slice(0, 160);
+			} else if (!title) reason = "写入结果缺少标题";
+			else {
+				// Error results and retries also count as calls; a titled successful write keeps the round successful.
+				if (calls.length !== 1) console.warn("[dsh-workbench] 本轮 write_article 结果数不是一次（含错误/重试）：" + calls.length + "；已有成功写入，保留成功状态");
+				if (writes.length > 1) console.warn("[dsh-workbench] 本轮 write_article 成功写入多次：" + writes.length + "；保留首个可用标题：" + title);
+				if (nonDraft) console.warn("[dsh-workbench] 本轮 write_article 存在 draft !== true；已有成功写入，保留成功状态");
+			}
+			return Object.assign({}, row, { title: title, angle: angle, status: reason ? "failed" : "ok", reason: reason });
+		}
+		var wbBatches = Object.create(null);
+		var wbBatchViews = Object.create(null);
+		var wbServerBatchCache = { value: false, checkedAt: null, pending: null };
+		function wbServerBatch() {
+			var cache = wbServerBatchCache;
+			if (cache.pending) return cache.pending;
+			if (cache.checkedAt !== null && Date.now() - cache.checkedAt < 60000) return Promise.resolve(cache.value);
+			cache.pending = (async function () {
+				try {
+					var response = await fetch(WB_API.batchConfig, { headers: { accept: "application/json" }, cache: "no-store" });
+					var body = response.ok ? await response.json() : null;
+					cache.value = !!(body && body.ok === true && body.server === true);
+				} catch (e) { cache.value = false; }
+				cache.checkedAt = Date.now();
+				return cache.value;
+			})().finally(function () { cache.pending = null; });
+			return cache.pending;
+		}
+		function wbMergeBatchStatus(items, batches) {
+			var merged = Object.assign({}, items);
+			Object.keys(batches || {}).forEach(function (id) {
+				var batch = batches[id];
+				if (!batch || batch.driver !== "server" || batch.session_id !== id) return;
+				merged[id] = Object.assign({}, merged[id], { batch: batch,
+					finished_at: ["done", "failed_partial", "stopped"].includes(batch.status) ? batch.savedAt : null });
+			});
+			return merged;
+		}
+		function wbRememberServerBatch(sessionId, batch) {
+			var key = wbBatchKey(sessionId), entry = wbBatches[key];
+			if (!batch || batch.driver !== "server" || batch.session_id !== sessionId) return;
+			if (!entry || !entry.batch || entry.batch.id !== batch.id) entry = wbBatches[key] = {};
+			if (!entry.batch || entry.batch.driver !== "server" || batch.revision >= entry.batch.revision) entry.batch = batch;
+			return entry;
+		}
+		function wbBatchKey(sessionId) {
+			var uid = (window.dshUnified && window.dshUnified.store && window.dshUnified.store.state && window.dshUnified.store.state.uid) || wbNavState.uid || "";
+			return JSON.stringify([uid, sessionId]);
+		}
+		function wbBatchFor(sessionId) { var entry = wbBatches[wbBatchKey(sessionId)]; return entry && entry.batch; }
+		function useWbBatch(sessionId) {
+			var tick = React.useState(0);
+			React.useEffect(function () {
+				function changed() { tick[1](function (n) { return n + 1; }); }
+				window.addEventListener("wb:batch-change", changed);
+				return function () { window.removeEventListener("wb:batch-change", changed); };
+			}, [sessionId]);
+			return wbBatchFor(sessionId);
+		}
+		function wbBatchEmit() { window.dispatchEvent(new Event("wb:batch-change")); }
+		function wbBatchTitles(batch, titles) {
+			if (batch) batch.records.forEach(function (r) { if (r.status === "ok" && r.title) titles[r.title] = true; });
+			return titles;
+		}
+		function wbRequestedTotal(meta, batch) {
+			var rounds = Number(batch ? batch.rounds : meta && meta.rounds);
+			if (Number.isFinite(rounds) && rounds >= 1) return rounds;
+			if (batch) return 0;
+			return ((meta && meta.skills) || []).reduce(function (total, skill) {
+				var count = String(skill).match(/×\s*(\d+)\s*$/);
+				return total + (count ? Number(count[1]) : 1);
+			}, 0);
+		}
+		function wbWrittenTitles(nodes) {
+			var titles = Object.create(null);
+			(Array.isArray(nodes) ? nodes : []).forEach(function (node) {
+				if (!wbIsSuccessfulWrite(node)) return;
+				try {
+					var args = JSON.parse(node.call.argsRaw || "{}");
+					var title = String(args.title || args.file || "").replace(/\.md$/i, "");
+					if (title) titles[title] = true;
+				} catch (e) { }
+			});
+			return titles;
+		}
+		function wbWriteProgress(meta, batch, titles) {
+			// Progress belongs to the current batch; review still keeps all session titles.
+			var total = wbRequestedTotal(meta, batch);
+			var done = Object.keys(batch ? wbBatchTitles(batch, Object.create(null)) : titles || {}).length;
+			if (total > 0) done = Math.min(done, total);
+			return { total: total, done: done, finished: total > 0 && done >= total };
+		}
+		function wbWriteProgressRow(progress) {
+			var scope = progress.total > 0 ? progress.done + "/" + progress.total : String(progress.done);
+			return [progress.finished ? "done" : "run",
+				(progress.finished ? "草稿已写完：" : "写作中 · 已写 ") + scope + " 篇（草稿区待审）"];
+		}
+		async function wbBatchPost(body, server) {
+			var response = await fetch(server ? WB_API.serverBatch : WB_API.batch, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+			var result = await response.json();
+			if (!result.ok) { var error = new Error(result.detail || result.error || "批次保存失败"); error.batch = result.batch; throw error; }
+			return result.batch;
+		}
+		async function wbBatchSave(entry, patch) {
+			var server = entry.batch.driver === "server";
+			// Server records/status are read-only, including after a config failure.
+			if (server && Object.keys(patch).some(function (key) { return key !== "op" && key !== "review_opened"; })) return false;
+			try {
+				var saved = await wbBatchPost(Object.assign({ id: entry.batch.id, revision: entry.batch.revision }, patch), server);
+				if (saved.revision >= entry.batch.revision) entry.batch = saved;
+				entry.error = ""; wbBatchEmit(); return true;
+			} catch (e) {
+				if (e.batch) { if (e.batch.revision >= entry.batch.revision) entry.batch = e.batch; }
+				else entry.error = "批次保存失败，将重试：" + e.message;
+				wbBatchEmit(); return false;
+			}
+		}
+		function wbStopGeneration() {
+			var buttons = document.querySelectorAll("button");
+			for (var i = 0; i < buttons.length; i++) {
+				var label = (buttons[i].textContent || "") + " " + (buttons[i].getAttribute("aria-label") || "") + " " + (buttons[i].getAttribute("title") || "");
+				if (label.includes("停止生成") && !buttons[i].disabled) { buttons[i].click(); return true; }
+			}
+			return false;
+		}
+		function wbBatchStop(entry, sessionId) {
+			entry.stopping = true; entry.finished = false;
+			if (pendingPrompt && pendingPrompt.sessionId === sessionId) pendingPrompt = null;
+			wbStopGeneration();
+			var saved = wbBatchSave(entry, { op: "stop" }); wbBatchEmit();
+			return saved;
+		}
+		async function wbBatchSend(entry, actions, text, alive) {
+			if (entry.batch.driver === "server") return;
+			var batch = entry.batch, row = batch.records.find(function (r) { return r.status !== "ok" && r.status !== "failed"; });
+			if (!row || row.status !== "pending" || batch.status !== "running" || entry.stopping || !alive()) return;
+			var rows = batch.records.map(function (r) { return r === row ? Object.assign({}, r, { status: "sending", sent_at: Date.now() }) : r; });
+			if (!await wbBatchSave(entry, { records: rows })) return;
+			if (!alive() || entry.stopping || entry.batch.status !== "running" || entry.batch.driver === "server") return;
+			try { actions.setDraft(wbRoundPrompt(text, entry.batch, row.round)); await actions.submit(); }
+			catch (e) {
+				rows[row.round - 1] = Object.assign({}, rows[row.round - 1], { status: "failed", reason: "发送失败：" + String(e.message || e).slice(0, 120) });
+				await wbBatchSave(entry, { records: rows });
+			}
+		}
+		async function wbBatchReview(entry, view) {
+			var batch = entry.batch;
+			if (!batch.review_opened || entry.reviewPending) {
+				var titles = Object.keys(wbBatchTitles(batch, {})), ctrl = WbCtx && WbCtx.sidebarRight;
+				var open = titles.length > 0 || batch.driver === "server";
+				if (open && !WB_MOBILE.matches && !window.dshUnified && (!ctrl || !ctrl.openTab)) return;
+				if (!batch.review_opened) {
+					if (!await wbBatchSave(entry, { review_opened: true })) return;
+					entry.reviewPending = true;
+				}
+				if (!view.alive()) return;
+				if (open) {
+					window.dispatchEvent(new CustomEvent("wb:review-refresh", { detail: { sessionId: view.sessionId, batch: true } }));
+					if (WB_MOBILE.matches) window.dispatchEvent(new CustomEvent("wb:batch-review", { detail: { sessionId: view.sessionId } }));
+					else if (window.dshUnified) window.dispatchEvent(new Event("dsh:review-available"));
+					else ctrl.openTab("wb-review", { params: { client: batch.client, client_key: batch.client_key, meta: batch.meta_id } });
+				}
+				entry.reviewPending = false;
+			}
+			entry.finished = true;
+		}
+		async function wbBatchTick(entry, view) {
+			if (entry.busy || entry.relayPending || !view.alive()) return;
+			entry.busy = true;
+			try {
+				// Revalidate owner/session and observe a stop from another tab before any send.
+				var server = entry.batch.driver === "server" || await wbServerBatch();
+				if (!view.alive()) return;
+				var response = await fetch((server ? WB_API.serverBatch : WB_API.batch) + "?id=" + encodeURIComponent(entry.batch.id) + (entry.batch.session_id ? "&session_id=" + encodeURIComponent(view.sessionId) : ""));
+				var body = await response.json();
+				if (!body.ok) throw new Error(body.error || "批次读取失败");
+				if (!view.alive()) return;
+				if (body.batch.revision >= entry.batch.revision) entry.batch = body.batch;
+				if (entry.batch.session_id && entry.batch.session_id !== view.sessionId) return;
+				if (server || entry.batch.driver === "server") {
+					entry.error = "";
+					if (entry.stopping && entry.batch.status === "running") await wbBatchSave(entry, { op: "stop" });
+					if (["done", "failed_partial"].includes(entry.batch.status)) await wbBatchReview(entry, view);
+					return; // Only the server may evaluate records or advance rounds.
+				}
+				if (!entry.batch.session_id && !await wbBatchSave(entry, { session_id: view.sessionId })) return;
+				var batch = entry.batch, row = batch.records.find(function (r) { return r.status !== "ok" && r.status !== "failed"; });
+				if (entry.stopping && batch.status !== "stopped") { await wbBatchSave(entry, { op: "stop" }); return; }
+				if (view.running()) { entry.idleSince = 0; if (batch.status === "stopped") wbStopGeneration(); return; }
+				var nodes = view.nodes(), turn = row && wbBatchTurn(nodes, batch, row.round);
+				if (row && (row.status === "sending" || turn)) {
+					// Allow the host's final snapshot to settle; never advance between tool calls.
+					var signature = JSON.stringify(nodes);
+					if (entry.signature !== signature) { entry.signature = signature; entry.idleSince = 0; }
+					if (!entry.idleSince) entry.idleSince = Date.now();
+					if (Date.now() - entry.idleSince < 1500) return;
+					if ((!turn || !turn.length) && Date.now() - row.sent_at < 15000) return;
+					var result = wbBatchResult(turn || [], row);
+					if (!turn) result.reason = "发送未确认，已跳过以避免重复生文";
+					var rows = batch.records.slice(); rows[row.round - 1] = result;
+					await wbBatchSave(entry, { records: rows }); return;
+				}
+				if (batch.status === "running" && row) {
+					if (!view.actions || entry.stopping) return;
+					if (row.round === 1) {
+						// First turn always takes the existing workspace → PromptRelay path.
+						if (!pendingPrompt) {
+							pendingPrompt = { text: batch.prompt, sessionId: view.sessionId, batchId: batch.id };
+							sessionStorage.setItem("wb-pending-bind", JSON.stringify(batch.bind));
+							if (batch.model) sessionStorage.setItem(WB_KEY.modelPending, JSON.stringify(batch.model));
+							if (batch.meta_id) sessionStorage.setItem("wb-pending-meta", batch.meta_id);
+							window.dispatchEvent(new Event("wb-prompt-set"));
+						}
+					} else await wbBatchSend(entry, view.actions, batch.prompt, view.alive);
+					return;
+				}
+				if (batch.status === "running") {
+					await wbBatchSave(entry, { status: batch.records.some(function (r) { return r.status === "failed"; }) ? "failed_partial" : "done" }); return;
+				}
+				await wbBatchReview(entry, view);
+			} catch (e) { entry.error = "批次暂未继续：" + e.message; }
+			finally { entry.busy = false; wbBatchEmit(); }
+		}
+		function BatchRelay(props) {
+			var snap = typeof props.useChat === "function" ? props.useChat(function (s) { return s; }) : null;
+			var session = typeof props.useSession === "function" ? props.useSession(function (s) { return s; }) : null;
+			var tick = React.useState(0), live = React.useRef(null), key = wbBatchKey(props.sessionId);
+			var seat = React.useRef({});
+			var nodes = snap && snap.legacy && snap.legacy.nodes;
+			var hint = wbBatchHint(Array.isArray(nodes) ? nodes : []);
+			try { hint = hint || sessionStorage.getItem("wb-batch-for-" + key) || ""; } catch (e) { }
+			var mounted = React.useRef(false);
+			seat.current.batchId = hint;
+			seat.current.driving = !!props.inputActions;
+			live.current = { snap: snap, session: session, props: props, key: key };
+			React.useEffect(function () {
+				mounted.current = true;
+				var active = true;
+				(wbBatchViews[key] || (wbBatchViews[key] = [])).push(seat.current);
+				wbNavEmit();
+				function alive() {
+					return active && mounted.current && live.current.key === key && wbBatchKey(props.sessionId) === key
+						&& (!live.current.session || live.current.session.sessionId === props.sessionId);
+				}
+				var checking = false, serverPolledAt = null;
+				async function run() {
+					if (!alive() || checking) return;
+					var entry = wbBatches[key];
+					// Standalone single-turn views have no batch to discover. Cloud views
+					// also discover by session id, even when history has no round marker.
+					if (!hint && !entry && !window.dshUnified && !wbServerBatchCache.value) return;
+					checking = true;
+					try {
+						var server = (entry && entry.batch && entry.batch.driver === "server") || await wbServerBatch();
+						if (!alive() || (!server && !hint && !entry)) return;
+						if (server && serverPolledAt !== null && Date.now() - serverPolledAt < 3000) return;
+						if (server) serverPolledAt = Date.now();
+						if (!entry) {
+							entry = wbBatches[key] = { loading: true };
+							try {
+								var url = server ? WB_API.serverBatch + "?session_id=" + encodeURIComponent(props.sessionId) : WB_API.batch + "?id=" + encodeURIComponent(hint);
+								var r = await fetch(url); var b = await r.json();
+								if (!alive() || !b.ok || !b.batch || (b.batch.session_id && b.batch.session_id !== props.sessionId)) {
+									if (wbBatches[key] === entry) delete wbBatches[key];
+									return;
+								}
+								entry.batch = b.batch;
+								wbBatchEmit();
+								if (server) {
+									if (["done", "failed_partial"].includes(entry.batch.status)) await wbBatchReview(entry, {sessionId:props.sessionId, alive:alive});
+									return; // Avoid a duplicate GET on mount.
+								}
+							} catch (e) { if (wbBatches[key] === entry) delete wbBatches[key]; return; }
+							finally { entry.loading = false; }
+						}
+						if (!entry.batch || (entry.finished && !server)) return;
+						await wbBatchTick(entry, { sessionId: props.sessionId, actions: live.current.props.inputActions, alive: alive,
+							nodes: function () { var s = live.current.snap; return s && s.legacy && Array.isArray(s.legacy.nodes) ? s.legacy.nodes : []; },
+							running: function () {
+								var s = live.current.snap, l = s && s.legacy;
+								var session = live.current.session;
+								// Session lifecycle is authoritative, including history loading and gaps between tools.
+								if (session && (session.sessionId !== props.sessionId || session.openState !== "open" || session.removed
+									|| session.running || session.awaitingFirstTurn || (session.pendingSubmissions && session.pendingSubmissions.length)
+									|| (session.queue && session.queue.length))) return true;
+								if (!l || !Array.isArray(l.nodes)) return true;
+								return l.partial != null || !!(l.runningCalls && l.runningCalls.length)
+									|| !!document.querySelector('[data-slot="main.conversation"][data-wb-running="1"]');
+							} });
+					} finally { checking = false; }
+				}
+				function changed() { if (active) tick[1](function (v) { return v + 1; }); }
+				window.addEventListener("wb:batch-change", changed);
+				wbNavSubs.push(changed);
+				changed();
+				run(); var timer = setInterval(run, 1000);
+				return function () {
+					active = false; mounted.current = false; clearInterval(timer); window.removeEventListener("wb:batch-change", changed);
+					wbNavSubs = wbNavSubs.filter(function (fn) { return fn !== changed; });
+					wbBatchViews[key] = (wbBatchViews[key] || []).filter(function (view) { return view !== seat.current; });
+					wbBatchEmit();
+				};
+			}, [key, hint]);
+			var entry = wbBatches[key], batch = entry && entry.batch;
+			if (!batch || !wbBatchViews[key] || wbBatchViews[key][0] !== seat.current) return null;
+			var row = batch.records.find(function (r) { return r.status !== "ok" && r.status !== "failed"; });
+			function stop() {
+				if (!mounted.current || live.current.key !== key || wbBatchKey(props.sessionId) !== key
+					|| (live.current.session && live.current.session.sessionId !== props.sessionId)) return;
+				wbBatchStop(entry, props.sessionId);
+			}
+			return createPortal(h("div", { className: "wb_batch", role: "status" },
+				h("span", null, batch.status === "running" ? "第 " + (row ? row.round : batch.rounds) + "/" + batch.rounds + " 轮" : batch.status === "stopping" ? "正在停止本批…" : batch.status === "stopped" ? "本批已停止" : "本批已结束"),
+				batch.status === "running" ? h("button", { type: "button", onClick: stop, disabled: !!entry.stopping }, "停止本批") : null,
+				entry.error ? h("span", null, entry.error) : null,
+				batch.status !== "running" ? h("ul", null, batch.records.filter(function (r) { return r.status === "failed"; }).map(function (r) { return h("li", { key: r.round }, "第 " + r.round + " 轮：" + r.reason); })) : null), document.body);
 		}
 
 		/* 会话域接力：装配台（root 域）拿不到 inputActions，发不了消息。
@@ -1205,6 +2948,12 @@ window.__ModuleLoader__.load({
 		function PromptRelay(props) {
 			var actions = props.inputActions;
 			var useChat = props.useChat;
+			var relayLive = React.useRef(null);
+			relayLive.current = { sessionId: props.sessionId, key: wbBatchKey(props.sessionId) };
+			React.useEffect(function () {
+				relayLive.current = { sessionId: props.sessionId, key: wbBatchKey(props.sessionId) };
+				return function () { relayLive.current = null; };
+			}, [props.sessionId]);
 
 			/* 当前会话的消息节点数：0 = 空白。selector 返回数字，
 			 * snapshot 相等性比较才稳定，不会引发多余的 effect。 */
@@ -1225,6 +2974,7 @@ window.__ModuleLoader__.load({
 			var consumeRef = React.useRef(null);
 			consumeRef.current = function () {
 				if (pendingPrompt === null) return;
+				if (props.sessionId !== pendingPrompt.sessionId) return;
 				if (actions === undefined || actions === null) {
 					/* 真有提示词要发却拿不到 inputActions —— 说出来，别静默吞掉。 */
 					console.warn("[dsh-workbench] 接力挂件拿不到 inputActions，提示词没发出去");
@@ -1234,73 +2984,70 @@ window.__ModuleLoader__.load({
 					/* 非空白会话：不是目标，跳过 —— 提示词留给空白目标会话。 */
 					return;
 				}
-				var text = pendingPrompt;
+				var text = pendingPrompt.text;
+				var batchEntry = pendingPrompt.batchId && wbBatches[wbBatchKey(props.sessionId)];
+				if (pendingPrompt.batchId && (!batchEntry || !batchEntry.batch || batchEntry.stopping || batchEntry.batch.status !== "running")) return;
+				if (batchEntry) batchEntry.relayPending = true;
+				var relayKey = wbBatchKey(props.sessionId);
+				var questionBinding = Promise.resolve(null);
 				pendingPrompt = null;
-				/* 模型偏好（装配台选的）：先绑给这个会话再发第一条消息 ——
-				 * Host 在下一次提示词组装时对选择做快照，绑完再发才能用上。
-				 * 绑失败不挡发送：console 说话，照常按默认模型发。 */
 				/* 把任务参数编号绑定到这个会话 —— C1 任务条按 sessionId 取。
 				 * （多设备/刷新后不跨会话残留。） */
 				try {
-					var pendingId = sessionStorage.getItem(WB_KEY.pendingMeta) || "";
+					var pendingId = sessionStorage.getItem("wb-pending-meta")
+						|| sessionStorage.getItem("wb-task-meta-id") || "";
 					if (pendingId !== "" && typeof props.sessionId === "string" && props.sessionId !== "") {
-						sessionStorage.setItem(WB_KEY.metaFor + props.sessionId, pendingId);
-						sessionStorage.removeItem(WB_KEY.pendingMeta);
+						sessionStorage.setItem("wb-meta-for-" + props.sessionId, pendingId);
+						sessionStorage.removeItem("wb-pending-meta");
 					}
-					/* 自绘侧栏分组登记：会话 → 客户（+主题），宿主存映射表 */
-					var pendingClient = sessionStorage.getItem(WB_KEY.pendingClient) || "";
-					var pendingTopic = sessionStorage.getItem(WB_KEY.pendingTopic) || "";
-					if (pendingClient !== "" && typeof props.sessionId === "string" && props.sessionId !== "") {
-						sessionStorage.removeItem(WB_KEY.pendingClient);
-						sessionStorage.removeItem(WB_KEY.pendingTopic);
-						fetch(WB_API.assignGroup, {
-							method: "POST",
-							headers: { "content-type": "application/json" },
-							body: JSON.stringify({ session: props.sessionId, client: pendingClient, topic: pendingTopic }),
-						}).then(function (r) { return r.json(); })
-							.then(function (b) { if (!b || b.ok !== true) console.warn("[dsh-workbench] 分组登记失败：", b && b.error, b && b.detail); })
-							.catch(function (e) { console.warn("[dsh-workbench] 分组登记失败：", String(e)); });
+					/* WB-SUP P1：session id 已知时立刻写 session↔client 索引。
+					 * 等待绑定响应后提交，旧云端没有关联能力标记时保留旧流程。 */
+					var bindRaw = sessionStorage.getItem("wb-pending-bind") || "";
+					if (bindRaw !== "" && typeof props.sessionId === "string" && props.sessionId !== "") {
+						var bind = null;
+						try { bind = JSON.parse(bindRaw); } catch (e2) { bind = null; }
+						sessionStorage.removeItem("wb-pending-bind");
+						if (bind && typeof bind === "object") {
+							if (!bind.meta_id && pendingId) bind.meta_id = pendingId;
+							questionBinding = bindSessionClient(props.sessionId, bind).then(function (response) {
+								text += questionLinkPrompt(props.sessionId, bind, response);
+							});
+						}
+					} else if (bindRaw !== "" && !(typeof props.sessionId === "string" && props.sessionId !== "")) {
+						console.warn("[dsh-workbench] 起会话后暂无 session id，绑定推迟；会话可能暂进未归类");
 					}
 				} catch (error) { /* 无 sessionStorage 就没有任务条，不影响发消息 */ }
-				/* 模型偏好（装配台选的）：先绑给这个会话再发第一条消息 ——
-				 * Host 在下一次提示词组装时对选择做快照，绑完再发才能用上。
-				 * 绑失败不挡发送：console 说话，照常按默认模型发。 */
 				var pendingModel = null;
 				try {
-					var mpRaw = sessionStorage.getItem(WB_KEY.modelPending);
-					if (mpRaw !== null && mpRaw !== "") {
-						sessionStorage.removeItem(WB_KEY.modelPending);
-						pendingModel = JSON.parse(mpRaw);
-					}
-				} catch (error) { /* 没有偏好就发默认 */ }
+					var modelRaw = sessionStorage.getItem(WB_KEY.modelPending) || "";
+					if (modelRaw !== "") { sessionStorage.removeItem(WB_KEY.modelPending); pendingModel = JSON.parse(modelRaw); }
+				} catch (error) { pendingModel = null; }
 				function submitDraft() {
-					actions.setDraft(text);
-					actions.submit();
+					if (!batchEntry) { questionBinding.then(function () { actions.setDraft(text); actions.submit(); }); return; }
+					questionBinding.then(async function () {
+						function alive() { return relayLive.current && relayLive.current.sessionId === props.sessionId && relayLive.current.key === relayKey && wbBatchKey(props.sessionId) === relayKey; }
+						if (!alive()) return;
+						if (batchEntry.batch.driver === "server") {
+							// The one initial relay stays in the composer path. No record claim:
+							// the server recognizes the round marker in this first user turn.
+							if (batchEntry.stopping || batchEntry.batch.status !== "running" || batchEntry.batch.records[0].status !== "pending") return;
+							actions.setDraft(wbRoundPrompt(text, batchEntry.batch, 1)); await actions.submit(); return;
+						}
+						if (!batchEntry.batch.session_id && !await wbBatchSave(batchEntry, { session_id: props.sessionId })) return;
+						await wbBatchSend(batchEntry, actions, text, alive);
+					}).finally(function () { batchEntry.relayPending = false; });
 				}
-				var canBind = pendingModel !== null && pendingModel !== undefined
-					&& typeof props.sessionId === "string" && props.sessionId !== ""
-					&& props.wbCtx && props.wbCtx.sessions && typeof props.wbCtx.sessions.selectModel === "function";
-				if (canBind) {
-					var selReq = {
-						sessionId: props.sessionId,
-						provider: String(pendingModel.provider || ""),
-						model: String(pendingModel.model || ""),
-					};
-					if (pendingModel.effort !== undefined && pendingModel.effort !== null && pendingModel.effort !== "") {
-						selReq.reasoningEffort = String(pendingModel.effort);
-					}
-					props.wbCtx.sessions.selectModel(selReq).then(submitDraft, function (error) {
-						console.warn("[dsh-workbench] 模型没绑上，用默认发：", String(error));
-						submitDraft();
-					});
-					return;
-				}
-				submitDraft();
+				var sessions = props.wbCtx && typeof props.wbCtx.get === "function" ? props.wbCtx.get("sessions") : null;
+				if (pendingModel && sessions && typeof sessions.selectModel === "function" && props.sessionId) {
+					var req = { sessionId: props.sessionId, provider: String(pendingModel.provider || ""), model: String(pendingModel.model || "") };
+					if (pendingModel.effort) req.reasoningEffort = String(pendingModel.effort);
+					Promise.resolve(sessions.selectModel(req)).then(submitDraft, submitDraft);
+				} else submitDraft();
 			};
 
 			React.useEffect(function () {
 				consumeRef.current();
-			}, [actions, isEmpty]);
+			}, [actions, isEmpty, props.sessionId]);
 
 			/* dispatch() 设好 pendingPrompt 后派发的事件：让"当前已挂着的
 			 * 空白会话"（deps 都没变的那种）也能立刻消费，不等下一次渲染。 */
@@ -1309,6 +3056,20 @@ window.__ModuleLoader__.load({
 				window.addEventListener("wb-prompt-set", onSet);
 				return function () { window.removeEventListener("wb-prompt-set", onSet); };
 			}, []);
+
+			/* session id 晚到：pending-bind 还在就补绑一次（不挡消息）。 */
+			React.useEffect(function () {
+				if (typeof props.sessionId !== "string" || props.sessionId === "") return;
+				if (pendingPrompt !== null && props.sessionId !== pendingPrompt.sessionId) return;
+				var bindRaw = "";
+				try { bindRaw = sessionStorage.getItem("wb-pending-bind") || ""; } catch (e) { return; }
+				if (bindRaw === "") return;
+				var bind = null;
+				try { bind = JSON.parse(bindRaw); } catch (e2) { return; }
+				if (!bind || typeof bind !== "object") return;
+				try { sessionStorage.removeItem("wb-pending-bind"); } catch (e3) { /* */ }
+				bindSessionClient(props.sessionId, bind);
+			}, [props.sessionId]);
 			return null;
 		}
 
@@ -1321,9 +3082,15 @@ window.__ModuleLoader__.load({
 			 * body 下没有这层，浮层定位稳定。左=草稿列表，右=正文 + 确认入库。 */
 			var WbCtx = null; /* apply 时赋值：TaskBar 自动弹侧栏用 */
 
-			function wbOpenReview(client, onChanged) {
+			function wbLibraryQuery(client, sessionId, metaId) {
+				return "?client=" + encodeURIComponent(client || "")
+					+ "&session_id=" + encodeURIComponent(sessionId || "")
+					+ "&meta_id=" + encodeURIComponent(metaId || "");
+			}
+
+			function wbOpenReview(client, onChanged, clientKey, sessionId, metaId) {
 				var old = document.getElementById("wb-review-overlay");
-				if (old) old.remove();
+				if (old) { if (old.wbDisposeSplitter) old.wbDisposeSplitter(); old.remove(); }
 				var wrap = document.createElement("div");
 				wrap.id = "wb-review-overlay";
 				wrap.className = "wb_reviewWrap";
@@ -1334,7 +3101,13 @@ window.__ModuleLoader__.load({
 				head.innerHTML = '<div><div class="wb_reviewTitle">产物审核</div><div class="wb_reviewSub">客户「' + client + '」 · 确认后才正式入库</div></div>';
 				var closeBtn = document.createElement("button");
 				closeBtn.type = "button"; closeBtn.className = "wb_reviewClose"; closeBtn.textContent = "关闭";
-				closeBtn.onclick = function () { wrap.remove(); };
+				function closeReview() {
+					if (wrap.hasAttribute("data-wb-leave")) return;
+					wrap.wbDisposeSplitter();
+					wrap.setAttribute("data-wb-leave", "1"); wrap.inert = true;
+					wbAfterMotion(function () { wrap.remove(); });
+				}
+				closeBtn.onclick = closeReview;
 				head.appendChild(closeBtn);
 				var bodyEl = document.createElement("div");
 				bodyEl.className = "wb_reviewBody";
@@ -1345,10 +3118,17 @@ window.__ModuleLoader__.load({
 				bodyEl.appendChild(listEl); bodyEl.appendChild(mainEl);
 				card.appendChild(head); card.appendChild(bodyEl);
 				wrap.appendChild(card);
-				wrap.addEventListener("click", function (e) { if (e.target === wrap) wrap.remove(); });
+				wrap.addEventListener("click", function (e) { if (e.target === wrap) closeReview(); });
 				document.body.appendChild(wrap);
+				wrap.wbDisposeSplitter = wbMountReviewSplitter(bodyEl);
 
 				var mainTitle = null, mainText = null, mainFoot = null, msgEl = null, currentTitle = "";
+				var resolvedSessionId = typeof sessionId === "string" ? sessionId : "";
+				var resolvedClientKey = String(clientKey || "");
+				var resolvedMetaId = String(metaId || "");
+				var bound = resolvedSessionId && wbNavState.bindings ? wbNavState.bindings[resolvedSessionId] : null;
+				if (bound && !resolvedClientKey) resolvedClientKey = String(bound.client_key || "");
+				if (bound && !resolvedMetaId) resolvedMetaId = String(bound.meta_id || "");
 				function ensureMain() {
 					if (mainTitle) return;
 					mainTitle = document.createElement("div"); mainTitle.className = "wb_reviewMainTitle";
@@ -1361,7 +3141,8 @@ window.__ModuleLoader__.load({
 					mainEl.appendChild(mainTitle); mainEl.appendChild(mainText); mainEl.appendChild(mainFoot);
 				}
 				function loadDrafts() {
-					fetch(WB_API.drafts + "?client=" + encodeURIComponent(client), { headers: { accept: "application/json" } })
+					if (!listEl.children.length) wbShowSkeleton(listEl, "草稿列表加载中…");
+					fetch(WB_API.drafts + wbLibraryQuery(client, resolvedSessionId, resolvedMetaId), { headers: { accept: "application/json" } })
 						.then(function (r) { return r.json(); })
 						.then(function (b) {
 							listEl.innerHTML = "";
@@ -1372,7 +3153,7 @@ window.__ModuleLoader__.load({
 								item.type = "button"; item.className = "wb_reviewItem";
 								if (d.title === currentTitle) item.setAttribute("data-on", "1");
 								var t1 = document.createElement("span"); t1.className = "wb_reviewItemTitle"; t1.textContent = d.title;
-								var t2 = document.createElement("span"); t2.className = "wb_reviewItemMeta"; t2.textContent = Math.round(d.chars / 100) / 10 + "k 字 · " + (d.updatedAt || "").slice(5, 16).replace("T", " ");
+								var t2 = document.createElement("span"); t2.className = "wb_reviewItemMeta"; t2.textContent = Math.round(d.chars / 100) / 10 + "k 字 · " + beijingStamp(d.updatedAt).slice(5, 16).replace("T", " ");
 								item.appendChild(t1); item.appendChild(t2);
 								item.onclick = function () { openBody(d.title); loadDrafts(); };
 								listEl.appendChild(item);
@@ -1383,8 +3164,8 @@ window.__ModuleLoader__.load({
 				function openBody(title) {
 					currentTitle = title; ensureMain();
 					mainTitle.textContent = title;
-					mainText.textContent = "加载中…"; mainFoot.style.display = "none";
-					fetch(WB_API.draft + "?client=" + encodeURIComponent(client) + "&title=" + encodeURIComponent(title), { headers: { accept: "text/markdown" } })
+					wbShowSkeleton(mainText, "加载中…"); mainFoot.style.display = "none";
+					fetch(WB_API.draft + wbLibraryQuery(client, resolvedSessionId, resolvedMetaId) + "&title=" + encodeURIComponent(title), { headers: { accept: "text/markdown" } })
 						.then(function (r) { return r.text(); })
 						.then(function (text) { mainText.textContent = text; mainFoot.style.display = "flex"; })
 						.catch(function (e) { mainText.textContent = "读取失败：" + String(e); });
@@ -1393,7 +3174,13 @@ window.__ModuleLoader__.load({
 					if (!title) return;
 					fetch(WB_API.confirmDraft, {
 						method: "POST", headers: { "content-type": "application/json", accept: "application/json" },
-						body: JSON.stringify({ client: client, title: title }),
+						body: JSON.stringify({
+							client: client,
+							client_key: resolvedClientKey,
+							title: title,
+							session_id: resolvedSessionId,
+							meta_id: resolvedMetaId,
+						}),
 					})
 						.then(function (r) { return r.json().then(function (b) { return { code: r.status, body: b }; }); })
 						.then(function (res) {
@@ -1415,7 +3202,7 @@ window.__ModuleLoader__.load({
 			 * "会话→客户"来自我们自己的映射表；新客户在装配台勾选即出现，
 			 * 不需要预先建任何组。绝不改动官方组件内部（历史教训：一改就崩）。 */
 			var WB_NAV_W = 330;
-			var wbNavState = { sessions: null, map: {}, q: "", open: {}, current: "", navW: 330 };
+			var wbNavState = { sessions: null, map: {}, q: "", open: {}, current: "", navW: 330, drawer: false, bindings: {}, customers: [], clientsReady: false, uid: "", renames: {}, renameErrors: {}, statusInfo: Object.create(null) };
 			try {
 				var savedW = parseInt(localStorage.getItem(WB_KEY.navW) || "0", 10);
 				if (savedW >= 200 && savedW <= 480) wbNavState.navW = savedW;
@@ -1425,6 +3212,13 @@ window.__ModuleLoader__.load({
 				try {
 					var fr = document.querySelector('[class*="frame"]');
 					if (fr === null || fr.style.gridTemplateColumns === "") return;
+					/* On phones the official shell columns stay mounted for the drawer,
+					 * but they must not reserve any width. The desktop nav width is
+					 * restored only when the media query is false. */
+					if (WB_MOBILE.matches) {
+						fr.style.gridTemplateColumns = "0px minmax(0, 1fr) 0px";
+						return;
+					}
 					var cols = fr.style.gridTemplateColumns.split(/\s+/);
 					var want = wbNavState.navW + "px";
 					if (cols[0] !== want) { cols[0] = want; fr.style.gridTemplateColumns = cols.join(" "); }
@@ -1433,13 +3227,274 @@ window.__ModuleLoader__.load({
 			var wbNavSubs = [];
 			var wbFrameMo = null;
 			function wbNavEmit() { wbNavSubs.forEach(function (f) { try { f(); } catch (e) { } }); }
+			var wbRunState = null;
+			var wbNavStatusPoll = null;
+			function wbNavRunState() {
+				var uid = (window.dshUnified && window.dshUnified.store && window.dshUnified.store.state && window.dshUnified.store.state.uid) || wbNavState.uid || '';
+				if (!wbRunState || wbRunState.uid !== uid) {
+					wbNavState.statusInfo = Object.create(null);
+					wbRunState = {uid:uid, unread:wbReadUnread(uid), previous:Object.create(null), observed:Object.create(null), readErrors:Object.create(null), seenBatches:wbReadBatchSeen(uid)};
+				}
+				return wbRunState;
+			}
+			function wbRunErrorKey(snapshot) { return JSON.stringify([snapshot && snapshot.lastAgentError || null, snapshot && snapshot.promptError || null]); }
+			function wbNavBatch(id) {
+				var local = wbBatchFor(id), info = wbNavState.statusInfo[id], remote = info && info.batch;
+				if (local && local.driver === 'server' && (!remote || remote.driver !== 'server')) return local;
+				if (remote && remote.driver === 'server' && (!local || local.driver !== 'server')) return remote;
+				// A poll can arrive after a local relay save; prefer the newer persisted version.
+				return local && (!remote || String(local.savedAt || '') >= String(remote.savedAt || '')) ? local : remote;
+			}
+			function wbNavSelect(id) {
+				var state = wbNavRunState(), observed = state.observed[id];
+				wbNavState.current = id;
+				delete state.unread[id];
+				state.readErrors[id] = wbRunErrorKey(observed && observed.snapshot);
+				if (id) {
+					var batch = wbNavBatch(id);
+					state.seenBatches[id] = {batchId:batch && batch.status === 'failed_partial' ? batch.id : '', at:Date.now()};
+					wbWriteBatchSeen(state);
+				}
+				wbWriteUnread(state.uid, state.unread);
+				wbNavEmit();
+			}
+			function wbNavStatus(id) {
+				var state = wbNavRunState(), observed = state.observed[id] || {};
+				var batch = wbNavBatch(id), current = id === wbNavState.current;
+				return wbRunStatus({id:id, summary:wbNavState.sessions && wbNavState.sessions[id], snapshot:observed.snapshot,
+					pendingInteraction:observed.pending, failureRead:state.readErrors[id] === wbRunErrorKey(observed.snapshot),
+					unread:state.unread, isCurrent:current, batch:batch, statusInfo:wbNavState.statusInfo[id],
+					batchFailureRead:wbBatchWasSeen(batch, state.seenBatches[id]),
+					batchDriven:current && batch && (wbBatchViews[wbBatchKey(id)] || []).some(function (view) { return view.batchId === batch.id && view.driving; })});
+			}
+			function wbNavNeedsViewCount() {
+				// Search and collapsed groups do not acknowledge sessions or hide their reminders.
+				return wbNeedsViewCount(Object.keys(wbNavState.map).map(wbNavStatus));
+			}
+			function useWbNeedsViewCount() {
+				var count = React.useState(wbNavNeedsViewCount);
+				React.useEffect(function () {
+					function changed() { count[1](wbNavNeedsViewCount()); }
+					wbNavSubs.push(changed); changed();
+					return function () { wbNavSubs = wbNavSubs.filter(function (fn) { return fn !== changed; }); };
+				}, []);
+				return count[0];
+			}
+			function wbNavWatchTitle() {
+				var state;
+				function update() {
+					state = wbTabTitleState(document.title, wbNavNeedsViewCount(), state);
+					if (document.title !== state.title) document.title = state.title;
+				}
+				// Observe the head so host replacement of the title element is handled too.
+				var observer = new MutationObserver(function () { if (document.title !== state.title) update(); });
+				update();
+				observer.observe(document.head, {childList:true, subtree:true, characterData:true});
+				wbNavSubs.push(update);
+				return function () {
+					observer.disconnect();
+					wbNavSubs = wbNavSubs.filter(function (fn) { return fn !== update; });
+					if (document.title === state.title) document.title = state.base;
+				};
+			}
+			function wbNavRememberBatch(id) {
+				var state = wbNavRunState(), batch = wbNavBatch(id), seen = state.seenBatches[id];
+				if (batch && batch.status === 'failed_partial' && (!seen || seen.batchId !== batch.id)
+					&& (id === wbNavState.current || wbBatchWasSeen(batch, seen))) {
+					state.seenBatches[id] = {batchId:batch.id, at:Date.now()};
+					wbWriteBatchSeen(state);
+				}
+			}
+			function wbNavBatchChanged() {
+				wbNavRememberBatch(wbNavState.current);
+				wbNavEmit();
+			}
+			function wbNavStatusIds() {
+				return Object.keys(wbNavState.map).filter(function (id) {
+					var rec = wbNavState.map[id], name = rec && rec.client || '其他';
+					var title = wbNavState.renames[id] ? wbNavState.renames[id].title : wbSessionTitle(rec, wbNavState.sessions && wbNavState.sessions[id]);
+					return !wbNavState.q || title.indexOf(wbNavState.q) >= 0 || name.indexOf(wbNavState.q) >= 0;
+				}).sort();
+			}
+			function wbNavPollSessionStatus() {
+				var disposed = false, busy = false, again = false, timer = null, signature = '';
+				function visible() { return !disposed && document.visibilityState === 'visible'; }
+				async function refresh() {
+					if (!visible()) return;
+					if (busy) { again = true; return; }
+					busy = true;
+					var state = wbNavRunState(), ids = wbNavStatusIds();
+					try {
+						for (var i = 0; i < ids.length && visible() && state === wbNavRunState(); i += 50) {
+							var chunk = ids.slice(i, i + 50);
+							var before = Object.create(null);
+							chunk.forEach(function (id) { before[id] = wbBatchFor(id); });
+							try {
+								var replies = await Promise.all([
+									fetch(WB_API.sessionStatus + '?ids=' + encodeURIComponent(chunk.join(',')), {method:'GET', headers:{accept:'application/json'}}).then(function (r) { return r.json(); }).catch(function () { return null; }),
+									(async function () {
+										if (!await wbServerBatch()) return null;
+										try {
+											var r = await fetch(WB_API.serverBatch + '?session_ids=' + encodeURIComponent(chunk.join(',')), {method:'GET', headers:{accept:'application/json'}});
+											return await r.json();
+										} catch (e) { return null; }
+									})()
+								]);
+								if (!visible() || state !== wbNavRunState()) break;
+								var body = replies[0], serverBody = replies[1];
+								var items = body && body.ok && body.items && typeof body.items === 'object' ? body.items : null;
+								var batches = serverBody && serverBody.ok && serverBody.items && typeof serverBody.items === 'object' ? serverBody.items : null;
+								if (!items && !batches) continue;
+								var merged = wbMergeBatchStatus(items || wbNavState.statusInfo, batches);
+								var listed = wbNavStatusIds();
+								chunk.forEach(function (id) {
+									delete wbNavState.statusInfo[id]; // Omitted ACL records must also disappear locally.
+									if (batches && !batches[id]) {
+										if (before[id] && before[id].driver === 'server' && wbBatchFor(id) === before[id]) delete wbBatches[wbBatchKey(id)];
+										if (merged[id] && merged[id].batch && merged[id].batch.driver === 'server') merged[id] = Object.assign({}, merged[id], {batch:null, finished_at:null});
+									}
+									if (listed.includes(id) && Object.prototype.hasOwnProperty.call(merged, id)) {
+										wbNavState.statusInfo[id] = merged[id];
+										if (batches) wbRememberServerBatch(id, batches[id]);
+									}
+									wbNavRememberBatch(id);
+								});
+								if (batches) wbBatchEmit();
+								wbNavBatchChanged();
+							} catch (e) { /* Keep the last successful projection until the next visible poll. */ }
+						}
+					} finally {
+						busy = false;
+						if (again) { again = false; refresh(); }
+					}
+				}
+				function changed() {
+					var next = JSON.stringify([wbNavRunState().uid, wbNavStatusIds()]);
+					if (next !== signature) { signature = next; refresh(); }
+				}
+				function visibility() {
+					if (timer !== null) clearInterval(timer);
+					timer = null;
+					if (visible()) { refresh(); timer = setInterval(refresh, 10000); }
+				}
+				signature = JSON.stringify([wbNavRunState().uid, wbNavStatusIds()]);
+				wbNavSubs.push(changed);
+				document.addEventListener('visibilitychange', visibility);
+				visibility();
+				return {refresh:refresh, dispose:function () {
+					disposed = true;
+					if (timer !== null) clearInterval(timer);
+					document.removeEventListener('visibilitychange', visibility);
+					wbNavSubs = wbNavSubs.filter(function (fn) { return fn !== changed; });
+				}};
+			}
+			function wbNavSnapshot(snapshot) {
+				if (!snapshot || (snapshot.phase && snapshot.phase !== 'ready')) return;
+				wbNavState.sessions = snapshot.byId || {};
+				if ('current' in snapshot && (snapshot.current || '') !== wbNavState.current) wbNavSelect(snapshot.current || '');
+				var state = wbNavRunState(), next = wbUnreadNext(state, wbNavState.sessions, wbNavState.current, Date.now());
+				var finished = false;
+				Object.keys(next.previous).forEach(function (id) {
+					if (state.previous[id] && state.previous[id].running && !next.previous[id].running) finished = true;
+					if (next.previous[id].running && (!state.previous[id] || !state.previous[id].running)) {
+						delete state.readErrors[id];
+						if (id !== wbNavState.current) delete state.observed[id];
+					}
+				});
+				if (JSON.stringify(next.unread) !== JSON.stringify(state.unread)) wbWriteUnread(state.uid, next.unread);
+				state.unread = next.unread; state.previous = next.previous;
+				wbNavEmit();
+				if (finished && wbNavStatusPoll) wbNavStatusPoll.refresh();
+			}
+			function wbNavSubscribe(ctx) {
+				try {
+					var svc = ctx && typeof ctx.get === 'function' && ctx.get('sessions'), list = svc && svc.list;
+					if (!list || typeof list.getSnapshot !== 'function') return function () {};
+					function changed() { try { wbNavSnapshot(list.getSnapshot()); } catch (e) { } }
+					var dispose = typeof list.subscribe === 'function' ? list.subscribe(changed) : null;
+					changed();
+					return typeof dispose === 'function' ? dispose : function () {};
+				} catch (e) { return function () {}; }
+			}
+			/* Only injected hooks: no materializing background sessions or private RPCs. */
+			function useWbRunStatus(props) {
+				var session = typeof props.useSession === 'function' ? props.useSession(function (s) { return s; }) : null;
+				var id = props.sessionId, uid = wbNavRunState().uid;
+				/* Harness hook is a selector hook over Map<sessionId, interaction>; select a stable kind string. */
+				var pending = typeof props.useSessionPendingInteraction === 'function' ? props.useSessionPendingInteraction(function (m) { var v = m && typeof m.get === 'function' ? m.get(id) : null; return v && typeof v.kind === 'string' ? v.kind : null; }) : null;
+				React.useEffect(function () {
+					if (!id) return;
+					var state = wbNavRunState();
+					if (session) state.observed[id] = {snapshot:session, pending:pending};
+					wbNavSelect(id); // Opening acknowledges even an already-materialized error.
+				}, [id, uid]);
+				React.useEffect(function () {
+					if (!id) return;
+					wbNavRunState().observed[id] = {snapshot:session, pending:pending};
+					wbNavEmit();
+				}, [id, uid, session, pending]);
+			}
+			async function wbNavReadSessions() {
+				// Only retire edits already saved when this refresh starts.
+				var saved = {};
+				Object.keys(wbNavState.renames).forEach(function (id) {
+					if (!wbNavState.renames[id].saving) saved[id] = wbNavState.renames[id];
+				});
+				try {
+					var ctx = wbNavCtx || WbCtx;
+					var svc = ctx && typeof ctx.get === 'function' && ctx.get('sessions');
+					if (!svc || !svc.list || typeof svc.list.getSnapshot !== 'function') return;
+					if (typeof svc.refresh === 'function') await svc.refresh();
+					var snapshot = svc.list.getSnapshot();
+					if (!snapshot || (snapshot.phase && snapshot.phase !== 'ready')) return;
+					wbNavSnapshot(snapshot);
+					Object.keys(saved).forEach(function (id) {
+						if (wbNavState.renames[id] === saved[id] && wbNavState.sessions[id]) delete wbNavState.renames[id];
+					});
+					wbNavEmit();
+				} catch (e) { /* Older seats may not expose the sessions service. */ }
+			}
+			async function wbNavRename(ctx, id, text, previous) {
+				if (!wbTitleToSave(text, previous) || (wbNavState.renames[id] && wbNavState.renames[id].saving)) return;
+				delete wbNavState.renameErrors[id];
+				try {
+					await wbSaveSessionTitle(ctx, id, text, previous, function (title) {
+						if (title === previous) delete wbNavState.renames[id];
+						else wbNavState.renames[id] = { title: title, saving: true };
+						wbNavEmit();
+					});
+					wbNavState.renames[id].saving = false;
+					wbNavReadSessions();
+				} catch (e) {
+					wbNavState.renameErrors[id] = e.message; wbNavEmit(); throw e;
+				}
+			}
 			function wbNavRefresh() {
-				/* 清单=登记表本身（装配台发起的每个会话都在）：id→{client,topic,at}。
-				 * 点开会话走官方 ctx.sessions.open；登记即出现，新客户零成本。 */
-				fetch(WB_API.clientMap, { headers: { accept: "application/json" } })
-					.then(function (r) { return r.json(); })
-					.then(function (b) { if (b && b.ok === true) { wbNavState.map = b.map || {}; wbNavEmit(); } })
-					.catch(function () { });
+				wbNavReadSessions();
+				/* 组装清单优先读正式 P1 session-client 索引，再合并 Noah 的
+				 * client-map（topic/旧会话兼容）。客户显示名来自 list_clients。
+				 * 单个兼容路由尚未热上的过渡期不应遮住正式索引。 */
+				function readNav(url) {
+					return (url === CLIENTS_PATH ? wbFetchClients()
+						: fetch(url, { headers: { accept: "application/json" } }).then(readWorkbenchList)).catch(function () { return {}; });
+				}
+				Promise.all([
+					readNav(WB_API.sessionClient),
+					readNav(WB_API.clientMap),
+					readNav(WB_API.clients),
+				]).then(function (rows) {
+					var bindingBody = rows[0] || {};
+					var mapBody = rows[1] || {};
+					var clientBody = rows[2] || {};
+					if (bindingBody.ok === true) wbNavState.bindings = bindingBody.index || {};
+					if (mapBody.ok === true) wbNavState.map = mapBody.map || {};
+					if (clientBody.ok === true) { wbNavState.customers = clientBody.customers || []; wbNavState.clientsReady = true; }
+					if (wbNavState.clientsReady) {
+						wbNavState.bindings = wbAuthorizedRecords(wbNavState.bindings, wbNavState.customers);
+						wbNavState.map = wbAuthorizedRecords(wbNavState.map, wbNavState.customers);
+					}
+					wbNavEmit();
+				}).catch(function () { });
 			}
 			var wbNavCtx = null;
 			var wbNavHideDone = false;
@@ -1480,9 +3535,11 @@ window.__ModuleLoader__.load({
 
 			function SidebarNav(props) {
 				var st = React.useState(0);
+				React.useEffect(wbNavWatchTitle, []);
 				React.useEffect(function () {
-					wbNavSubs.push(function () { st[1](function (x) { return x + 1; }); });
-					return function () { wbNavSubs = wbNavSubs.filter(function (x) { return x !== undefined; }); };
+					function changed() { st[1](function (x) { return x + 1; }); }
+					wbNavSubs.push(changed);
+					return function () { wbNavSubs = wbNavSubs.filter(function (x) { return x !== changed; }); };
 				}, []);
 				/* shell.overlay 的 props 里没有 ctx —— 注册时用闭包把插件 ctx 传进来 */
 				var ctx = (props && props.wbCtx) ? props.wbCtx : (props && props.ctx ? props.ctx : null);
@@ -1567,13 +3624,16 @@ window.__ModuleLoader__.load({
 					} catch (e) { }
 				}
 				React.useEffect(function () {
+					var unsubscribe = wbNavSubscribe(ctx);
+					window.addEventListener('wb:batch-change', wbNavBatchChanged);
+					var statusPoll = wbNavStatusPoll = wbNavPollSessionStatus();
 					wbNavRefresh();
 					var stop = false;
 					function tick() { if (!stop) { wbNavRefresh(); wbNavHideOfficial(); } }
 					var timerId = setInterval(tick, 4000);
 					wbNavHideOfficial();
-					return function () { stop = true; clearInterval(timerId); };
-				}, []);
+					return function () { stop = true; clearInterval(timerId); unsubscribe(); statusPoll.dispose(); if (wbNavStatusPoll === statusPoll) wbNavStatusPoll = null; window.removeEventListener('wb:batch-change', wbNavBatchChanged); };
+				}, [ctx]);
 				var q = wbNavState.q;
 				var map = wbNavState.map;
 				/* 组装：客户 → [{id,title,at}]，按登记时间倒序 */
@@ -1581,7 +3641,7 @@ window.__ModuleLoader__.load({
 				Object.keys(map).forEach(function (id) {
 					var rec = map[id];
 					var m = rec && rec.client ? rec.client : "其他";
-					var title = rec && rec.topic ? rec.topic : "未命名会话";
+					var title = wbNavState.renames[id] ? wbNavState.renames[id].title : wbSessionTitle(rec, wbNavState.sessions && wbNavState.sessions[id]);
 					if (q !== "" && title.indexOf(q) < 0 && m.indexOf(q) < 0) return;
 					if (groups[m] === undefined) groups[m] = [];
 					groups[m].push({ id: id, title: title, at: rec && rec.at ? rec.at : "" });
@@ -1598,7 +3658,7 @@ window.__ModuleLoader__.load({
 					 * 优先 uiWorkspace.openSession（内部处理挂载），传登记时的原样 id。 */
 					try {
 						var raw = String(id);
-						wbNavState.current = raw; wbNavEmit();   // 树里高亮当前位置
+						wbNavSelect(raw);   // Highlight and acknowledge before host navigation.
 						var w = ctx && typeof ctx.get === "function" ? ctx.get("uiWorkspace") : null;
 						if (w && typeof w.openSession === "function") { w.openSession(raw); return; }
 						var s = ctx && typeof ctx.get === "function" ? ctx.get("sessions") : null;
@@ -1610,6 +3670,11 @@ window.__ModuleLoader__.load({
 						var l = ctx && typeof ctx.get === "function" ? ctx.get("layout") : null;
 						if (l && typeof l.selectPanel === "function") l.selectPanel(WORKBENCH_KEY);
 					} catch (e) { console.warn("[dsh-workbench] 打开新建任务失败：", String(e)); }
+				}
+				var mobile = useWbMobile();
+				if (mobile) {
+					var me = { label: "生文 Agent", sub: "" };
+					return h(WbPresence, null, wbNavState.drawer ? h(MobileDrawer, { groups: groups, names: names, me: me, compose: goCompose, openSession: openSession, close: function () { wbNavState.drawer = false; wbNavEmit(); } }) : null);
 				}
 				return h("div", { className: "wb_nv", style: { width: String(wbNavState.navW) + "px" } },
 					h("div", { className: "wb_nvBrand" }, h("span", { className: "wb_nvBrandT" }, "生文 Agent")),
@@ -1644,21 +3709,15 @@ window.__ModuleLoader__.load({
 									var open = wbNavState.open[name] !== false;
 									return h("div", { key: name, className: "wb_nvGroup" },
 										h("button", {
-											type: "button", className: "wb_nvGroupName",
+											type: "button", className: "wb_nvGroupName", 'aria-expanded': open,
 											onClick: function () {
 												wbNavState.open[name] = !open; wbNavEmit();
 											},
-										}, (open ? "▾ " : "▸ ") + name + "（" + groups[name].length + "）"),
-										open ? groups[name].map(function (it) {
-											/* 对齐原型："09-18 · 老榜单" —— 登记日期做前缀 */
-											var label = (it.at && it.at.length >= 10 ? it.at.slice(5, 10) + " · " : "") + it.title;
-											return h("button", {
-												type: "button", key: String(it.id),
-												className: "wb_nvItem" + (it.id === wbNavState.current ? " wb_nvCur" : ""),
-												title: label,
-												onClick: function () { openSession(it.id); },
-											}, label);
-										}) : null);
+										}, h('span', {className:'wb_nvLabel'}, (open ? "▾ " : "▸ ") + name + "（" + groups[name].length + "）"),
+											h(WbGroupIndicator, {open:open, items:groups[name]})),
+										h(WbCollapse, { open: open }, groups[name].map(function (it) {
+											return h(WbSessionRow, { key: String(it.id), item: it, ctx: ctx, open: openSession });
+										})));
 								}))));
 			}
 
@@ -1735,11 +3794,25 @@ window.__ModuleLoader__.load({
 			 * 已入库段落绿底锁定 / 正文渲染 / 底部 hint+确认(勾选数)+全部确认。
 			 * 客户来源：openTab params 优先，否则从当前会话解析。 */
 			function ReviewTabBody(props) {
+				var mobile = useWbMobile() && !props.unifiedPanel;
+				var mobileReview = React.useState(false);
+				React.useEffect(function () {
+					function openBatch(e) { if (props.mobileInline && e.detail && e.detail.sessionId === props.sessionId) mobileReview[1](true); }
+					window.addEventListener("wb:batch-review", openBatch);
+					return function () { window.removeEventListener("wb:batch-review", openBatch); };
+				}, [props.sessionId, props.mobileInline]);
 				var sessionId = props.sessionId;
 				var useChat = props.useChat;
-				var st = React.useState({ client: "", drafts: null, sel: "", body: "", msg: "", done: {}, editing: false, editText: "", saving: false });
-				var client = st[0].client, drafts = st[0].drafts, sel = st[0].sel, bodyText = st[0].body, msg = st[0].msg, doneMap = st[0].done;
+				var initialBinding = sessionId && wbNavState.bindings ? wbNavState.bindings[sessionId] : null;
+				var st = React.useState({ client: "", client_key: initialBinding && initialBinding.client_key || "", drafts: null, sel: "", body: "", msg: "", done: {}, editing: false, editText: "", saving: false });
+				var client = st[0].client, clientKey = st[0].client_key, drafts = st[0].drafts, sel = st[0].sel, bodyText = st[0].body, msg = st[0].msg, doneMap = st[0].done;
 				var setL = st[1];
+				React.useEffect(function () {
+					if (!props.unifiedPanel || !window.dshUnified) return;
+					var guard = function () { return !st[0].editing && !st[0].saving && !st[0].confirming; };
+					window.dshUnified.reviewCanLeave = guard;
+					return function () { if (window.dshUnified.reviewCanLeave === guard) delete window.dshUnified.reviewCanLeave; };
+				}, [props.unifiedPanel, st[0].editing, st[0].saving, st[0].confirming]);
 				useWbPickTick();   // 勾选集合在输入框挑篇条里维护 —— 订阅它，选中变化时这里跟着重渲
 				var checked = WB_PICK.sel;
 				var checkedCount = drafts === null ? 0 : drafts.filter(function (d) {
@@ -1747,13 +3820,15 @@ window.__ModuleLoader__.load({
 				}).length;
 
 				/* 客户解析：params → 当前会话首条 user 消息的任务编号 → meta.client */
-				var clientFromParams = null;
+				var clientFromParams = null, clientKeyFromParams = null;
 				try {
 					var info = typeof props.useTabInfo === "function" ? props.useTabInfo() : null;
-					clientFromParams = info && info.navigation && info.navigation.params ? (info.navigation.params.client || null) : null;
+					var navParams = info && info.navigation && info.navigation.params ? info.navigation.params : null;
+					clientFromParams = navParams ? (navParams.client || null) : null;
+					clientKeyFromParams = navParams ? (navParams.client_key || null) : null;
 				} catch (e) { }
 				var chatSnap = null;
-				if (!clientFromParams && typeof useChat === "function" && sessionId) {
+				if ((!mobile || !clientFromParams || props.unifiedPanel) && typeof useChat === "function" && sessionId) {
 					chatSnap = useChat(function (s) { return s; });
 				}
 				var metaId = "";
@@ -1766,22 +3841,11 @@ window.__ModuleLoader__.load({
 				/* 本会话产物归属：数消息流里成功的 write_article 调用（argsRaw 带 title）。
 				 * 文件时刻会串会话（别的会话后入库也会晚于本任务发起），
 				 * 消息流留痕才是真正的会话归属。 */
-				var writeTitles = {};
-				if (Array.isArray(legacyNodes)) {
-					for (var wsi = 0; wsi < legacyNodes.length; wsi++) {
-						var wsn = legacyNodes[wsi];
-						if (wsn && wsn.kind === "tool-result" && wsn.call
-							&& wsn.call.name === "mcp__sora-articles__write_article" && wsn.isError !== true) {
-							try {
-								var wargs = JSON.parse(wsn.call.argsRaw || "{}");
-								var wtitle = String(wargs.title || wargs.file || "").replace(/\.md$/i, "");
-								if (wtitle !== "") writeTitles[wtitle] = true;
-							} catch (e) { }
-						}
-					}
-				}
-				var writeCount = 0;
-				for (var wtk in writeTitles) writeCount++;
+				var writeTitles = wbWrittenTitles(legacyNodes);
+				var writeCount = Array.isArray(legacyNodes) ? legacyNodes.filter(wbIsSuccessfulWrite).length : 0;
+				var reviewBatch = wbBatchFor(sessionId);
+				wbBatchTitles(reviewBatch, writeTitles);
+				if (mobile || reviewBatch) { writeCount = 0; for (var wtk in writeTitles) writeCount++; }
 				var list = (metaId === "" && Array.isArray(legacyNodes)) ? legacyNodes : null;
 				for (var i = 0; list !== null && i < list.length; i++) {
 					var node = list[i];
@@ -1797,17 +3861,31 @@ window.__ModuleLoader__.load({
 					}
 				}
 				React.useEffect(function () {
-					if (clientFromParams) { setL(function (p) { return Object.assign({}, p, { client: clientFromParams }); }); return; }
-					if (metaId === "") { setL(function (p) { return Object.assign({}, p, { client: "" }); }); return; }
 					var alive = true;
-					fetch(WB_API.taskMeta + "?id=" + encodeURIComponent(metaId), { headers: { accept: "application/json" } })
-						.then(function (r) { return r.json(); })
-						.then(function (body) {
-							if (alive && body && typeof body.client === "string") setL(function (p) { return Object.assign({}, p, { client: body.client }); });
-						})
-						.catch(function () { });
+					function applyClient(disp, key) {
+						if (!alive) return;
+						setL(function (p) { return Object.assign({}, p, { client: disp || p.client || "", client_key: key || p.client_key || "" }); });
+					}
+					function fallbackMeta() {
+						if (clientFromParams || clientKeyFromParams) { applyClient(clientFromParams || "", clientKeyFromParams || ""); return; }
+						if (metaId === "") { applyClient("", ""); return; }
+						fetch(WB_API.taskMeta + "?id=" + encodeURIComponent(metaId), { headers: { accept: "application/json" } })
+							.then(function (r) { return r.json(); })
+							.then(function (body) { if (body) applyClient(typeof body.client === "string" ? body.client : "", typeof body.client_key === "string" ? body.client_key : ""); })
+							.catch(function () { });
+					}
+					if (typeof sessionId === "string" && sessionId !== "") {
+						fetch(WB_API.sessionClient + "?session=" + encodeURIComponent(sessionId), { headers: { accept: "application/json" } })
+							.then(function (r) { return r.json(); })
+							.then(function (body) {
+								var binding = body && body.binding ? body.binding : null;
+								if (binding && binding.client_key) applyClient(binding.client || clientFromParams || "", binding.client_key);
+								else fallbackMeta();
+							})
+							.catch(function () { fallbackMeta(); });
+					} else fallbackMeta();
 					return function () { alive = false; };
-				}, [clientFromParams, metaId]);
+				}, [clientFromParams, clientKeyFromParams, metaId, sessionId]);
 
 				/* 本任务发起时刻：草稿列表只显示该时刻之后落盘的（C1 口径 ——
 				 * 否则同客户的旧会话草稿会混进来）。时刻拿不到就退回全列。 */
@@ -2022,7 +4100,7 @@ window.__ModuleLoader__.load({
 					fetch(WB_API.check, {
 						method: "POST",
 						headers: { "content-type": "application/json" },
-						body: JSON.stringify({ client: client, titles: titles }),
+						body: JSON.stringify({ client: client, session_id: sessionId, meta_id: metaId, titles: titles }),
 					}).then(function (r) { return r.json(); }).then(function (b) {
 						var rs = b && b.ok === true ? (b.results || []) : [];
 						var map = {};
@@ -2037,24 +4115,40 @@ window.__ModuleLoader__.load({
 					});
 				};
 				React.useEffect(function () {
-					if (metaId === "") { setL(function (p) { return Object.assign({}, p, { at: "" }); }); return; }
+					if (metaId === "") { setL(function (p) { return Object.assign({}, p, { at: "", meta: null }); }); return; }
 					var alive = true;
 					fetch(WB_API.taskMeta + "?id=" + encodeURIComponent(metaId), { headers: { accept: "application/json" } })
 						.then(function (r) { return r.json(); })
 						.then(function (b) {
-							if (alive && b && typeof b.savedAt === "string") setL(function (p) { return Object.assign({}, p, { at: b.savedAt }); });
+							if (alive && b) setL(function (p) { return Object.assign({}, p, { at: typeof b.savedAt === "string" ? b.savedAt : p.at, meta: b }); });
 						})
 						.catch(function () { });
 					return function () { alive = false; };
 				}, [metaId]);
+				/* 「文章审核」按钮 / 手动刷新：任务条派发 wb:review-refresh，这里重拉草稿列表 */
+				var rvTickS = React.useState(0); var rvTick = rvTickS[0];
+				React.useEffect(function () {
+					var on = function () { rvTickS[1](function (n) { return n + 1; }); };
+					window.addEventListener("wb:review-refresh", on);
+					return function () { window.removeEventListener("wb:review-refresh", on); };
+				}, []);
 				React.useEffect(function () {
 					if (!client) { setL(function (p) { return Object.assign({}, p, { drafts: null, sel: "", body: "", checked: {}, done: {} }); }); return; }
-					var alive = true;
-					fetch(WB_API.drafts + "?client=" + encodeURIComponent(client), { headers: { accept: "application/json" } })
+					var alive = true, retryTimer = null, retry = 0;
+					function loadDrafts() {
+						fetch(WB_API.drafts + wbLibraryQuery(client, sessionId, metaId), { headers: { accept: "application/json" } })
 						.then(function (r) { return r.json(); })
 						.then(function (b) {
-							if (alive && b && b.ok === true) setL(function (p) {
-								var scope = at ? (b.drafts || []).filter(function (d) { return d.updatedAt >= at; }) : (b.drafts || []);
+							if (!alive || !b || b.ok !== true) return;
+							/* 工具结果可能先于文件列表可见；缺篇时仅补两次短重试。 */
+							var available = {};
+							(b.drafts || []).forEach(function (d) { available[d.title] = true; });
+							(b.library || []).forEach(function (title) { available[title] = true; });
+							if (!mobile && retry < 2 && Object.keys(writeTitles).some(function (title) { return !available[title]; })) {
+								retryTimer = setTimeout(loadDrafts, [400, 1200][retry++]);
+							}
+							setL(function (p) {
+								var scope = at ? (b.drafts || []).filter(function (d) { return d.updatedAt >= at || (reviewBatch && writeTitles[d.title]); }) : (b.drafts || []);
 								/* 会话归属：消息流里有 write 调用 → 只显示本会话写的那几篇。
 								 * 没有（还没开写 / 已终止）→ 列表为空，别的会话的产物不串进来。 */
 								if (writeCount > 0) scope = scope.filter(function (d) { return writeTitles[d.title] === true; });
@@ -2063,7 +4157,7 @@ window.__ModuleLoader__.load({
 								var nextD = {};
 								Object.keys(p.done).forEach(function (k) { if (titles[k]) nextD[k] = true; });
 								/* 已入库的（同名出现在正式库）直接标绿 —— 刷新后状态不丢 */
-								(b.library || []).forEach(function (lt) { if (titles[lt] && writeTitles[lt] === true) nextD[lt] = true; });
+								(b.library || []).forEach(function (lt) { if (!props.unifiedPanel && titles[lt] && writeTitles[lt] === true) nextD[lt] = true; });
 								Object.keys(WB_PICK.sel).forEach(function (k) { if (!titles[k]) delete WB_PICK.sel[k]; });
 								WB_PICK.client = client; WB_PICK.drafts = scope; WB_PICK.done = nextD;
 								wbPickEmit();
@@ -2071,8 +4165,14 @@ window.__ModuleLoader__.load({
 							});
 						})
 						.catch(function () { });
-					return function () { alive = false; };
-				}, [client, at, writeCount]);   /* at / writeCount 回来要重拉重过滤 */
+					}
+					loadDrafts();
+					return function () { alive = false; clearTimeout(retryTimer); };
+				}, [client, sessionId, metaId, at, writeCount, rvTick]);   /* at / writeCount / 手动刷新 回来要重拉重过滤 */
+
+				React.useEffect(function () {
+					if (props.unifiedPanel && drafts && drafts.length && !sel) openDraft(drafts[0].title);
+				}, [props.unifiedPanel, drafts, sel]);
 
 				/* 检查结果持久化恢复：本组件 state 归属正确，客户一定就从 sessionStorage 捞 */
 				React.useEffect(function () {
@@ -2127,17 +4227,17 @@ window.__ModuleLoader__.load({
 				}
 				function openDraft(title) {
 					WB_PICK.view = title; wbPickEmit();   // 联动：消息流 chips 高亮正在看的篇
-					setL(function (p) { return Object.assign({}, p, { sel: title, body: "加载中…", editing: false, editText: "" }); });
-					fetch(WB_API.draft + "?client=" + encodeURIComponent(client) + "&title=" + encodeURIComponent(title), { headers: { accept: "text/markdown" } })
-						.then(function (r) { return r.text(); })
+					setL(function (p) { return Object.assign({}, p, { sel: title, body: "加载中…", editing: false, editText: "", readError: false }); });
+					fetch(WB_API.draft + wbLibraryQuery(client, sessionId, metaId) + "&title=" + encodeURIComponent(title), { headers: { accept: "text/markdown" } })
+						.then(function (r) { if(props.unifiedPanel && !r.ok) throw new Error("草稿读取失败，请重试"); return r.text(); })
 						.then(function (text) {
-							setL(function (p) { return Object.assign({}, p, { body: text }); });
+							setL(function (p) { return props.unifiedPanel && p.sel !== title ? p : Object.assign({}, p, { body: text, readError: false }); });
 							setTimeout(function () {
 								hcMarkInBody(title, hc);
 								if (WB_HC_JUMP) { hcScrollTo(WB_HC_JUMP.word, WB_HC_JUMP.para); WB_HC_JUMP = null; }
 							}, 80);
 						})
-						.catch(function (e) { setL(function (p) { return Object.assign({}, p, { body: "读取失败：" + String(e) }); }); });
+						.catch(function (e) { setL(function (p) { return props.unifiedPanel && p.sel !== title ? p : Object.assign({}, p, { body: "读取失败：" + String(e), readError: true }); }); });
 				}
 				/* 审校面板里直接改草稿（Markdown 源码）。保存走 PUT /api/workbench/draft，
 				 * 只写草稿区、不碰正式库；按用户口径「手改的不重跑检查」。 */
@@ -2156,7 +4256,8 @@ window.__ModuleLoader__.load({
 								setL(function (p) { return Object.assign({}, p, { saving: false, msg: "保存失败：" + ((b && (b.detail || b.error)) || "未知错误") }); });
 								return;
 							}
-							setL(function (p) { return Object.assign({}, p, { saving: false, editing: false, editText: "", body: text }); });
+							if(props.unifiedPanel){ try {sessionStorage.removeItem("wb_hc_"+client);}catch(e){} WB_PICK.hc=null;wbPickEmit(); }
+							setL(function (p) { return Object.assign({}, p, { saving: false, editing: false, editText: "", body: text, ...(props.unifiedPanel ? {hc:null, msg:"正文已改 · 未检查"} : {}) }); });
 						})
 						.catch(function (e) {
 							setL(function (p) { return Object.assign({}, p, { saving: false, msg: "保存失败：" + String(e) }); });
@@ -2172,7 +4273,7 @@ window.__ModuleLoader__.load({
 					var s = st[0];
 					if (s.editing === true || s.sel === "" || client === "") return;
 					var alive = true;
-					fetch(WB_API.draft + "?client=" + encodeURIComponent(client) + "&title=" + encodeURIComponent(s.sel), { headers: { accept: "text/markdown" } })
+					fetch(WB_API.draft + wbLibraryQuery(client, sessionId, metaId) + "&title=" + encodeURIComponent(s.sel), { headers: { accept: "text/markdown" } })
 						.then(function (r) { return r.text(); })
 						.then(function (text) {
 							if (!alive) return;
@@ -2187,12 +4288,18 @@ window.__ModuleLoader__.load({
 				function confirmOne(title) {
 					return fetch(WB_API.confirmDraft, {
 						method: "POST", headers: { "content-type": "application/json", accept: "application/json" },
-						body: JSON.stringify({ client: client, title: title }),
+						body: JSON.stringify({
+							client: client,
+							client_key: clientKey || "",
+							title: title,
+							session_id: typeof sessionId === "string" ? sessionId : "",
+							meta_id: metaId || "",
+						}),
 					})
 						.then(function (r) { return r.json().then(function (b) { return { code: r.status, body: b }; }); })
 						.then(function (res) {
 							var ok = res.body && res.body.ok === true;
-							if (ok || res.code === 409) setL(function (p) {
+							if (ok || (res.code === 409 && !props.unifiedPanel)) setL(function (p) {
 								var nextD = Object.assign({}, p.done); nextD[title] = true;
 								delete WB_PICK.sel[title];
 								WB_PICK.done = nextD;
@@ -2200,13 +4307,15 @@ window.__ModuleLoader__.load({
 							});
 							wbPickEmit();
 							if (ok) return { state: "ok" };
-							if (res.code === 409) return { state: "skip" };
+							if (res.code === 409) return props.unifiedPanel ? { state: "fail", why: "正式库已有同名文章，入库结果待核对" } : { state: "skip" };
 							/* 失败要带真实原因 —— 不许再让所有失败都顶「重名」的帽子（2026-10-10） */
 							var why = res.body && (res.body.detail || res.body.error) ? String(res.body.detail || res.body.error) : "HTTP " + res.code;
 							return { state: "fail", why: why };
 						});
 				}
 				function confirmTargets(targets, label) {
+					if (st[0].confirming || (props.unifiedPanel && (st[0].editing || st[0].saving))) return;
+					setL(function (p) {return Object.assign({},p,{confirming:true});});
 					var idx2 = 0, okN = 0, skipN = 0, failN = 0, failWhy = "";
 					setL(function (p) { return Object.assign({}, p, { msg: (label || "入库") + "中 0/" + targets.length + " …" }) });
 					function next() {
@@ -2214,7 +4323,7 @@ window.__ModuleLoader__.load({
 							var m = "已入库 ✓ " + okN + " 篇";
 							if (skipN > 0) m += "，跳过 " + skipN + " 篇（正式库已有同名）";
 							if (failN > 0) m += "，失败 " + failN + " 篇" + (failWhy !== "" ? "（" + failWhy + "）" : "");
-							setL(function (p) { return Object.assign({}, p, { msg: m }) });
+							setL(function (p) { return Object.assign({}, p, { msg: m, confirming: false }) });
 							return;
 						}
 						confirmOne(targets[idx2]).then(function (r3) {
@@ -2233,15 +4342,33 @@ window.__ModuleLoader__.load({
 				var doneCount = drafts ? drafts.filter(function (d) { return doneMap[d.title] === true; }).length : 0;
 				var pending = drafts ? drafts.filter(function (d) { return doneMap[d.title] !== true; }) : [];
 
+				if (mobile && !props.mobileInline) {
+					return h(MobileChatHeader, { sessionId: sessionId, meta: st[0].meta || { client: client }, nodes: Array.isArray(legacyNodes) ? legacyNodes : [], legacy: chatSnap && chatSnap.legacy, reviewProps: props });
+				}
+				if (mobile && props.mobileInline) {
+					return h(React.Fragment, null,
+						h("button", { type: "button", className: "wb_mPending", onClick: function () { mobileReview[1](true); } }, "草稿审核"),
+						h(WbPresence, null, mobileReview[0] ? h("div", { className: "wb_mReview" },
+						h(MobileTopBar, { title: client || "文章审核", back: function () {
+						if (sel) setL(function (p) { return Object.assign({}, p, { sel: "" }); });
+						else mobileReview[1](false);
+					} }),
+						!sel ? h("div", { className: "wb_mReviewList" },
+							pending.map(function (d) { return h("button", { type: "button", key: d.title, className: "wb_mReviewItem", onClick: function () { openDraft(d.title); } }, h("b", null, d.title), h("small", null, doneMap[d.title] ? "已入库" : "待审核")); }),
+							pending.length === 0 ? (drafts === null ? h(WbSkeleton, { label: "草稿列表加载中…" }) : h("p", { className: "wb_mEmpty" }, "草稿区是空的")) : null) : null,
+						sel ? h("article", { className: "wb_mArticle", key: sel }, h("h1", null, sel), bodyText === "加载中…" ? h(WbSkeleton, { label: bodyText }) : h("div", { dangerouslySetInnerHTML: { __html: wbMdToHtml(bodyText) } })) : null,
+						pending.length ? h("div", { className: "wb_mAction" }, h("button", { type: "button", className: "wb_mPrimary", "aria-busy": !!st[0].confirming, disabled: !!st[0].confirming || checkedCount === 0, onClick: function () { confirmTargets(pending.filter(function (d) { return WB_PICK.sel[d.title]; }).map(function (d) { return d.title; }), "入库"); } }, "确认入库（" + checkedCount + " 篇）")) : null) : null));
+				}
 				if (!client) return h("div", { className: "wb_rvEmpty" }, "没有正在进行的任务 —— 从装配台发起后，这里会自动打开");
 				var toggleRv = function () { setL(function (p) { return Object.assign({}, p, { rvOpen: !rvOpen }); }); };
 				return h("div", { className: "wb_rv" },
+					props.unifiedPanel ? h("div", {className:"wb_reviewScope"}, "当前会话归属：" + (client || "读取中…")) : null,
 					h("div", { className: "wb_rvHead", onClick: toggleRv, title: rvOpen ? "收起检查详情" : "展开检查详情" },
 						h("span", { className: "wb_rvDot" + (doneCount === n && n > 0 ? " is-ok" : "") }, "●"),
-						h("span", { className: "wb_rvState" }, doneCount === n && n > 0 ? "已检查" : "未检查"),
+						h("span", { className: "wb_rvState" }, props.unifiedPanel ? (hc !== null ? "已检查" : "未检查") : (doneCount === n && n > 0 ? "已检查" : "未检查")),
 						h("span", { className: "wb_rvSel" }, "草稿审核"),
 						h("button", {
-							type: "button", className: "wb_rvCheck", disabled: checking || drafts === null || drafts.length === 0,
+							type: "button", className: "wb_rvCheck", "aria-busy": checking, disabled: checking || drafts === null || drafts.length === 0,
 							title: "跑一遍硬检规则（拦/证/提 三档，纯正则零 token）",
 							onClick: function (ev) { ev.stopPropagation(); runCheck(); },
 						}, checking ? "检查中…" : (hc !== null ? "重新检查" : "开始检查")),
@@ -2249,13 +4376,12 @@ window.__ModuleLoader__.load({
 					h("div", { className: "wb_rvProg" },
 						h("span", { className: "wb_rvCount" }, "已通过 " + doneCount + " / " + n),
 						h("span", { className: "wb_rvHint" }, "确认 = 入库")),
-					rvOpen && hcChildren.length > 0
-						? h.apply(null, ["div", { className: "wb_hc" }].concat(hcChildren))
-						: null,
+					h(WbCollapse, { open: rvOpen && hcChildren.length > 0, className: "wb_rvCollapse" },
+						h.apply(null, ["div", { className: "wb_hc" }].concat(hcChildren))),
 					msg ? h("div", { className: "wb_reviewMsg" }, msg) : null,
 					n === 0
-						? h("div", { className: "wb_rvEmpty2" }, drafts === null ? "草稿列表加载中…" : "草稿区是空的 —— agent 写完会出现在这里")
-						: h("div", { className: "wb_rvCols" },
+						? (drafts === null ? h(WbSkeleton, { label: "草稿列表加载中…" }) : h("div", { className: "wb_rvEmpty2" }, "草稿区是空的 —— agent 写完会出现在这里"))
+						: h(WbReviewColumns, null,
 							h("div", { className: "wb_reviewList" },
 								pending.map(function (d, idx) {
 									var picked = checked[d.title] === true;
@@ -2276,7 +4402,7 @@ window.__ModuleLoader__.load({
 										st[0].editing === true
 											? h("span", { className: "wb_editOps" },
 												h("button", {
-													type: "button", className: "wb_editSave",
+													type: "button", className: "wb_editSave", "aria-busy": st[0].saving === true,
 													disabled: st[0].saving === true,
 													onClick: saveDraft,
 												}, st[0].saving === true ? "保存中…" : "保存"),
@@ -2286,11 +4412,12 @@ window.__ModuleLoader__.load({
 												}, "取消"))
 											: h("button", {
 												type: "button", className: "wb_editBtn",
+												disabled: !!(props.unifiedPanel && doneMap[sel]),
 												title: "直接改这篇的 Markdown 源码，保存写回草稿文件（不重跑检查）",
 												onClick: function () {
 													setL(function (p) { return Object.assign({}, p, { editing: true, editText: p.body || "", msg: "" }); });
 												},
-											}, "编辑"))
+											}, doneMap[sel] && props.unifiedPanel ? "已入库 · 只读" : "编辑"))
 									: null,
 								st[0].editing === true
 									? h("textarea", {
@@ -2304,7 +4431,7 @@ window.__ModuleLoader__.load({
 									})
 									: (bodyText && bodyText !== "加载中…"
 										? h("div", { className: "wb_reviewText wb_rvMd", dangerouslySetInnerHTML: { __html: wbMdToHtml(bodyText) } })
-										: h("div", { className: "wb_reviewText" }, bodyText || "")))),
+										: bodyText === "加载中…" ? h(WbSkeleton, { label: bodyText }) : h("div", { className: "wb_reviewText" }, bodyText || "")))),
 					n > 0 && doneCount > 0
 						? h("div", { className: "wb_rvDoneSeg" },
 							h("div", { className: "wb_rvSep" }, "已入库 " + doneCount),
@@ -2320,7 +4447,7 @@ window.__ModuleLoader__.load({
 					n > 0
 						? h("div", { className: "wb_rvFoot" },
 							h("button", {
-								type: "button", className: "wb_rvConfirm", disabled: checkedCount === 0 && sel === "",
+								type: "button", className: "wb_rvConfirm", "aria-busy": !!st[0].confirming, disabled: st[0].confirming || (props.unifiedPanel ? (st[0].editing || st[0].saving || st[0].readError || bodyText === "加载中…" || !sel || doneMap[sel] === true) : checkedCount === 0 && sel === ""),
 								onClick: function () {
 									var targets = pending.filter(function (d) { return WB_PICK.sel[d.title] === true; }).map(function (d) { return d.title; });
 									if (targets.length === 0 && sel !== "") targets = [sel];
@@ -2328,7 +4455,7 @@ window.__ModuleLoader__.load({
 								},
 							}, checkedCount > 0 ? "确认入库（" + checkedCount + " 篇）" : "确认入库"),
 							h("button", {
-								type: "button", className: "wb_rvConfirmAll", disabled: pending.length === 0,
+								type: "button", className: "wb_rvConfirmAll", "aria-busy": !!st[0].confirming, disabled: st[0].confirming || pending.length === 0 || (props.unifiedPanel && (st[0].editing || st[0].saving)),
 								onClick: function () { confirmTargets(pending.map(function (d) { return d.title; }), "批量入库"); },
 							}, "全部确认"))
 						: null);
@@ -2356,7 +4483,7 @@ window.__ModuleLoader__.load({
 			/* 在正文容器里给命中词标红（mark.wbHcMk），先清旧标再标新的 */
 			function hcMarkInBody(title, hcArr) {
 				try {
-					var host = document.querySelector(".wb_rvMd");
+					var host = (unifiedReview || document).querySelector(".wb_rvMd");
 					if (!host) return;
 					host.querySelectorAll("mark.wbHcMk").forEach(function (m) {
 						var p = m.parentNode;
@@ -2393,7 +4520,7 @@ window.__ModuleLoader__.load({
 			}
 			function hcScrollTo(word, para) {
 				try {
-					var host = document.querySelector(".wb_rvMd");
+					var host = (unifiedReview || document).querySelector(".wb_rvMd");
 					if (!host) return;
 					/* 段号优先：块级 data-seq 与执行器段号同口径，结构类问题没有命中词也能跳 */
 					if (para && para > 0) {
@@ -2454,9 +4581,23 @@ window.__ModuleLoader__.load({
 			}
 
 			function TaskBar(props) {
+				useWbRunStatus(props);
+				var reviewPropsRef = React.useRef(props);
+				reviewPropsRef.current = props;
+				if (window.dshUnified) window.dshUnified.reviewProps = props;
+				React.useEffect(function () {
+					function connectReview() {
+						if (!window.dshUnified) return;
+						window.dshUnified.reviewProps = reviewPropsRef.current;
+						window.dispatchEvent(new Event("dsh:review-target"));
+					}
+					connectReview(); window.addEventListener("dsh:unified-ready", connectReview);
+					return function () { window.removeEventListener("dsh:unified-ready", connectReview); };
+				}, [props.sessionId]);
 				var sessionId = props.sessionId;
 				var useSessions = props.useSessions;
 				var useChat = props.useChat;
+				var currentBatch = useWbBatch(sessionId);
 				var state = React.useState({ status: "idle", meta: null, net: "-" });
 				var meta = state[0].meta, net = state[0].net, setState = state[1];
 				var title = "";
@@ -2482,6 +4623,20 @@ window.__ModuleLoader__.load({
 				if (Array.isArray(legacyNodes)) list = legacyNodes;
 				else if (legacyNodes && typeof legacyNodes.values === "function") list = legacyNodes.values();
 				else if (legacyNodes && typeof legacyNodes.forEach === "function") { legacyNodes.forEach(function (v) { list.push(v); }); }
+				/* 元数据加载前就统计成功写入；turnKey 用 user 消息数，重写同篇也计数。 */
+				var writeCount = 0, turnKey = 0, turnWriteCount = 0, writeTitles = wbWrittenTitles(list);
+				for (var wi = 0; wi < list.length; wi++) {
+					var tn = list[wi];
+					if (tn && tn.kind === "user") { turnKey++; turnWriteCount = 0; }
+					if (wbIsSuccessfulWrite(tn)) {
+						writeCount++; turnWriteCount++;
+					}
+				}
+				wbBatchTitles(currentBatch, writeTitles);
+				var running = !!(chatSnap && chatSnap.legacy && (chatSnap.legacy.partial != null
+					|| (chatSnap.legacy.runningCalls && chatSnap.legacy.runningCalls.length > 0)));
+				var binding = wbNavState.bindings[sessionId] || {}, mapped = wbNavState.map[sessionId] || {};
+				var client = (meta && meta.client) || binding.client || mapped.client || "";
 				diag = (Array.isArray(legacyNodes) ? "Array" : legacyNodes ? typeof legacyNodes : "null") + "/" + list.length;
 				for (var i = 0; i < list.length; i++) {
 					var node = list[i];
@@ -2532,7 +4687,7 @@ window.__ModuleLoader__.load({
 						Object.keys(byId).forEach(function (id) {
 							var rec = byId[id];
 							if (rec && rec.parentId === sessionId) {
-								rows.push((rec.displayTitle || id) + "｜" + (rec.status || ""));
+								rows.push((wbNavState.renames[id] ? wbNavState.renames[id].title : wbSessionTitle(wbNavState.map[id] || wbNavState.bindings[id], rec)) + "｜" + (rec.status || ""));
 							}
 						});
 						return rows.join("§");
@@ -2545,71 +4700,86 @@ window.__ModuleLoader__.load({
 				React.useEffect(function () {
 					if (meta === null || typeof meta !== "object" || !meta.client) return;
 					var alive = true;
-					fetch(WB_API.taskStatus + "?client=" + encodeURIComponent(meta.client) + "&since=" + encodeURIComponent(String(meta.savedAt || "")), { headers: { accept: "application/json" } })
+					fetch(WB_API.taskStatus + wbLibraryQuery(meta.client, sessionId, metaId) + "&since=" + encodeURIComponent(String(meta.savedAt || "")), { headers: { accept: "application/json" } })
 						.then(function (r) { return r.json(); })
 						.then(function (body) {
 							if (alive && body && body.ok === true) setSt({ ws: body.workspace || null, lib: body.library || null });
 						})
 						.catch(function () { });
 					return function () { alive = false; };
-				}, [metaId, meta && meta.client]);
+				}, [metaId, sessionId, meta && meta.client]);
 				React.useEffect(function () {
 					refreshStatusRef.current = function () {
 						if (meta === null || typeof meta !== "object" || !meta.client) return;
-						fetch(WB_API.taskStatus + "?client=" + encodeURIComponent(meta.client) + "&since=" + encodeURIComponent(String(meta.savedAt || "")), { headers: { accept: "application/json" } })
+						fetch(WB_API.taskStatus + wbLibraryQuery(meta.client, sessionId, metaId) + "&since=" + encodeURIComponent(String(meta.savedAt || "")), { headers: { accept: "application/json" } })
 							.then(function (r) { return r.json(); })
 							.then(function (body) { if (body && body.ok === true) setSt({ ws: body.workspace || null, lib: body.library || null }); })
 							.catch(function () { });
 					};
-				}, [metaId, meta && meta.client]);
+				}, [metaId, sessionId, meta && meta.client]);
 
-				/* 草稿区（write draft:true 落「文章库/<客户>/草稿/」）：待人工确认入库 */
-				var state3 = React.useState({ drafts: null });
-				var drafts = state3[0].drafts;
-				var setRv = state3[1];
-				/* 草稿从无到有 → 自动在右侧栏打开"文章审核" tab（每个任务编号只弹一次） */
-				var autoRef = React.useRef(null);
+				/* 只由本轮实时 write 触发；草稿目录和 task-meta 均不在打开路径上。 */
+				var autoRef = React.useRef({ previous: null, opened: {}, timer: null });
+				autoRef.current.target = { client: client, meta: metaId };
 				React.useEffect(function () {
-					if (drafts === null || drafts.length === 0) return;
-					if (autoRef.current === metaId) return;
-					var ctrl = WbCtx && WbCtx.sidebarRight;
-					if (ctrl && typeof ctrl.openTab === "function") {
+					return function () { clearTimeout(autoRef.current.timer); autoRef.current.timer = null; };
+				}, [sessionId, turnKey]);
+				React.useEffect(function () {
+					var auto = autoRef.current, key = sessionId + "/" + turnKey;
+					var batch = wbBatchFor(sessionId);
+					var lastUser = list.filter(function (n) { return n.kind === "user"; }).slice(-1);
+					var batchActive = (batch && batch.status === "running") || !!wbBatchHint(lastUser);
+					var next = { sessionId: sessionId, turnKey: turnKey, writeCount: turnWriteCount, running: running, batchActive: batchActive };
+					var prev = auto.previous && Object.assign({}, auto.previous, { openedTurn: auto.opened[key] ? turnKey : null });
+					var decision = wbReviewAutoOpenDecision(prev, next);
+					auto.previous = next;
+					if (WB_MOBILE.matches) return;
+					if (decision.refresh) window.dispatchEvent(new CustomEvent("wb:review-refresh", { detail: { sessionId: sessionId } }));
+					if (!decision.open) return;
+					auto.opened[key] = true;
+					var attempts = 0;
+					function openReview() {
+						auto.timer = null;
 						try {
-							/* 2026-09-26：openTab 在右栏 surface 未挂载时直接 throw
-							 * （sidebarRight: no session surface is mounted）。
-							 * 先弹成功、后记号 —— 失败不占位，下一条会话消息再重试；
-							 * 以前先记号，agent 写第一篇时弹失败一次就永远不弹了。 */
-							ctrl.openTab("wb-review", { params: { client: meta.client, meta: metaId } });
-							autoRef.current = metaId;
+							var ctrl = WbCtx && WbCtx.sidebarRight;
+							if (window.dshUnified) window.dispatchEvent(new Event("dsh:review-available"));
+							else if (ctrl && typeof ctrl.openTab === "function") ctrl.openTab("wb-review", { params: auto.target });
+							else throw new Error("sidebarRight is not ready");
+						} catch (e) {
+							if (++attempts <= 40) auto.timer = setTimeout(openReview, 250);
+							else console.warn("[dsh-workbench] 打开审核侧栏失败（重试超时）：", String(e));
 						}
-						catch (e) { console.warn("[dsh-workbench] 打开审核侧栏失败（下条消息重试）：", String(e)); }
 					}
-				}, [drafts, metaId]);
+					openReview();
+				}, [sessionId, turnKey, turnWriteCount, running]);
+
+				/* 手动刷新另计 tick；实时写入已通过 writeCount 触发同一次拉取。 */
+				var rvTickS = React.useState(0), rvTick = rvTickS[0];
 				React.useEffect(function () {
-					if (meta === null || typeof meta !== "object" || !meta.client) return;
+					function onRefresh(e) { if (!e.detail || !e.detail.sessionId || (e.detail.batch && e.detail.sessionId === sessionId)) rvTickS[1](function (n) { return n + 1; }); }
+					window.addEventListener("wb:review-refresh", onRefresh);
+					return function () { window.removeEventListener("wb:review-refresh", onRefresh); };
+				}, [sessionId]);
+				/* 草稿目录只随客户 / 写入 / 手动刷新变化，不随流式 delta 重拉。 */
+				React.useEffect(function () {
+					if (!client) return;
 					var alive = true;
-					fetch(WB_API.drafts + "?client=" + encodeURIComponent(meta.client), { headers: { accept: "application/json" } })
+					fetch(WB_API.drafts + wbLibraryQuery(client, sessionId, metaId), { headers: { accept: "application/json" } })
 						.then(function (r) { return r.json(); })
 						.then(function (b) {
 							if (alive && b && b.ok === true) {
-								setRv(function (p) { return Object.assign({}, p, { drafts: b.drafts || [] }); });
-								/* 与 R 区同口径：本会话 write 过的才算 —— 否则全量覆盖
-								 * 会把 R 区过滤好的列表冲掉，chips 序号就和 R 区对不上。 */
-								var scope2 = b.drafts || [];
-								var wc2 = 0; for (var k2 in writeTitles) wc2++;
-								if (wc2 > 0) scope2 = scope2.filter(function (d) { return writeTitles[d.title] === true; });
-								else scope2 = [];
-								WB_PICK.client = meta.client; WB_PICK.drafts = scope2;
+								/* 同 R 区按本会话 title 过滤，客户旧稿不能进入 chips。 */
+								WB_PICK.client = client;
+								WB_PICK.drafts = (b.drafts || []).filter(function (d) { return writeTitles[d.title] === true; });
 								wbPickEmit();
-
 							}
 						})
 						.catch(function () { });
 					return function () { alive = false; };
-				}, [metaId, meta && meta.client, chatSnap]);
+				}, [metaId, sessionId, client, writeCount, rvTick]);
 				if (meta === null || typeof meta !== "object") {
 					return h("div", { className: "wb_task" },
-						h("span", { className: "wb_taskTitle" }, title === "" ? "会话" : title),
+						h("span", { className: "wb_taskTitle" }, (wbNavState.renames[sessionId] && wbNavState.renames[sessionId].title) || wbSessionTitle(wbNavState.map[sessionId] || wbNavState.bindings[sessionId], {displayTitle:title}, meta)),
 );
 				}
 
@@ -2628,32 +4798,11 @@ window.__ModuleLoader__.load({
 				var wsText = (st.ws && st.ws.exists) ? "工作区共 " + st.ws.files + " 个文件" + (st.ws.recent > 0 ? "（本任务新增 " + st.ws.recent + "）" : "") : "暂无";
 				var libText = (st.lib && st.lib.exists) ? "文章库共 " + st.lib.files + " 篇" + (st.lib.recent > 0 ? "（本任务新增 " + st.lib.recent + "）" : "") : "暂无";
 				var subRows = subsText === "" ? [] : subsText.split("§");
-				/* 真进度（2026-09-26 用户指出旧两行是静态假话）：数会话消息流里
-				 * 成功落地的 write_article 调用 —— 节点 kind='tool-result'，
-				 * call.name 匹配、isError 不为 true 才算数。agent 每写完一篇，
-				 * 消息流更新 → 这里跟着变，是真数据不是推导。 */
-				var writeDone = 0;
-				var writeTitles = {};
-				for (var wi = 0; wi < list.length; wi++) {
-					var tn = list[wi];
-					if (tn && tn.kind === "tool-result" && tn.call
-						&& tn.call.name === "mcp__sora-articles__write_article" && tn.isError !== true) {
-						writeDone += 1;
-						try {
-							var targs = JSON.parse(tn.call.argsRaw || "{}");
-							var ttitle = String(targs.title || targs.file || "").replace(/\.md$/i, "");
-							if (ttitle !== "") writeTitles[ttitle] = true;
-						} catch (e) { }
-					}
-				}
-				var skillTotal = (meta.skills || []).length;
+				var progress = wbWriteProgress(meta, currentBatch, writeTitles);
 				/* 任务清单样式的行：[状态, 文本] —— done=绿勾，run=进行中，wait=待办 */
 				var taskRows = [];
-				if (writeDone > 0) {
-					var scopeTxt = skillTotal > 0 ? writeDone + "/" + skillTotal : String(writeDone);
-					var finished = skillTotal > 0 && writeDone >= skillTotal;
-					taskRows.push([finished ? "done" : "run",
-						(finished ? "草稿已写完：" : "写作中 · 已写 ") + scopeTxt + " 篇（草稿区待审）"]);
+				if (progress.done > 0) {
+					taskRows.push(wbWriteProgressRow(progress));
 				} else if (chatSnap && chatSnap.legacy
 					&& (chatSnap.legacy.partial !== null
 						|| (chatSnap.legacy.runningCalls && chatSnap.legacy.runningCalls.length > 0))) {
@@ -2706,6 +4855,15 @@ window.__ModuleLoader__.load({
 				var colR = h("div", { className: "wb_col wb_colDiv" },
 					h("div", { className: "wb_colTitle" },
 						"任务进程",
+						h("button", {
+							type: "button", className: "wb_mini wb_reviewOpen", title: "在右侧打开「文章审核」并刷新草稿列表",
+							onClick: function () {
+								var ctrl = WbCtx && WbCtx.sidebarRight;
+								try { if (ctrl && typeof ctrl.openTab === "function") window.dshUnified ? window.dispatchEvent(new Event("dsh:open-review")) : ctrl.openTab("wb-review", { params: { client: meta.client, meta: metaId } }); }
+								catch (e) { console.warn("[dsh-workbench] 打开审核侧栏失败：", String(e)); }
+								setTimeout(function () { window.dispatchEvent(new CustomEvent("wb:review-refresh")); }, 50);
+							},
+						}, "文章审核 ›"),
 						h("span", { className: "wb_tstat" }, (function () {
 							var done = 0;
 							for (var k = 0; k < taskRows.length; k++) if (taskRows[k][0] === "done") done++;
@@ -2759,6 +4917,51 @@ window.__ModuleLoader__.load({
 			return list.length === 0 ? "" : String(list[0].id || "");
 		}
 
+		/* M5: uid-scoped tab choice wins over the shared server preference. */
+		var wbCurrentLoad = Promise.resolve(null), wbCurrentWrites = Promise.resolve();
+		function wbCurrentKey(uid) { return "dsh:current-client:tab:" + uid; }
+		function wbStoredPick(uid) {
+			try { return JSON.parse(sessionStorage.getItem(wbCurrentKey(uid)) || "null"); } catch (e) { return null; }
+		}
+		function wbAllowedPick(customers, value) {
+			if (!value) return null;
+			var customer = customers.find(function (c) { return customerId(c) === value.client_key; });
+			if (!customer) return null;
+			var lines = customer.business_lines || [];
+			var storedPeriod = (customer.service_periods || []).find(function (p) { return String(p.id) === value.service_period_id; });
+			var line = lines.find(function (l) { return String(l.id) === value.business_line_id; })
+				|| lines.find(function (l) { return storedPeriod && String(l.id) === String(storedPeriod.business_line_id); }) || lines[0];
+			var lineId = line ? String(line.id) : "";
+			var periods = periodsFor(customer, lineId);
+			var period = periods.find(function (p) { return String(p.id) === value.service_period_id; }) || periods[0];
+			return { key: customerId(customer), line: lineId, period: period ? String(period.id) : "" };
+		}
+		function wbRestoreCurrentClient(customers, uid, apply, changed) {
+			var cancelled = false;
+			var saved = wbAllowedPick(customers, wbStoredPick(uid));
+			if (!changed()) apply(saved || wbAllowedPick(customers, { client_key: customerId(customers[0]) }));
+			wbCurrentLoad = fetch("/api/v1/me/current-client", { credentials: "same-origin", headers: { accept: "application/json" } })
+				.then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; });
+			wbCurrentLoad.then(function (body) {
+				if (cancelled || changed()) return;
+				var next = wbAllowedPick(customers, wbStoredPick(uid)) || wbAllowedPick(customers, body && body.currentClient);
+				if (next) apply(next);
+			});
+			return function () { cancelled = true; };
+		}
+		function wbRememberCurrentClient(uid, pick) {
+			var value = { client_key: pick.key, business_line_id: pick.line || null, service_period_id: pick.period || null };
+			try { sessionStorage.setItem(wbCurrentKey(uid), JSON.stringify(value)); } catch (e) { /* memory still wins */ }
+			var bootstrap = wbCurrentLoad;
+			wbCurrentWrites = wbCurrentWrites.then(function () { return bootstrap; }).then(function () {
+				var cookie = document.cookie.split(";").map(function (v) { return v.trim(); }).find(function (v) { return v.indexOf("publish_studio_web_csrf=") === 0; }) || "";
+				return fetch("/api/v1/me/current-client", { method: "POST", credentials: "same-origin",
+					headers: { "Content-Type": "application/json", "X-CSRF-Token": cookie.slice("publish_studio_web_csrf=".length) },
+					body: JSON.stringify(Object.assign({ source: "workbench" }, value)) });
+			}).catch(function () { /* preference sync must never interrupt writing */ });
+			return wbCurrentWrites;
+		}
+
 		/** 勾中的薄弱问句拼成一段交接文本（客户点「发送」时进任务）。
 		 * 上限 20 条 —— 再多模型也吃不下，而且真正要写的就是最薄的那几条。 */
 		/** 勾中的薄弱问句拼成交接清单（进装配台预填）。
@@ -2768,10 +4971,16 @@ window.__ModuleLoader__.load({
 			var wanted = {};
 			for (var index = 0; index < pickedNames.length; index++) wanted[pickedNames[index]] = true;
 			var bits = [];
+			var found = {};
 			for (var q = 0; q < questions.length && bits.length < 20; q++) {
 				var question = questions[q];
 				if (wanted[question.question] !== true) continue;
 				bits.push(question.question);
+				found[question.question] = true;
+			}
+			for (var pickedIndex = 0; pickedIndex < pickedNames.length && bits.length < 20; pickedIndex++) {
+				var saved = pickedNames[pickedIndex];
+				if (saved !== "" && found[saved] !== true) { bits.push(saved); found[saved] = true; }
 			}
 			return bits.map(function (name, i) { return (i + 1) + ". " + name; }).join("\n");
 		}
@@ -2830,18 +5039,19 @@ window.__ModuleLoader__.load({
 		/** 薄弱问句那一格的渲染。rows 由 WorkbenchPage 算好传进来（工作条的「显示 N 条」和它共用一份）。 */
 		function renderWeakPane(args) {
 			var gaps = args.gaps;
-			if (args.entry === null) {
+			if (args.entry === null || args.entry.inWindow === false) {
 				var sub;
 				if (args.dirStatus === "loading") sub = "问一次数据服务的客户目录。";
 				else if (args.dirStatus === "error") sub = "刚才没问到客户目录（服务可能短暂不可用）—— 点工作条上的 ⟳ 重试。";
 				else if (args.unmapped.indexOf(args.clientName) >= 0) sub = "「" + args.clientName + "」还没配到数据服务的企业 ID。";
 				else sub = "数据服务的 45 天窗口内没有「" + args.clientName + "」。";
 				return h(Empty, {
+					loading: args.dirStatus === "loading",
 					title: args.dirStatus === "loading" ? "正在取可查客户…" : "这个客户还没有薄弱问句数据",
 					sub: sub,
 				});
 			}
-			if (gaps.status === "loading") return h(Empty, { title: "取数中…", sub: "" });
+			if (gaps.status === "loading") return h(Empty, { loading: true, title: "取数中…", sub: "" });
 			if (gaps.status === "error") return h(Empty, { bad: true, title: "这个客户取不到薄弱问句", sub: weakErrorText(gaps.error, gaps.detail) });
 			if (gaps.status !== "ready") return h(Empty, { title: "还没有数据", sub: "" });
 			if (gaps.questions.length === 0) return h(Empty, { title: "这一期没有问句", sub: "" });
@@ -2860,13 +5070,11 @@ window.__ModuleLoader__.load({
 						type: "checkbox", checked: allOn, "aria-label": "全选",
 						onChange: function () {
 							var names = rows.map(function (row) { return row.question; });
-							args.setWeakPicked(allOn
-								? pickedNames.filter(function (item) { return names.indexOf(item) < 0; })
-								: pickedNames.concat(names.filter(function (item) { return pickedNames.indexOf(item) < 0; })));
+							args.bulkSet(names, !allOn);
 							args.setChipOff(false);
 						},
 					})),
-				h("th", { key: "th-root" }, "词根"),
+				h("th", { key: "th-root" }, window.dshUnified ? "主题分类" : "词根"),
 				h("th", { key: "th-q" }, "问句"),
 				weakHead("综合", "summary", args.sort, args.setSort),
 				shownPlatforms.map(function (name) {
@@ -2880,6 +5088,15 @@ window.__ModuleLoader__.load({
 				/* 行：点哪都勾；按住往下拖，划过的行跟着第一行同一个动作（原型同款）。 */
 				body = rows.map(function (question) {
 					var on = pickedNames.indexOf(question.question) >= 0;
+					var tick = null;
+					for (var ti = 0; ti < (args.ticks || []).length; ti++) {
+						var candidate = args.ticks[ti];
+						if ((question.qid !== undefined && String(candidate.qid) === String(question.qid)) || candidate.question === question.question) { tick = candidate; break; }
+					}
+					var tickWho = tick ? String(tick.byName || tick.by || "") : "";
+					var tickMeta = tick && (tickWho !== "" || tick.at)
+						? (tickWho || "已选") + (tick.at ? " · " + tickStamp(tick.at) : "")
+						: "";
 					return h("tr", {
 						key: question.question,
 						className: on ? "on" : undefined,
@@ -2895,7 +5112,9 @@ window.__ModuleLoader__.load({
 							},
 						})),
 						h("td", { className: "wb_gapRoot" }, question.root || "—"),
-						h("td", null, h("div", { className: "wb_gapQ" }, question.question)),
+						h("td", null, h("div", { className: "wb_gapQ" },
+							question.question,
+							tickMeta === "" ? null : h("span", { className: "wb_tickMeta", title: tick.at || "" }, tickMeta))),
 						h("td", null,
 							h("span", { className: "wb_gapNum", "data-sign": gapSign(question.summary.gap), title: gapTitle("综合", question.summary.gap) }, gapText(question.summary.gap))),
 						shownPlatforms.map(function (name) {
@@ -2907,12 +5126,63 @@ window.__ModuleLoader__.load({
 			}
 
 			return h("div", null,
+				h("div", { className: "wb_source" }, window.dshUnified ? "我方 − 领先竞品 / 个百分点 · 按住行拖扫，连续勾选" : "数据来源：Support · 薄弱问句（全局标准 v4，和 Support 页面数字一致）"),
 				h("table", { className: "wb_tbl wb_tblGap", "data-drag": args.dragging ? "1" : "0" },
 					h("thead", null, head),
 					h("tbody", null, body)));
 		}
 
+		function useUnifiedContext() {
+			var state = React.useState(window.dshUnified ? window.dshUnified.store.state : null);
+			React.useEffect(function () {
+				var off = null;
+				function connect() {
+					if (off) off();
+					if (window.dshUnified) off = window.dshUnified.store.subscribe(state[1]);
+				}
+				connect(); window.addEventListener("dsh:unified-ready", connect);
+				return function () { if (off) off(); window.removeEventListener("dsh:unified-ready", connect); };
+			}, []);
+			return state[0];
+		}
+
+		// Phase 1 bridge only exists after the opt-in /app bootstrap. It shares the
+		// host renderer; the shell never moves or remounts the conversation tree.
+		var unifiedReview = null;
+		function installUnifiedBridge(ctx) {
+			function connect() {
+				if (!window.dshUnified) return;
+				window.dshWorkbenchBridge = {
+					React: React, ReactDOM: require("react-dom"),
+					ReactDOMClient: require("react-dom/client"), jsxRuntime: require("react/jsx-runtime"),
+					css: CSS,
+					mountReview: function (node) {
+						unifiedReview = node;
+						window.dispatchEvent(new Event("dsh:review-target"));
+						return function () { if (unifiedReview === node) { unifiedReview = null; window.dispatchEvent(new Event("dsh:review-target")); } };
+					},
+					newTask: function () { ctx.get("layout").selectPanel(WORKBENCH_KEY); },
+				};
+				window.dispatchEvent(new Event("dsh:workbench-ready"));
+			}
+			connect(); window.addEventListener("dsh:unified-ready", connect);
+			return function () { window.removeEventListener("dsh:unified-ready", connect); unifiedReview = null; delete window.dshWorkbenchBridge; };
+		}
+		function UnifiedReviewPortal() {
+			var tick = React.useState(0);
+			React.useEffect(function () {
+				var update = function () { tick[1](function (v) { return v + 1; }); };
+				window.addEventListener("dsh:review-target", update);
+				return function () { window.removeEventListener("dsh:review-target", update); };
+			}, []);
+			if (!unifiedReview) return null;
+			var props = window.dshUnified && window.dshUnified.reviewProps;
+			return createPortal(props ? h(ReviewTabBody, Object.assign({}, props, {unifiedPanel: true, key: props.sessionId})) : h("p", {role:"status"}, "打开正在写作的会话后，可在这里审核本轮草稿。"), unifiedReview);
+		}
+
 		function WorkbenchPage(props) {
+			var mobile = useWbMobile();
+			useWbScene(mobile, "compose");
 			var ctx = props.ctx;
 			var clients = useClients();
 			/* 薄弱问句：目录一次，问句按客户 */
@@ -2921,7 +5191,15 @@ window.__ModuleLoader__.load({
 			var modeS = React.useState("weak");
 			var mode = modeS[0], setMode = modeS[1];
 			var pickS = React.useState({ key: "", line: "", period: "" });
-			var pick = pickS[0], setPick = pickS[1];
+			var unified = useUnifiedContext();
+			var selected = unified && unified.status === "ready" ? unified.selection : null;
+			var pick = unified ? { key: selected ? selected.clientKey : "", line: selected ? selected.businessLineId : "", period: selected ? selected.servicePeriodId : "" } : pickS[0];
+			var pickedInTab = React.useRef(false);
+			var setPick = unified ? function () {} : function (next) {
+				pickedInTab.current = true;
+				pickS[1](next);
+				wbRememberCurrentClient(clients.uid || "", next);
+			};
 			var topicS = React.useState("");
 			var topic = topicS[0], setTopic = topicS[1];
 			var baseS = React.useState("");
@@ -3011,46 +5289,20 @@ window.__ModuleLoader__.load({
 						{ transform: "translate(0px,0px) scale(1)", opacity: "1" },
 						{ transform: "translate(" + (dx * 0.5) + "px," + (dy * 0.5 - 26) + "px) scale(0.9)", opacity: "1", offset: 0.55 },
 						{ transform: "translate(" + dx + "px," + dy + "px) scale(0.45)", opacity: "0" },
-					], { duration: 460, easing: "cubic-bezier(.3,.7,.4,1)" });
+					], { duration: 300, easing: "cubic-bezier(0.2, 0, 0, 1)" });
 					anim.onfinish = function () { dot.remove(); };
 					anim.oncancel = function () { dot.remove(); };
 				} catch (error) { /* 动画失败不影响功能 */ }
 			}
-			/* 已选的薄弱问句（按问句原文记），**按客户分开存**（2026-10-10 定）。
-			 * 任务永远只发给单个客户，跨客户攒勾选只会制造「这 N 条是谁的」糊涂账 ——
-			 * 换客户 = 自动切到那个客户自己的清单；刷新页面不丢。和 `counts`（模板加购）别混。 */
-			var weakPickedS = React.useState(function () {
-				try {
-					var list = JSON.parse(sessionStorage.getItem(WB_KEY.weakPicked + ":" + pick.key) || "[]");
-					return Array.isArray(list) ? list : [];
-				} catch (error) { return []; }
-			});
-			var weakPicked = weakPickedS[0], setWeakPicked = weakPickedS[1];
-			/* 换客户：当前清单归还给旧客户，装载新客户的清单。 */
-			var weakPickClientRef = React.useRef(pick.key);
-			React.useEffect(function () {
-				if (weakPickClientRef.current === pick.key) return undefined;
-				var prevClient = weakPickClientRef.current;
-				weakPickClientRef.current = pick.key;
-				try {
-					sessionStorage.setItem(WB_KEY.weakPicked + ":" + prevClient, JSON.stringify(weakPicked));
-					var list = JSON.parse(sessionStorage.getItem(WB_KEY.weakPicked + ":" + pick.key) || "[]");
-					setWeakPicked(Array.isArray(list) ? list : []);
-				} catch (error) { /* 隐身模式就算了 */ }
-				return undefined;
-			}, [pick.key]);
-			React.useEffect(function () {
-				try { sessionStorage.setItem(WB_KEY.weakPicked + ":" + weakPickClientRef.current, JSON.stringify(weakPicked)); } catch (error) { /* 隐身模式就算了 */ }
-			}, [weakPicked]);
 
 			var zoomS = React.useState(false);
 			var zoom = zoomS[0], setZoom = zoomS[1];
 			/* 本次任务的模型（装配台下拉）：默认 = 宿主 agent-default-model；
 			 * 选了 yishan 里的模型就经 PromptRelay 绑给新会话（Key 在服务端）。 */
-			var modelS = React.useState(function () {
-				try { return sessionStorage.getItem(WB_KEY.modelLast) || "__default__"; }
-				catch (error) { return "__default__"; }
-			});
+			var modelInitial = "__default__";
+			try { modelInitial = sessionStorage.getItem(WB_KEY.modelLast) || "__default__"; }
+			catch (error) { /* storage unavailable */ }
+			var modelS = React.useState(modelInitial);
 			var selModel = modelS[0], setSelModel = modelS[1];
 			var modelOpenS = React.useState(false);
 			var modelOpen = modelOpenS[0], setModelOpen = modelOpenS[1];
@@ -3060,10 +5312,10 @@ window.__ModuleLoader__.load({
 				try { localStorage.setItem(WB_KEY.modelLast, v); } catch (error) { /* 隐身模式就算了 */ }
 			}
 			/* 思考强度：默认 = 跟随模型；选了就随模型一起绑给会话。 */
-			var effortS = React.useState(function () {
-				try { return localStorage.getItem(WB_KEY.effortLast) || "__default__"; }
-				catch (error) { return "__default__"; }
-			});
+			var effortInitial = "__default__";
+			try { effortInitial = localStorage.getItem(WB_KEY.effortLast) || "__default__"; }
+			catch (error) { /* storage unavailable */ }
+			var effortS = React.useState(effortInitial);
 			var selEffort = effortS[0], setSelEffort = effortS[1];
 			var effortOpenS = React.useState(false);
 			var effortOpen = effortOpenS[0], setEffortOpen = effortOpenS[1];
@@ -3107,17 +5359,10 @@ window.__ModuleLoader__.load({
 			var sendingS = React.useState("");
 			var sending = sendingS[0], setSending = sendingS[1];
 
-			/* 默认选第一个客户 */
 			React.useEffect(function () {
-				if (clients.status !== "ready" || clients.customers.length === 0) return;
-				var first = clients.customers[0];
-				var line = (first.business_lines && first.business_lines[0]) || null;
-				setPick({
-					key: customerId(first),
-					line: line === null ? "" : String(line.id || ""),
-					period: firstPeriodId(first, line === null ? "" : String(line.id || "")),
-				});
-			}, [clients.status, clients.customers]);
+				if (unified || clients.status !== "ready" || clients.customers.length === 0) return;
+				return wbRestoreCurrentClient(clients.customers, clients.uid || "", pickS[1], function () { return pickedInTab.current; });
+			}, [!!unified, clients.status, clients.customers, clients.uid]);
 
 			var current = null;
 			for (var i = 0; i < clients.customers.length; i++) {
@@ -3141,14 +5386,42 @@ window.__ModuleLoader__.load({
 			var weakLine = null;
 			if (weakEntry !== null) {
 				if (weakLines.length === 0) weakLine = weakEntry;
+				else if (weakLines.length === 1) weakLine = weakLines[0];
 				else {
+					var selectedLineName = "";
+					for (var selectedLineIndex = 0; selectedLineIndex < lines.length; selectedLineIndex++) {
+						if (String(lines[selectedLineIndex].id || "") === String(pick.line)) {
+							selectedLineName = String(lines[selectedLineIndex].name || "");
+							break;
+						}
+					}
 					for (var wl = 0; wl < weakLines.length; wl++) {
-						if (String(weakLines[wl].name) === String(pick.line)) { weakLine = weakLines[wl]; break; }
+						if (String(weakLines[wl].id || "") === String(pick.line)
+							|| (selectedLineName !== "" && String(weakLines[wl].name || "") === selectedLineName)
+							|| (selectedLineName === "" && weakLines[wl].is_default === true)) {
+							weakLine = weakLines[wl];
+							break;
+						}
 					}
 				}
 			}
-			var weakClientId = weakLine === null ? "" : String(weakLine.id || "");
-			var weakGaps = useWeakGaps(weakClientId, mode === "weak" && weakClientId !== "");
+			var weakClientKey = weakEntry === null ? "" : String(weakEntry.clientKey || weakEntry.id || "");
+			var weakClientId = unified ? (selected ? selected.enterpriseId : "") : ((weakLine === null || weakLine === weakEntry) ? "" : String(weakLine.id || ""));
+			if (unified) {
+				weakClientKey = selected ? selected.clientKey : "";
+				weakLine = selected && selected.enterpriseId ? { id: selected.enterpriseId } : null;
+			}
+			var weakEnabled = mode === "weak" && weakClientKey !== "" && weakEntry !== null && weakEntry.inWindow !== false
+				&& (unified ? !!weakClientId : (weakLines.length === 0 || weakLine !== null));
+			var weakGaps = useWeakGaps(weakClientKey, weakClientId, weakEnabled);
+			var weakTicks = useWeakTicks(weakClientKey, weakClientId, weakEnabled);
+			var weakSelectionKey = WB_KEY.weakSelection + JSON.stringify([(unified && unified.uid) || clients.uid || "", pick.key, pick.line, pick.period]);
+			var weakSuggestion = weakEnabled && weakTicks.status === "ready" && weakGaps.status === "ready"
+				&& weakTicks.clientKey === weakClientKey && weakTicks.enterprise === weakClientId
+				&& weakGaps.clientKey === weakClientKey && weakGaps.enterprise === weakClientId
+				? weakPickedFromTicks(weakTicks.ticks, weakGaps.questions) : null;
+			var weakPickedS = useWeakSelection(weakSelectionKey, weakSuggestion);
+			var weakPicked = weakPickedS[0], setWeakPicked = weakPickedS[1];
 			/* 这一期出现过哪些词根（给下拉用）。 */
 			var weakRoots = [];
 			for (var wr = 0; wr < weakGaps.questions.length; wr++) {
@@ -3194,7 +5467,7 @@ window.__ModuleLoader__.load({
 			}
 
 			/* 拼提示词：只写用户真的选了的，没选的不编。 */
-			function composePrompt() {
+			function composePrompt(roundInfo, round) {
 				/* 预填规则（2026-09-23 用户定的粗糙版）：装配台内容从上到下罗列成
 				 * 指令式初始上下文，直接可见不隐藏，每条写明"走什么工具"。
 				 * 拼装顺序/措辞/隐藏式注入，等整体功能通了再细调。
@@ -3208,9 +5481,6 @@ window.__ModuleLoader__.load({
 
 				/* 行为守则先入列（放在任务条目前面，先立规矩再派活）。 */
 				lines.push("行为守则（硬规则，违反即返工）：① 前置依赖无法满足时（链接抓不到、知识库缺竞品/客户资料、素材缺失），立即停下报告缺什么、等我决定 —— 不得换技能类型变通，不得编造品牌名/数据/事实，不得跳过依赖硬写。② 给了参考链接就先用 web_fetch 抓正文再动笔；抓取失败立即报告，不要凭域名猜内容。③ 竞品事实只能来自竞品资料，库里没有的就写「待补充」或停下问，不编造。④ 文章写完落草稿后立即停止并汇报草稿清单 —— 不得自行运行任何审核/检查动作，不得宣布「审核通过」「已审完」，审核由我在工作台人工完成（自查结论只能写「待人工审核」）。");
-				var lines = [];
-				var n = 0;
-				function step(text) { n += 1; lines.push(n + ". " + text); }
 
 				var who = "客户：" + (clientName || "（没选客户）");
 				if (lineName !== "") who += " · 业务线：" + lineName;
@@ -3260,26 +5530,42 @@ window.__ModuleLoader__.load({
 
 				lines.splice(0, 0, "工具分工：客户知识库、文章的读写都走 MCP 工具（mcp__sora-knowledge__*、mcp__sora-articles__*）；只有下面列出的 sora-* 写作技能走技能工具（skill），其他名字不是技能。新文章用文章库的 write_article 写入，必须带 draft:true，进入草稿区等待人工确认，仅当用户明确说「直接入库」时例外。技能正文（get_skill 返回的内容）已包含该技能的完整规则与提示词，写作以其为准；技能的子文件与附属文件（如 xxx/prompts/xxx.md 这种带路径的名字）不在调用范围内，无需读取。工具返回过大被转存为本地文件时，用文件读取工具直接读取该路径；网页获取仅适用于公网 http/https 地址，本机地址与 file: 协议不在其适用范围。");
 				/* lines 里各条已自带序号（step 加的），这里直接拼，别再加一遍（9-23 实测出现 1.1.）。 */
-				return "【装配台预填 · 初始上下文】\n" + lines.join("\n");
+				return wbRoundPrompt("【装配台预填 · 初始上下文】\n" + lines.join("\n"), roundInfo, round);
 			}
 
 			async function dispatch() {
 				if (clientName === "") return;
+				var personal, workspace;
+				setSending("正在准备个人工作区…");
+				try {
+					personal = (await wbRequireWorkspace()).personal;
+					workspace = ctx && typeof ctx.get === "function" ? ctx.get("uiWorkspace") : null;
+					if (!workspace || (typeof workspace.openWorkspace !== "function" && typeof workspace.openSession !== "function")) throw new Error(WB_WORKSPACE_ERROR);
+				} catch (error) {
+					setSending(WB_WORKSPACE_ERROR);
+					return;
+				}
 				/* C1 数据源：先把装配参数登记到宿主（POST task-meta）拿编号，
 				 * 编号追加在预填消息尾部 + 记进 sessionStorage —— 会话页顶部
 				 * 的任务条凭编号读回参数。登记失败不挡发送（任务条显示兜底）。 */
-				var metaId = "";
+				var metaId = "", batch = null;
+				var totalRounds = wbClampRounds(pickedTotal() || 1);
+				var batchId = totalRounds > 1 ? "wbb-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10) : "";
+				var selectedQuestions = mode === "weak" ? selectedSessionQuestions(weakGaps.questions, weakTicks.ticks, weakPicked, pick.key) : [];
 				setSending("正在登记任务参数…");
 				try {
-					var resp = await fetch(WB_API.taskMeta, {
+					var resp = await fetch("/api/workbench/task-meta", {
 						method: "POST",
 						headers: { "content-type": "application/json", accept: "application/json" },
-						body: JSON.stringify({
-							client: clientName, line: lineName, period: periodName,
+						body: JSON.stringify(buildTaskMetaPayload({
+							client_key: pick.key,
+							client: clientName, rounds: totalRounds, batch_id: batchId,
+							line: lineName, period: periodName,
+							business_line_id: pick.line, service_period_id: pick.period,
 							mode: mode, topic: topic,
 							refs: { urls: refs.urls, body: refs.body, style: refStyle },
 							skills: pickedEntries().map(function (s) { return s.name + "×" + s.count; }), base: base,
-						}),
+						})),
 					});
 					var body = await resp.json();
 					if (body && body.ok === true && typeof body.id === "string") metaId = body.id;
@@ -3292,69 +5578,85 @@ window.__ModuleLoader__.load({
 					setSending("装配稿生成失败：" + String(error && error.message ? error.message : error));
 					return;
 				}
-				if (metaId !== "") {
-					try {
-						sessionStorage.setItem(WB_KEY.taskMetaId, metaId);
-						sessionStorage.setItem(WB_KEY.pendingMeta, metaId);         // PromptRelay 绑定任务条用
-					} catch (error) { /* 隐身模式就算了 */ }
-				}
 				try {
-					sessionStorage.setItem(WB_KEY.pendingClient, clientName);       // 自绘侧栏分组登记用
-					/* 主题标签：有主题用主题；薄弱问句模式没填主题就标模式名 */
-					var topicLabel = (topic && topic.trim() !== "") ? topic.trim()
-						: (mode === "weak" ? "薄弱问句" : "");
-					sessionStorage.setItem(WB_KEY.pendingTopic, topicLabel);
-				} catch (error) { /* 隐身模式就算了 */ }
-				var workspace = ctx !== undefined && ctx !== null && typeof ctx.get === "function" ? ctx.get("uiWorkspace") : undefined;
-				if (workspace === undefined || workspace === null || typeof workspace.startSession !== "function") {
-					setSending("起不了会话：宿主没有 uiWorkspace");
+					try {
+						if (selModel !== "__default__" || selEffort !== "__default__") {
+							var mp = String(selModel).split("::");
+							sessionStorage.setItem(WB_KEY.modelPending, JSON.stringify({ provider: selModel === "__default__" ? "deepseek-official" : mp[0], model: selModel === "__default__" ? "deepseek-flash" : mp[1], effort: selEffort === "__default__" ? "" : selEffort }));
+						}
+					} catch (error) { /* storage unavailable */ }
+					var serverBatch = batchId ? await wbServerBatch() : false, batchBody = null;
+					if (batchId) {
+						var batchModel = null;
+						try { batchModel = JSON.parse(sessionStorage.getItem(WB_KEY.modelPending) || "null"); } catch (e) { }
+						batchBody = { id: batchId, rounds: totalRounds, prompt: text, meta_id: metaId,
+							client: clientName, client_key: pick.key, questions: selectedQuestions, model: batchModel,
+							bind: { client_key: pick.key, client: clientName, topic: topic, meta_id: metaId, questions: selectedQuestions,
+								capture_period: weakGaps.capturePeriod || weakClientId || "", capture_task_id: weakGaps.taskId || "", collected_at: weakGaps.collectedAt || "" } };
+						if (!serverBatch) batch = await wbBatchPost(batchBody);
+					}
+					var openedSession = false;
+					var rememberPending = function (sessionId) {
+						openedSession = true;
+						pendingPrompt = { text: text, sessionId: sessionId };
+						if (batch) {
+							pendingPrompt.batchId = batch.id;
+							wbBatches[wbBatchKey(sessionId)] = { batch: batch };
+							try { sessionStorage.setItem("wb-batch-for-" + wbBatchKey(sessionId), batch.id); } catch (e) { }
+						}
+						try {
+							if (metaId !== "") {
+								sessionStorage.setItem("wb-task-meta-id", metaId);
+								sessionStorage.setItem("wb-pending-meta", metaId);
+							}
+							/* 新会话强制绑客户：等 PromptRelay 拿到 session id 再 POST 索引 */
+							sessionStorage.setItem("wb-pending-bind", JSON.stringify({
+								client_key: pick.key,
+								client: clientName,
+								topic: topic,
+								meta_id: metaId,
+								business_line_id: pick.line, service_period_id: pick.period,
+								line: lineName, period: periodName,
+								questions: selectedQuestions,
+								capture_period: weakGaps.capturePeriod || weakClientId || "",
+								capture_task_id: weakGaps.taskId || "",
+								collected_at: weakGaps.collectedAt || "",
+							}));
+						} catch (error) { /* 隐身模式就算了 */ }
+					};
+					var batchSessionId = "";
+					function preparePending(sessionId) {
+						if (serverBatch) batchSessionId = sessionId;
+						else rememberPending(sessionId);
+					}
+					if (typeof workspace.openWorkspace === "function") {
+						await workspace.openWorkspace(personal.id, preparePending);
+					} else {
+						/* Deploy-line hosts may expose only the new session-create route.
+						 * The host has already scoped that route to personal.id. */
+						var createResponse = await fetch(WB_API.sessionCreate, { method: "POST", headers: { accept: "application/json" } });
+						var createBody = await createResponse.json();
+						var createdId = createBody && createBody.ok === true ? String(createBody.sessionId || "") : "";
+						if (!createdId) throw new Error(WB_WORKSPACE_ERROR);
+						workspace.openSession(createdId);
+						preparePending(createdId);
+					}
+					if (serverBatch && batchSessionId) {
+						batch = await wbBatchPost(Object.assign({}, batchBody, { session_id: batchSessionId }), true);
+						rememberPending(batchSessionId);
+						wbBatchEmit();
+					}
+					setCounts({});
+					if (openedSession) { setWeakPicked([]); saveWeakSelection(weakSelectionKey, []); }
+					setSending("");
+				} catch (error) {
+					pendingPrompt = null;
+					setSending("起会话失败：" + String(error && error.message ? error.message : error));
 					return;
 				}
-				/* 客户分组（2026-09-26 定稿方向）：工作区概念砍掉，所有会话都在同一个
-				 * 大工作区；「客户」只是前端展示层的分组（自绘侧栏按客户渲染树）。
-				 * 这里保持无参 startSession —— 不按工作区起会话。 */
-				pendingPrompt = text;
-				/* 模型/思考强度随任务走（PromptRelay 消费）：都没选就什么都不写 = 用宿主默认。 */
-				try {
-					if (selModel !== "__default__" || selEffort !== "__default__") {
-						var mp = String(selModel).split("::");
-						var mProv = mp[0], mModel = mp[1];
-						if (selModel === "__default__") {
-							/* 模型没选、只调了思考：绑到宿主默认模型（agent-default-model） */
-							mProv = "deepseek-official"; mModel = "deepseek-flash";
-						}
-						sessionStorage.setItem(WB_KEY.modelPending, JSON.stringify({
-							provider: mProv,
-							model: mModel,
-							effort: selEffort !== "__default__" ? selEffort : "",
-						}));
-					}
-				} catch (error) { /* 隐身模式就算了，照常用默认模型 */ }
-				setSending("");
-				/* 直接造一个真实（普通）会话并打开 —— 不再走 startSession()：
-				 * 它现在落到「探索未至之境」向导页，那里没有我们的挂载点，
-				 * 提示词永远没人消费（2026-10-12 用户报障）。创建失败退回老路径。 */
-				var fallbackStart = function () {
-					try { workspace.startSession(); setCounts({}); } catch (error) {
-						pendingPrompt = null;
-						setSending("起会话失败：" + String(error && error.message ? error.message : error));
-					}
-				};
-				fetch(WB_API.sessionCreate, { method: "POST" })
-					.then(function (r) { return r.json(); })
-					.then(function (b) {
-						if (!b || b.ok !== true || !b.sessionId) { fallbackStart(); return; }
-						try {
-							workspace.openSession(b.sessionId);
-							setCounts({});   /* 任务开跑，装配台的加购清零（起会话失败则保留可重试） */
-							/* 会话页渲染是异步的：relay 挂载后 effect 自动消费；
-							 * 1.2s 后再敲一次事件兜底渲染竞态。 */
-							setTimeout(function () {
-								try { window.dispatchEvent(new Event("wb-prompt-set")); } catch (e) { /* 老浏览器就算了 */ }
-							}, 1200);
-						} catch (error) { fallbackStart(); }
-					})
-					.catch(fallbackStart);
+				/* 通知接力挂件：万一当前挂着的会话就是空白目标
+				 * （effect 的 deps 都没变），靠这个事件立刻消费。 */
+				try { window.dispatchEvent(new Event("wb-prompt-set")); } catch (error) { /* 老浏览器就算了 */ }
 			}
 
 			/* A4：拖杆改工作区高度。指针捕获，鼠标移出窗口也不会卡住。 */
@@ -3405,21 +5707,44 @@ window.__ModuleLoader__.load({
 				: [];
 
 			/* 薄弱问句勾选：点行、拖行、勾方块、全选，都走这一个入口。 */
-			function weakPickSet(name, on) {
+			function weakPickedUpdate(names, on) {
 				setWeakPicked(function (prev) {
-					var has = prev.indexOf(name) >= 0;
-					if (on && !has) return prev.concat([name]);
-					if (!on && has) return prev.filter(function (item) { return item !== name; });
-					return prev;
+					var next = prev.slice();
+					for (var ni = 0; ni < names.length; ni++) {
+						var name = names[ni];
+						var at = next.indexOf(name);
+						if (on && at < 0) next.push(name);
+						if (!on && at >= 0) next.splice(at, 1);
+					}
+					return next;
 				});
+			}
+			function weakPickSet(name, on) {
+				weakPickedUpdate([name], on);
+			}
+			function weakBulkSet(names, on) {
+				var unique = [];
+				for (var i = 0; i < names.length; i++) if (unique.indexOf(names[i]) < 0) unique.push(names[i]);
+				weakPickedUpdate(unique, on);
 			}
 			var weakDragS = React.useState(false);
 			var weakDragging = weakDragS[0], setWeakDragging = weakDragS[1];
 			var weakDragTo = React.useRef(null);
+			var weakDragItems = React.useRef([]);
 			React.useEffect(function () {
-				function up() { weakDragTo.current = null; setWeakDragging(false); }
+				function up() {
+					weakDragItems.current = [];
+					weakDragTo.current = null;
+					setWeakDragging(false);
+				}
 				document.addEventListener("mouseup", up);
-				return function () { document.removeEventListener("mouseup", up); };
+				document.addEventListener("pointerup", up);
+				document.addEventListener("pointercancel", up);
+				return function () {
+					document.removeEventListener("mouseup", up);
+					document.removeEventListener("pointerup", up);
+					document.removeEventListener("pointercancel", up);
+				};
 			}, []);
 			/* 按住往下拖 = 连着勾一串（原型同款）；按下 preventDefault 防止拖出选字。 */
 			function weakRowDown(name, e) {
@@ -3428,34 +5753,61 @@ window.__ModuleLoader__.load({
 				e.preventDefault();
 				var on = weakPicked.indexOf(name) < 0;
 				weakDragTo.current = on;
+				weakDragItems.current = [name];
 				weakPickSet(name, on);
 				setWeakDragging(true);
 				setChipOff(false);
 			}
 			function weakRowEnter(name) {
 				if (weakDragTo.current === null) return;
+				if (weakDragItems.current.indexOf(name) >= 0) return;
+				weakDragItems.current.push(name);
 				weakPickSet(name, weakDragTo.current);
 			}
 			/* 「选前10」：一键选定当前排序下最薄的前 10 条；再点一次撤销这 10 条，防误触。 */
-			function pickTop10() {
-				setWeakPicked(function (prev) {
-					var names = weakRows.slice(0, 10).map(function (row) { return row.question; });
-					var allIn = names.length > 0 && names.every(function (n) { return prev.indexOf(n) >= 0; });
-					if (allIn) return prev.filter(function (item) { return names.indexOf(item) < 0; });
-					return prev.concat(names.filter(function (n) { return prev.indexOf(n) < 0; }));
-				});
+			function pickRecommended(scope) {
+				var source = unified && Array.isArray(scope) ? weakRows.filter(function(r){return scope.indexOf(r.question) >= 0;}) : weakRows;
+				var names = source.filter(function (r) { return r.summary && r.summary.weakCount > 0; }).slice(0,3).map(function(r){return r.question;});
+				weakBulkSet(names, true); setChipOff(false);
+				if (unified && pickedTotal() === 0 && names.length) { var defaults = (skills.skills || []).filter(function(s){return s.name === "sora-selection";}); if(defaults.length) { var nextCounts={}; nextCounts[defaults[0].name]=names.length; setCounts(nextCounts); } }
+			}
+			function pickTop10(scope) {
+				var source = unified && Array.isArray(scope) ? weakRows.filter(function(r){return scope.indexOf(r.question) >= 0;}) : weakRows;
+				var names = source.slice(0, 10).map(function (row) { return row.question; });
+				var allIn = names.length > 0 && names.every(function (n) { return weakPicked.indexOf(n) >= 0; });
+				weakBulkSet(names, !allIn);
 				setChipOff(false);
 			}
 
+			if (window.dshUnified) window.dshUnified.assembly = {
+				status: weakGaps.status, error: weakGaps.detail || weakGaps.error,
+				rows: weakRows, picked: weakPicked, clientName: clientName,
+				recommend: pickRecommended, top10: pickTop10, pick: weakPickSet, bulk: weakBulkSet,
+				rowDown: weakRowDown, rowEnter: weakRowEnter, dispatch: dispatch,
+				sending: sending, types: pickedLabel(),
+			};
+			React.useEffect(function () {
+				if (!window.dshUnified) return;
+				window.dispatchEvent(new Event("dsh:assembly-update"));
+			}, [weakGaps.status, weakRows, weakPicked, sending]);
+			React.useEffect(function () {
+				if (!window.dshUnified) return;
+				window.dshUnified.assemblyActive = true;
+				window.dispatchEvent(new Event("dsh:assembly-update"));
+				return function () { window.dshUnified.assemblyActive = false; window.dispatchEvent(new Event("dsh:assembly-update")); };
+			}, [!!unified]);
+
 			/* 工作条：日期 · 平台多选 · 词根 · 勾差额前20 · 统计 · ⟳/⤢。放大时同一份搬进浮层。 */
 			var weakBar = h("span", { className: "wb_filters" },
-				mode !== "weak"
-					? h("span", { className: "wb_weakDate" }, "直接输入选题")
-					: [
-						h("span", { key: "meta", className: "wb_weakDate" },
-							(weakLine === null || !weakLine.collectedAt) ? "最新采集 —"
-								: "最新采集 " + collectedDay(weakLine.collectedAt)
-									+ (weakGaps.status === "ready" ? " · " + String(weakGaps.questions.length) + " 条" : "")),
+					unified ? h("button", {type:"button", className:"wb_recommend", onClick:pickRecommended}, "选推荐的 3 条") : null,
+					mode !== "weak"
+						? h("span", { className: "wb_weakDate" }, "直接输入选题")
+						: [
+							h("span", { key: "meta", className: "wb_weakDate" },
+							weakGaps.status !== "ready" ? "最新采集 —"
+								: "采集 " + (collectedDay(weakGaps.collectedAt) || "日期未知")
+									+ (weakGaps.computedAt ? " · 计算 " + collectedDay(weakGaps.computedAt) : "")
+									+ " · " + String(weakGaps.questions.length) + " 条"),
 						h("span", { key: "plat", className: "wb_fsel" },
 							h("button", {
 								type: "button",
@@ -3482,7 +5834,7 @@ window.__ModuleLoader__.load({
 								onClick: function () { setRootOpen(!rootOpen); },
 							}, rootSel.length === 0 ? "全部词根"
 								: rootSel.length === 1 ? rootSel[0]
-									: "词根 " + rootSel.length + "/" + weakRoots.length),
+									: (unified ? "主题分类 " : "词根 ") + rootSel.length + "/" + weakRoots.length),
 							rootOpen ? h("div", { key: "shield", className: "wb_platShield", onMouseDown: function () { setRootOpen(false); } }) : null,
 							rootOpen ? h("div", { key: "menu", className: "wb_platMenu" },
 								h("button", {
@@ -3502,6 +5854,7 @@ window.__ModuleLoader__.load({
 								})) : null),
 						h("button", { key: "top", type: "button", className: "wb_miniBtn", title: "一键选定当前排序下最薄的前 10 条；再点一次撤销", onClick: pickTop10 }, "选前10"),
 						h("span", { key: "stat", className: "wb_weakStat" }, "显示 " + String(weakRows.length) + " 条 · 已选定 " + String(weakPicked.length) + " 条"),
+						weakTicks.error ? h("span", { key: "tick-error", className: "wb_tickError", title: weakTicks.detail || "" }, "同步未完成：" + weakErrorText(weakTicks.error, weakTicks.detail)) : null,
 						weakGaps.status === "ready" ? h("span", { key: "icons", className: "wb_weakIcons" },
 							h("button", {
 								type: "button", className: "wb_iconBtn", title: "重新取一次数据",
@@ -3535,9 +5888,10 @@ window.__ModuleLoader__.load({
 						setSort: setSort,
 						weakPicked: weakPicked,
 						pickSet: weakPickSet,
+						bulkSet: weakBulkSet,
+						ticks: weakTicks.ticks,
 						rowDown: weakRowDown,
 						rowEnter: weakRowEnter,
-						setWeakPicked: setWeakPicked,
 						setChipOff: setChipOff,
 						dragging: weakDragging,
 					})
@@ -3575,11 +5929,23 @@ window.__ModuleLoader__.load({
 
 			var refSummary = refCount === 0 ? "" : refCount + " 篇参考 · " + refStyle;
 
+			if (mobile) return h(MobileAssembly, {
+				clients: clients, clientName: clientName, lineName: lineName, periodName: periodName,
+				pick: pick, setPick: setPick, lines: lines, periods: periods, articles: articles,
+				onClient: onClient, onLine: onLine, mode: mode, setMode: setMode, topic: topic, setTopic: setTopic,
+				refTab: refTab, setRefTab: setRefTab, refs: refs, refText: refText, setRefText: setRefText,
+				refCount: refCount, refStyle: refStyle, setRefStyle: setRefStyle, skills: skills, counts: counts, pickedEntries: pickedEntries(), pickedTotal: pickedTotal(),
+				addOne: addOne, minusOne: minusOne, base: base, setBase: setBase, sending: sending, dispatch: dispatch,
+				weakGaps: weakGaps, weakPicked: weakPicked, weakRows: weakRows, pickSet: weakPickSet,
+				bulkSet: weakBulkSet, rowDown: weakRowDown, rowEnter: weakRowEnter, unified: !!unified, recommend: pickRecommended,
+				selectedCount: weakPicked.length,
+			});
+
 			return h("div", { className: "wb_root" },
 				h("div", { className: "wb_asm" },
 
 					/* ---- A1 给谁写 ---- */
-					h("div", { className: "wb_head" },
+					h("div", { className: "wb_head", hidden: !!unified },
 						h("span", { className: "wb_headT" }, "给"),
 						h("span", { className: "wb_sel wb_lv1" },
 							h("select", {
@@ -3622,7 +5988,7 @@ window.__ModuleLoader__.load({
 							className: "wb_mini", disabled: true,
 							title: "新建客户 = 去知识库那边建一个；这一版还没接",
 						}, "＋ 新建客户"),
-						h("span", { className: "wb_hint" }, headHint)),
+						h("span", { className: "wb_hint" }, clients.status === "loading" ? h(WbSkeleton, { compact: true, label: headHint }) : headHint)),
 
 					/* ---- A2 主题 ---- */
 					h("div", { className: "wb_row" },
@@ -3632,17 +5998,17 @@ window.__ModuleLoader__.load({
 							h("button", { type: "button", className: "wb_tab", "data-on": mode === "free" ? "1" : "0", onClick: function () { setMode("free"); setChipOff(false); setWeakZoom(false); } }, "输入"))),
 
 					/* ---- A3 工作区（⤢ 放大时整块搬进全屏浮层，工作条/表格复用同一份） ---- */
-					(weakZoom && mode === "weak" && weakGaps.status === "ready"
+					h(WbPresence, null, weakZoom && mode === "weak" && weakGaps.status === "ready"
 						? h("div", {
 							className: "wb_zoomMask",
 							onMouseDown: function (e) { if (e.target === e.currentTarget) setWeakZoom(false); },
 						},
 							h("div", { className: "wb_zoomSheet" },
 								h("div", { className: "wb_workBar" }, weakBar),
-								h("div", { className: "wb_workBody" }, weakBody)))
-						: h("div", { className: "wb_work", id: "wb-work", style: workHeight === null ? undefined : { flex: "0 0 " + workHeight.work + "px" } },
+								h("div", { className: "wb_workBody", key: mode }, weakBody))) : null),
+					!(weakZoom && mode === "weak" && weakGaps.status === "ready") ? h("div", { className: "wb_work", id: "wb-work", style: workHeight === null ? undefined : { flex: "0 0 " + workHeight.work + "px" } },
 							h("div", { className: "wb_workBar" }, weakBar),
-							h("div", { className: "wb_workBody" }, weakBody))),
+							h("div", { className: "wb_workBody", key: mode }, weakBody)) : null,
 
 					/* ---- A4 拖杆 ---- */
 					h("div", {
@@ -3669,7 +6035,7 @@ window.__ModuleLoader__.load({
 									onClick: function (e) { e.stopPropagation(); setRefTab("skill"); setRefOpen(true); },
 								}, "用模板" + (pickedTotal() === 0 ? "" : " " + pickedTotal()))),
 							h("span", { className: "wb_refSum" }, refSummary)),
-						refOpen ? h("div", { className: "wb_refBd" },
+						h(WbCollapse, { open: refOpen }, h("div", { className: "wb_refBd", key: refTab },
 							refTab === "copy"
 								? h("div", { style: { display: "flex", flexDirection: "column", gap: "10px" } },
 									h("div", { className: "wb_refBox" },
@@ -3713,14 +6079,14 @@ window.__ModuleLoader__.load({
 									skills.status === "error"
 										? h("div", { className: "wb_skEmpty" }, skillsErrorText(skills.error, skills.detail))
 										: skills.status === "loading"
-											? h("div", { className: "wb_skEmpty" }, "技能目录读取中…")
+											? h(WbSkeleton, { label: "技能目录读取中…" })
 											: skills.skills.length === 0
 												? h("div", { className: "wb_skEmpty" }, "技能服务是空的 —— 一个 skill 都没注册")
 										: (function () {
-											/* 技能三层（2026-09-23，配合 skill-remote 分层）：个人层 → 中间层 → 公共层，
+											/* 技能三层（2026-09-23，配合 skill-remote 分层）：个人层 → 个人中间层 → 公共层，
 											 没带层的归「其他」。顺序按使用频率排：自己的最常用，放最前。 */
 											var LAYER_ORDER = ["personal", "middle", "public"];
-											var LAYER_LABELS = { "personal": "个人层", "middle": "中间层", "public": "公共层" };
+											var LAYER_LABELS = { "personal": "个人层", "middle": "个人中间层", "public": "公共层" };
 											function normalizeLayer(raw) {
 												if (raw === "personal" || raw === "个人") return "personal";
 												if (raw === "middle" || raw === "_middle" || raw.indexOf("中") >= 0) return "middle";
@@ -3758,7 +6124,7 @@ window.__ModuleLoader__.load({
 																		}, String(n)) : null);
 																})));
 													}));
-										}()))) : null),
+										}()))))),
 
 					/* ---- A6 底座 + A7 放大 ---- */
 					h("div", { className: "wb_base", "data-zoom": zoom ? "1" : "0" },
@@ -3832,12 +6198,12 @@ window.__ModuleLoader__.load({
 									type: "button", className: "wb_go",
 									disabled: clientName === "" || sending !== "",
 									title: "发送",
-									onClick: function () { setConfirmOpen(true); },
-								}, "↑"))),
+									onClick: function () { if (unified) dispatch(); else setConfirmOpen(true); },
+								}, unified ? (mode === "weak" ? "写这 " + weakPicked.length + " 条问句" : "开始写作") : "↑"))),
 						sending === "" ? null : h("div", { className: "wb_emptyS wb_bad" }, sending))),
 
 					/* ---- 发送前确认卡：一道闸管住选错客户/问句/技能/材料 ---- */
-					confirmOpen ? h("div", {
+					h(WbPresence, null, confirmOpen ? h("div", {
 						className: "wb_confirmMask",
 						onMouseDown: function (e) { if (e.target === e.currentTarget) setConfirmOpen(false); },
 					},
@@ -3877,12 +6243,18 @@ window.__ModuleLoader__.load({
 									disabled: sending !== "",
 									onClick: function () { setConfirmOpen(false); dispatch(); },
 								}, "确认发送"))))
-						: null);
+						: null));
 		}
 
 		/* ---- wiring ------------------------------------------------------- */
 		function apply(ctx, config) {
 			WbCtx = ctx;
+			if (ctx && typeof ctx.effect === "function") {
+				ctx.effect(wbInstallMobile, "dsh-workbench: mobile viewport");
+				ctx.effect(function () { return installUnifiedBridge(ctx); }, "dsh-workbench: opt-in shell bridge");
+				ctx.effect(function () { return wbInstallSessionGuard(ctx); }, "dsh-workbench: personal new sessions");
+				ctx.effect(wbInstallConversation, "dsh-workbench: conversation decorations");
+			}
 			/* 注意：**不要**在这里注册 locale。`sidebar` 命名空间是官方
 			 * dsh-client-ui-sidebar 的单一占用者，我们再去 register 会把
 			 * 官方侧边栏插件整个炸掉（"locale namespace sidebar already
@@ -3920,7 +6292,7 @@ window.__ModuleLoader__.load({
 			/* ---- R 区：右侧栏"文章审核" tab（2026-09-24）--------------------
 			 * stage1：向 tab 注册表声明类型（分页型，不带资源地址）；
 			 * stage2：`sidebar.right.pane.tab`/`.title` 槽按 id 给 body 和 chip。
-			 * TaskBar 探测到草稿从无到有时 openTab 自动展开右侧栏。 */
+			 * TaskBar 探测到本轮首次实时写入时 openTab 自动展开右侧栏。 */
 			try {
 				ctx.sidebarRightTabs.register({
 					id: "workbench-article-review",
@@ -3932,7 +6304,7 @@ window.__ModuleLoader__.load({
 				return ctx.slots.register({
 					name: "sidebar.right.pane.tab",
 					key: "workbench-article-review",
-				}, ReviewTabBody);
+				}, function(props) { var shell = useUnifiedContext(); return shell ? null : h(ReviewTabBody, props); });
 			});
 			ctx.slots.inject("sidebar.right.pane.tab.title", function () {
 				return ctx.slots.register({
@@ -3945,24 +6317,6 @@ window.__ModuleLoader__.load({
 			/* header 槽官方已占 priority 0 —— 显式用 -1（更低者渲染）遮蔽它，
 			 * 否则官方插件 apply 时撞车报错（9-23 实测）。 */
 			ctx.slots.inject("conversation.session.header", function () {
-				/* 会话页美化 tick：预填折叠卡 + 工具名映射（wbConvTick，幂等）。
-				 * window 单例：client.js 热重载会重跑 factory，不判重会叠出多个 timer。
-				 * 即时性：3s 轮询跟不上「发出去的一瞬间」——新预填先裸奔最长 3 秒。
-				 * 挂 MutationObserver 监听消息流，节点一变（80ms 内）立即折叠；
-				 * observer 观察整个 body（消息流容器可能随会话切换重建），tick 本身很轻。 */
-				if (!window.__wbConvTimer) {
-					window.__wbConvTimer = setInterval(wbConvTick, 3000);
-					setTimeout(wbConvTick, 400);
-					var wbTickQueued = 0;
-					var wbMo = new MutationObserver(function () {
-						if (wbTickQueued) return;
-						wbTickQueued = setTimeout(function () {
-							wbTickQueued = 0;
-							try { wbConvTick(); } catch (e) { /* tick 崩了不影响页面 */ }
-						}, 80);
-					});
-					wbMo.observe(document.body, { childList: true, subtree: true });
-				}
 				return ctx.slots.register({
 					name: "conversation.session.header",
 					id: "workbench-task-bar",
@@ -3991,14 +6345,21 @@ window.__ModuleLoader__.load({
 					name: "conversation.composer.dock",
 					id: "workbench-prompt-relay",
 					order: 90,
-				}, function (props) { return h(PromptRelay, Object.assign({}, props, { wbCtx: ctx })); });
+				}, function (props) { return h(React.Fragment, null, h(PromptRelay, Object.assign({}, props, { wbCtx: ctx })), h(BatchRelay, props)); });
 			});
 			ctx.slots.inject("conversation.input.dock", function () {
 				return ctx.slots.register({
 					name: "conversation.input.dock",
 					id: "workbench-prompt-relay-hero",
 					order: 90,
-				}, function (props) { return h(PromptRelay, Object.assign({}, props, { wbCtx: ctx })); });
+				}, function (props) { return h(React.Fragment, null, h(PromptRelay, Object.assign({}, props, { wbCtx: ctx })), h(BatchRelay, props)); });
+			});
+			ctx.slots.inject("conversation.input.dock", function () {
+				return ctx.slots.register({
+					name: "conversation.input.dock",
+					id: "workbench-mobile-quick",
+					order: 80,
+				}, MobileQuickPrompts);
 			});
 			ctx.slots.inject("conversation.input.dock", function () {
 				return ctx.slots.register({
@@ -4017,6 +6378,8 @@ window.__ModuleLoader__.load({
 				});
 			});
 
+			ctx.slots.inject("shell.overlay", function () { return ctx.slots.register({name:"shell.overlay", id:"unified-review-portal", order:6}, UnifiedReviewPortal); });
+
 			/* 进来就落在装配台。布局自己的初始选择在我们后面才落定，所以延后。 */
 			var defaultPanel = (config !== null && typeof config === "object"
 				&& typeof config.defaultPanel === "string") ? config.defaultPanel : WORKBENCH_KEY;
@@ -4033,8 +6396,23 @@ window.__ModuleLoader__.load({
 			}
 		}
 
-		exports.inject = ["slots", "layout", "sidebarRight", "sidebarRightTabs", "sessions"];
+		exports.inject = ["slots", "layout", "sidebarRight", "sidebarRightTabs", "sessions", "uiWorkspace"];
 		exports.apply = apply;
+		exports.wbRequestedTotal = wbRequestedTotal;
+		exports.wbWriteProgress = wbWriteProgress;
+		exports.wbMergeBatchStatus = wbMergeBatchStatus;
+		exports.wbReviewListSize = wbReviewListSize;
+		exports.wbReviewListKey = wbReviewListKey;
+		/* Small pure helpers are exported for the browser-package contract tests. */
+		exports.wbUseUnifiedContext = useUnifiedContext;
+		exports.UnifiedReviewPortal = UnifiedReviewPortal;
+		exports.wbMapCaptureWordDir = mapCaptureWordDir;
+		exports.wbMapCaptureQuestions = mapCaptureQuestions;
+		exports.wbWeakPickedFromTicks = weakPickedFromTicks;
+		exports.wbWeakSelectionText = weakSelectionText;
+		exports.wbQuestionLinkPrompt = questionLinkPrompt;
+		exports.wbSelectedSessionQuestions = selectedSessionQuestions;
+		exports.wbBindSessionClient = bindSessionClient;
 		return module.exports;
 	}
 });

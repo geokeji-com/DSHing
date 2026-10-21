@@ -13,3 +13,7 @@ plugins/dsh-workbench/
 
 # 依赖装在本机/镜像里，不进仓库
 node_modules/
+
+# Python test artifacts
+__pycache__/
+.pytest_cache/

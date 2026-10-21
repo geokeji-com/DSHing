@@ -10,7 +10,7 @@ const response = body => ({ ok: true, status: 200, json: async () => body })
 const clientsBody = { ok: true, customers: [{ id: 'CUS-A', name: '我的客户' }], workspace: workspaceInfo }
 const errorText = '个人工作区暂不可用，请稍后重试'
 
-function client({ fetchBody = clientsBody, service, mobile = false } = {}) {
+function client({ fetchBody = clientsBody, sessionResponse, service, mobile = false } = {}) {
   let api, dispatch
   const requests = [], starts = [], opens = [], alerts = [], warnings = [], updates = [], effects = [], disposers = [], events = []
   const storage = new Map(), listeners = new Map()
@@ -50,6 +50,7 @@ function client({ fetchBody = clientsBody, service, mobile = false } = {}) {
       requests.push({ url, opts })
       if (url === '/api/workbench/clients') return response(typeof fetchBody === 'function' ? await fetchBody() : fetchBody)
       if (url === '/api/workbench/task-meta') return response({ ok: true, id: 'task-1' })
+      if (url === '/api/workbench/session-client' && sessionResponse) return response(await sessionResponse())
       return response({ ok: true })
     },
     sessionStorage: { setItem: (key, value) => storage.set(key, value), getItem: key => storage.get(key) ?? null, removeItem: key => storage.delete(key) },
@@ -198,6 +199,7 @@ test('dispatch explicitly opens personal on desktop and mobile and relays only i
     assert.deepEqual(old.sent, [])
     assert.equal(f.events.includes('wb-prompt-set'), true)
     const target = f.relay('personal-session')
+    await new Promise(resolve => setImmediate(resolve))
     assert.match(target.sent[0], /我的客户/)
     assert.equal(target.sent[1], 'submit')
     assert.equal(f.storage.has('wb-pending-bind'), false)
@@ -247,4 +249,26 @@ test('existing sessions, including shared cwd sessions, still use the untouched 
   assert.deepEqual(f.opens, ['existing-shared-session', 'existing-personal-session'])
   assert.equal(f.requests.length, 0)
   dispose()
+})
+
+
+test('relay waits for the session snapshot and injects context only after cloud capability response', async () => {
+  let finish
+  const f = client({ sessionResponse: () => new Promise(resolve => { finish = resolve }) })
+  f.api.wbCacheWorkspace(clientsBody)
+  await f.renderDispatch()()
+  const bind = JSON.parse(f.storage.get('wb-pending-bind'))
+  bind.questions = [{ qid: 'q1', question: '问句', client_key: 'CUS-A' }]
+  bind.capture_period = 'E'
+  f.storage.set('wb-pending-bind', JSON.stringify(bind))
+  const target = f.relay('personal-session')
+  assert.deepEqual(target.sent, [])
+  const posted = JSON.parse(f.requests.find(r => r.url === '/api/workbench/session-client').opts.body)
+  assert.deepEqual(posted.questions, bind.questions)
+  assert.equal(posted.capture_period, 'E')
+  finish({ ok: true, article_question_links: { version: 1 } })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.match(target.sent[0], /question_context/)
+  assert.match(target.sent[0], /personal-session/)
+  assert.equal(target.sent[1], 'submit')
 })

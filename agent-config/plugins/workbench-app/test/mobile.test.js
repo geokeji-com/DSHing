@@ -8,7 +8,7 @@ function load() {
   let api
   const media = { matches: false }
   const window = { matchMedia: () => media, __ModuleLoader__: { load({ factory }) { api = factory(() => ({})) } } }
-  vm.runInNewContext(source.replace('return module.exports;', 'return {periodsFor, firstPeriodId, splitRefs, buildTaskMetaPayload, wbKeyboardInset, wbMobileViewport, wbStripLeadingTitle, wbContextLabel, wbSessionStatus, wbMobileProgress, wbNavTakeFrame};'), {window})
+  vm.runInNewContext(source.replace('return module.exports;', 'return {periodsFor, firstPeriodId, splitRefs, buildTaskMetaPayload, wbKeyboardInset, wbMobileViewport, wbStripLeadingTitle, wbContextLabel, wbRunStatus, wbSessionStatus, wbMobileProgress, wbNavTakeFrame};'), {window})
   return { api, media }
 }
 const { api } = load()
@@ -27,6 +27,16 @@ test('references still use the existing prompt parser and client key payload', (
   assert.equal(payload.client_key,'CUS-fixture')
   assert.equal(payload.refs,refs)
 })
+
+test('task metadata carries selected hierarchy IDs alongside display names', () => {
+  const { api } = load()
+  const payload = api.buildTaskMetaPayload({ client_key: 'CUS-fixture', client: '客户',
+    business_line_id: 'line-id', service_period_id: 'period-id', line: '品线', period: '服务期' })
+  assert.equal(payload.business_line_id, 'line-id')
+  assert.equal(payload.service_period_id, 'period-id')
+  assert.equal(payload.line, '品线')
+  assert.equal(payload.period, '服务期')
+})
 test('visual viewport accounts for scrolling, resizing, and pinch zoom', () => {
   assert.equal(api.wbKeyboardInset(852,{height:516,offsetTop:0,scale:1}),336)
   assert.equal(api.wbKeyboardInset(852,{height:516,offsetTop:50,scale:1}),286)
@@ -35,11 +45,12 @@ test('visual viewport accounts for scrolling, resizing, and pinch zoom', () => {
   assert.equal(api.wbKeyboardInset(852,null),0)
 })
 test('drawer states are based on evidence, unknown is never labelled stopped', () => {
-  assert.equal(api.wbSessionStatus(null).label,'状态未同步')
-  assert.equal(api.wbSessionStatus({running:false}).label,'已停止')
-  assert.equal(api.wbSessionStatus({running:true,pending:2}).tone,'blue')
-  assert.equal(api.wbSessionStatus({pending:2,confirmed:1}).tone,'orange')
-  assert.equal(api.wbSessionStatus({confirmed:1}).tone,'green')
+  const status = input => api.wbSessionStatus(api.wbRunStatus(input))
+  assert.equal(status({}).label,'')
+  assert.equal(status({summary:{running:false}}).label,'')
+  assert.equal(status({summary:{running:true},draftsPending:2}).tone,'klein')
+  assert.equal(status({summary:{running:false},draftsPending:2}).tone,'warn')
+  assert.equal(status({summary:{id:'s'},unread:{s:1}}).tone,'ok')
 })
 test('mobile frame forcing exits before accessing the DOM', () => {
   const {api,media}=load();media.matches=true
@@ -53,10 +64,10 @@ test('mobile progress uses the latest todo list, not earlier success or failed w
   const cleared={kind:'tool-result',call:{name:'todo_write',argsRaw:'{"todos":[]}'}}
   assert.equal(api.wbMobileProgress([todo('completed'),cleared],null,[],{}).length,0)
 })
-test('mobile progress counts unique written articles without treating template count as a quota', () => {
+test('mobile progress counts unique written articles and omits an unknown requested total', () => {
   const write={kind:'tool-result',call:{name:'mcp__articles__write_article',argsRaw:'{"title":"Article"}'}}
   const rows=api.wbMobileProgress([write,write],{partial:null,runningCalls:[]},[{title:'Article'}],{Article:true})
-  assert.equal(rows[0][1],'本会话已写 1 篇文章')
+  assert.equal(rows[0][1],'写作中 · 已写 1 篇（草稿区待审）')
   assert.equal(rows[1][1],'已入库 1 篇')
 })
 
@@ -98,7 +109,6 @@ test('mobile workbench CSS owns the shell width, light tokens and underline-free
   assert.match(source, /\.wb_mWeakRow\{flex:0 0 auto;display:grid;grid-template-columns:44px minmax\(0,1fr\)/)
   assert.match(source, /\.wb_mWeakGap\{display:inline-flex/)
   assert.match(source, /className:'wb_gapNum'/)
-  assert.match(source, /weakSelectionTouched\.current = true/)
   assert.match(source, /数据来源：Support/)
   assert.doesNotMatch(source, /data-dsh-theme="dark"|data-ds-dark-theme\] .*color-scheme:dark/)
   assert.match(source, /html\[data-wb-mobile\] body\{[^}]*--wb-bg:var\(--dsh-bg,/)

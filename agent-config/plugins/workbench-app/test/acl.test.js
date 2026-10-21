@@ -93,6 +93,33 @@ function denied(response, status = 403) {
   assert.deepEqual(response.body, { ok: false, error: status === 403 ? 'forbidden' : 'not-found' })
 }
 
+test('task hierarchy persists and session bindings inherit it for legacy callers', async t => {
+  const f = fixture(t), headers = f.cloud()
+  const hierarchy = { business_line_id: 'line-id', service_period_id: 'period-id', line: '品线', period: '服务期' }
+  const created = await f.request('task-meta', { method: 'POST', headers,
+    body: { client_key: 'CUS-M', client: '我的客户', ...hierarchy, batch_id: 'batch-id' } })
+  const meta = (await f.request('task-meta?id=' + created.body.id, { headers })).body
+  for (const [key, value] of Object.entries(hierarchy)) assert.equal(meta[key], value)
+  const bound = await f.request('session-client', { method: 'POST', headers,
+    body: { session_id: 'new-session', client_key: 'CUS-M', meta_id: created.body.id, round: 2 } })
+  for (const [key, value] of Object.entries(hierarchy)) assert.equal(bound.body.binding[key], value)
+  assert.equal(bound.body.binding.batch_id, 'batch-id')
+  assert.equal(bound.body.binding.round, 2)
+  const saved = JSON.parse(readFileSync(join(f.meta, 'session-client-index.json')))
+  assert.deepEqual(saved['new-session'], bound.body.binding)
+  const updated = await f.request('session-client', { method: 'POST', headers,
+    body: { session_id: 'new-session', client_key: 'CUS-M' } })
+  assert.equal(updated.body.binding.business_line_id, 'line-id')
+  const moved = await f.request('session-client', { method: 'POST', headers,
+    body: { session_id: 'new-session', client_key: 'demo', client: '演示' } })
+  assert.equal(moved.body.binding.business_line_id, undefined)
+  assert.equal(moved.body.binding.service_period_id, undefined)
+  assert.equal(moved.body.binding.round, undefined)
+  const other = await f.request('session-client', { method: 'POST', headers,
+    body: { session_id: 'other-session', client_key: 'demo', meta_id: created.body.id } })
+  assert.equal(other.body.binding.business_line_id, undefined)
+})
+
 test('legacy mode returns the entire index and preserves existing response contracts', async t => {
   const f = fixture(t)
   assert.deepEqual((await f.request('session-client')).body, { ok: true, index })
@@ -245,9 +272,14 @@ test('confirm rejects invisible metadata and owners before fallback or mismatch 
   assert.equal(f.calls.length, 0)
 })
 
-test('authorized confirmation keeps session, metadata and body-only workflows', async t => {
+test('authorized confirmation requires a stored session or metadata binding', async t => {
   const f = fixture(t), headers = f.cloud(['CUS-Y'])
-  for (const body of [{ session_id: 'y' }, { meta_id: 'wbtm-y' }, { client_key: 'CUS-Y', client: '猿编程' }]) {
+  const unbound = await f.request('confirm-draft', { method: 'POST', headers,
+    body: { client_key: 'CUS-Y', client: '猿编程', title: 'x' } })
+  assert.equal(unbound.status, 400)
+  assert.equal(unbound.body.error, 'client-unbound')
+  assert.equal(f.calls.length, 0)
+  for (const body of [{ session_id: 'y' }, { meta_id: 'wbtm-y' }]) {
     f.put(f.draft, 'Private Y draft')
     const response = await f.request('confirm-draft', { method: 'POST', headers, body: { ...body, title: 'x' } })
     assert.equal(response.status, 200)
@@ -256,7 +288,7 @@ test('authorized confirmation keeps session, metadata and body-only workflows', 
     assert.equal(readFileSync(join(f.library, '猿编程', 'x.md'), 'utf8'), 'Private Y draft')
   }
   const writes = f.calls.filter(c => c.name.endsWith('__write_article'))
-  assert.equal(writes.length, 3)
+  assert.equal(writes.length, 2)
   assert.ok(writes.every(c => c.arguments.client === 'CUS-Y' && c.arguments.draft === false))
 })
 
@@ -387,4 +419,46 @@ test('browser list reads turn 403 and 404 into empty data without parsing error 
     const body = await readWorkbenchList({ status, ok: false, json: () => { throw new Error('must not parse') } })
     assert.deepEqual(JSON.parse(JSON.stringify(body)), { ok: true, index: {}, map: {}, customers: [] })
   }
+})
+
+test('batch CRUD persists rounds, binds one session and isolates cloud owners and grants', async t => {
+  const f = fixture(t), headers = f.cloud()
+  const post = body => f.request('batch', { method: 'POST', headers, body })
+  const made = await post({ id: 'wbb-test', rounds: 25, prompt: '完整装配稿', client_key: 'CUS-M', owner_uid: 'bob' })
+  assert.equal(made.body.batch.rounds, 20)
+  assert.equal(made.body.batch.owner_uid, 'alice')
+  const attached = (await post({ id: 'wbb-test', revision: 1, session_id: 'own' })).body.batch
+  assert.equal(attached.session_id, 'own')
+  assert.deepEqual((await f.request('batch?session_id=own', { headers })).body.batch, attached)
+  assert.deepEqual(JSON.parse(readFileSync(join(f.meta, 'batches/wbb-test.json'))), attached)
+  denied(await f.request('batch?id=wbb-test&session_id=other', { headers }), 404)
+  denied(await f.request('batch?id=wbb-test', { headers: f.cloud(undefined, { 'x-dsh-uid': 'bob' }) }), 404)
+  denied(await f.request('batch?session_id=own', { headers: f.cloud([]) }), 404)
+  denied(await f.request('batch', { method: 'POST', headers: f.cloud(undefined, { 'x-dsh-uid': 'bob' }), body: { id: 'wbb-test', revision: 2 } }))
+  denied(await post({ id: 'wbb-other', rounds: 2, prompt: 'x', client_key: 'CUS-M', session_id: 'other' }))
+  denied(await post({ id: 'wbb-denied', rounds: 2, prompt: 'x', client_key: 'CUS-Y' }))
+  assert.equal((await post({ id: 'wbb-test', revision: 2, session_id: 'm' })).body.error, 'session-mismatch')
+  assert.equal((await post({ id: '../escape', rounds: 2, prompt: 'x' })).status, 400)
+  assert.equal((await post({ id: 'wbb-one', rounds: 1, prompt: 'x' })).status, 400)
+})
+
+test('batch revision claims, immutable completed rounds, atomic stop and review acknowledgement', async t => {
+  const f = fixture(t), headers = f.cloud()
+  const post = body => f.request('batch', { method: 'POST', headers, body })
+  let batch = (await post({ id: 'wbb-cas', rounds: 2, prompt: 'x', session_id: 'own', client_key: 'CUS-M' })).body.batch
+  let rows = batch.records.map((r, i) => i ? r : { ...r, status: 'sending', sent_at: 100 })
+  const claims = await Promise.all([1, 2].map(() => post({ id: batch.id, revision: batch.revision, records: rows })))
+  assert.deepEqual(claims.map(r => r.status).sort(), [200, 409])
+  batch = claims.find(r => r.status === 200).body.batch
+  rows[0] = { ...rows[0], status: 'ok', title: '第一篇', angle: '选购', reason: '' }
+  batch = (await post({ id: batch.id, revision: batch.revision, records: rows })).body.batch
+  const reset = rows.map((r, i) => i ? r : { ...r, status: 'pending' })
+  assert.equal((await post({ id: batch.id, revision: batch.revision, records: reset })).body.error, 'bad-rounds')
+  const stopped = (await post({ id: batch.id, revision: 1, op: 'stop' })).body.batch
+  assert.equal(stopped.status, 'stopped', 'stop wins even with a stale version')
+  assert.equal((await post({ id: batch.id, revision: batch.revision, status: 'done' })).status, 409)
+  batch = (await post({ id: batch.id, revision: stopped.revision, status: 'running', review_opened: true })).body.batch
+  assert.equal(batch.status, 'stopped')
+  assert.equal(batch.review_opened, true)
+  assert.equal(batch.records[0].title, '第一篇')
 })

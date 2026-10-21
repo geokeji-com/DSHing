@@ -95,7 +95,7 @@ const html = `<!doctype html><meta charset="utf-8"><meta name="viewport" content
 // Route fulfillment is entirely in-memory: no HTTP server or network host.
 const base = 'http://workbench.fixture.invalid'
 let browser
-try { browser = await chromium.launch({headless:true}) } catch(error) {
+try { browser = await chromium.launch({headless:true, ...(process.env.WB_BROWSER_EXECUTABLE_PATH ? {executablePath:process.env.WB_BROWSER_EXECUTABLE_PATH} : {})}) } catch(error) {
  writeFileSync(out+'/run-status.json',JSON.stringify({status:'blocked',stage:'chromium-launch',message:error.message,baselineRef,lightRef,screenshots:[],network:'All fixture routes fulfilled in memory; no host contacted'},null,2))
  throw error
 }

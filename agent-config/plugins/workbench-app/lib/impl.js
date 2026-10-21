@@ -24,12 +24,13 @@
  *   GET /api/workbench/articles?client=NAME → { ok, articles:[{id,title}] }
  *   GET /api/workbench/mcp                  → 诊断：这台 Host 挂了哪些 MCP、各有哪些工具
  *   POST/GET /api/workbench/task-meta       → 装配参数；POST 持久化 client_key(CUS-*) + display client
+ *   POST/GET /api/workbench/batch           → 多轮生文状态（uid/session 隔离，revision 防重复发送）
  *   GET/POST /api/workbench/session-client  → session_id ↔ client_key 索引
  *   POST /api/workbench/confirm-draft       → 绑死 client_key → write_article(draft:false) + 本地草稿挪正式
  */
 
 
-import { mkdirSync, realpathSync, readFileSync, writeFileSync, readdirSync, statSync, existsSync, renameSync, unlinkSync } from 'node:fs'
+import { mkdirSync, realpathSync, readFileSync, writeFileSync, readdirSync, statSync, lstatSync, existsSync, renameSync, unlinkSync } from 'node:fs'
 import { join, dirname, basename, resolve } from 'node:path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
@@ -43,6 +44,11 @@ const SKILLS_PATH = '/api/workbench/skills'
 const ARTICLES_PATH = '/api/workbench/articles'
 const MCP_INFO_PATH = '/api/workbench/mcp'
 const TASK_META_PATH = '/api/workbench/task-meta'
+const BATCH_PATH = '/api/workbench/batch'
+const SESSION_STATUS_PATH = '/api/workbench/session-status'
+// create() runs per request; keep read-only Support results across handler instances.
+// Context and caller scope are part of the cache boundary, never a source of grants.
+const sessionStatusDraftCache = new WeakMap()
 // Test overrides are resolved at use time; production storage stays in place.
 const taskMetaDir = () => process.env.DSH_WORKBENCH_META_DIR || '/home/dsh/.dsh/workbench-meta'
 const TASK_STATUS_PATH = '/api/workbench/task-status'
@@ -58,6 +64,34 @@ const personalWorkspacePath = () => process.env.DSH_WORKBENCH_PERSONAL_WORKSPACE
   || (process.env.DSH_HOME ? join(process.env.DSH_HOME, 'workspaces', 'default') : null)
 const workspaceRoot = () => process.env.DSH_WORKBENCH_WORKSPACE_ROOT || personalWorkspacePath()
 const libraryRoot = () => process.env.DSH_WORKBENCH_LIBRARY_ROOT || '/srv/dsh-data/文章库'
+
+/** All library paths pass here. Callers authorize the stored binding first.
+ * Reads never create directories; writers explicitly opt in. Empty keys are
+ * supported only for read-only, name-based callers during the migration. */
+export function clientLibraryDir(client_key, display_name, { create = false } = {}) {
+  const key = firstString(client_key)
+  const name = clientPathName(display_name)
+  const valid = value => value && value !== '.' && value !== '..' && !/[/\\\x00-\x1f]/.test(value)
+  if (key && !valid(key)) throw new Error('invalid client_key directory')
+  if (!key && (create || !valid(name))) throw new Error('missing client_key or invalid display_name')
+  function directory(path) {
+    let entry
+    try { entry = lstatSync(path) } catch (error) {
+      if (error.code === 'ENOENT') return false
+      throw error
+    }
+    if (!entry.isDirectory() && !entry.isSymbolicLink()) throw new Error('library path is not a directory')
+    if (!statSync(path).isDirectory()) throw new Error('library link is not a directory')
+    return true
+  }
+  const keyed = key ? join(libraryRoot(), key) : null
+  if (keyed && directory(keyed)) return keyed
+  const legacy = valid(name) ? join(libraryRoot(), name) : null
+  if (legacy && directory(legacy)) return legacy
+  const path = keyed || legacy
+  if (create) mkdirSync(path, { recursive: true })
+  return path
+}
 
 /* ---- 薄弱问句（2026-10-10 接外部接口）---------------------------------
  * 数据来自「对外客户问句差额和信源渠道 API」（交付文档见仓库
@@ -209,10 +243,14 @@ function requestScope(req) {
   }
   const namesHeader = headers['x-dsh-allowed-clients']
   const names = new Set()
+  const namesByKey = new Map()
   for (const entry of jsonArray(namesHeader) || []) {
-    if (entry && allowed.has(entry.key) && typeof entry.name === 'string' && entry.name !== '') names.add(clientPathName(entry.name))
+    if (entry && allowed.has(entry.key) && typeof entry.name === 'string' && entry.name !== '') {
+      names.add(clientPathName(entry.name))
+      namesByKey.set(entry.key, clientPathName(entry.name))
+    }
   }
-  return { cloud, uid, allowed, names, needsNames: namesHeader === undefined }
+  return { cloud, uid, allowed, names, namesByKey, needsNames: namesHeader === undefined }
 }
 
 function authorizedClient(scope, value) {
@@ -303,6 +341,16 @@ function schemaNames(ctx) {
       .filter(name => typeof name === 'string' && name !== '')
   } catch { /* a disconnected registry is equivalent to no tools */ }
   return []
+}
+
+export function confirmQuestionContext(ctx, resolved, sessionId, binding) {
+  if (!sessionId || !binding || !Array.isArray(binding.questions)) return {};
+  const service = toolService(ctx)
+  const schemas = service && (typeof service.schemas === 'function' ? service.schemas() : service.schemas)
+  const schema = Array.isArray(schemas) && schemas.find(s => s.name === `mcp__${resolved.server}__${resolved.tool}`)
+  const input = schema && (schema.inputSchema || schema.parameters)
+  return input && input.properties && input.properties.question_context
+    ? { question_context: { session_id: sessionId } } : {}
 }
 
 /** Normalize config/plugin-id/prefix spellings to the serverName used in calls. */
@@ -642,6 +690,11 @@ function taskMetaRecordFromBody(parsed) {
   if (clientKey !== '') base.client_key = clientKey
   else delete base.client_key
   if (client !== '') base.client = client
+  for (const key of ['business_line_id', 'service_period_id']) {
+    const value = firstString(base[key])
+    if (value) base[key] = value
+    else delete base[key]
+  }
   base.savedAt = new Date().toISOString()
   return base
 }
@@ -683,6 +736,21 @@ function mergeSessionClientBinding(index, sessionId, entry) {
     bound_at: firstString(entry && entry.bound_at) || new Date().toISOString(),
   }
   if (prev.owner_uid) next.owner_uid = prev.owner_uid
+  const sameHierarchy = (!entry.client_key || entry.client_key === prev.client_key)
+    && (!entry.meta_id || entry.meta_id === prev.meta_id)
+  for (const key of ['business_line_id', 'service_period_id', 'line', 'period', 'batch_id']) {
+    const value = firstString(entry && entry[key], sameHierarchy && prev[key])
+    if (value) next[key] = value
+  }
+  if (entry.round != null || (sameHierarchy && prev.round != null)) next.round = entry.round ?? prev.round
+  // Snapshot only explicit selection metadata, never the mutable shared ticks.
+  if (Array.isArray(entry.questions)) {
+    next.questions = entry.questions
+    next.capture_period = firstString(entry.capture_period)
+  } else if (Array.isArray(prev.questions)) {
+    next.questions = prev.questions
+    next.capture_period = prev.capture_period
+  }
   Object.defineProperty(index, id, { value: next, enumerable: true, configurable: true, writable: true })
   return next
 }
@@ -704,17 +772,64 @@ function readTaskMetaRecord(metaId) {
   return null
 }
 
+const batchDir = () => join(taskMetaDir(), 'batches')
+const validBatchId = id => /^wbb-[a-z0-9-]{1,100}$/.test(id)
+function readBatch(id) {
+  if (!validBatchId(id)) return null
+  try { return JSON.parse(readFileSync(join(batchDir(), id + '.json'), 'utf8')) } catch { return null }
+}
+function visibleBatch(scope, batch) {
+  return batch && visibleRecord(scope, batch) && (!scope.cloud || (scope.uid && batch.owner_uid === scope.uid))
+}
+
+function sessionStatusIds(params) {
+  const values = params.getAll('ids')
+  const ids = values.length === 1 ? values[0].split(',') : []
+  if (!ids.length || ids.length > 50 || ids.some(id => !/^[a-zA-Z0-9_-]{1,128}$/.test(id))) return null
+  return [...new Set(ids)]
+}
+
+/** Same latest-visible selection as the single-session batch route, scanned once. */
+function latestSessionBatches(scope, ids) {
+  const wanted = new Set(ids), latest = new Map()
+  let files = []
+  try { files = readdirSync(batchDir()) } catch { /* no batches yet */ }
+  for (const file of files) {
+    if (!file.endsWith('.json')) continue
+    const batch = readBatch(file.slice(0, -5))
+    if (!visibleBatch(scope, batch) || !wanted.has(batch.session_id)) continue
+    const previous = latest.get(batch.session_id)
+    if (!previous || String(batch.savedAt || '').localeCompare(String(previous.savedAt || '')) > 0) latest.set(batch.session_id, batch)
+  }
+  return latest
+}
+
+function sessionStatusItem(batch, merged) {
+  if (!batch) return { batch: null, drafts_pending: null, finished_at: null }
+  const records = Array.isArray(batch.records) ? batch.records : []
+  const next = records.find(row => row.status !== 'ok' && row.status !== 'failed')
+  const terminal = ['done', 'failed_partial', 'stopped'].includes(batch.status)
+  const pending = merged && new Set(merged.drafts.map(row => row.title).filter(title => !merged.library.includes(title)))
+  return {
+    batch: { id: batch.id, status: batch.status, round: next ? next.round : batch.rounds,
+      rounds: batch.rounds, failed: records.filter(row => row.status === 'failed').length,
+      review_opened: !!batch.review_opened, savedAt: batch.savedAt || null },
+    drafts_pending: pending ? records.filter(row => row.status === 'ok' && pending.has(row.title)).length : null,
+    finished_at: terminal ? batch.savedAt || null : null,
+  }
+}
+
 /**
  * 确认入库绑死客户：优先 session-client 索引，其次 task-meta。
  * body 可带 session_id / meta_id / client_key / client。
  * @returns {{ client_key: string, client: string, source: string }|null}
  */
-function resolveBoundClientForConfirm(body, scope) {
+function resolveBoundClientForConfirm(body, scope, storedIndex) {
   const parsed = body !== null && typeof body === 'object' && !Array.isArray(body) ? body : {}
   const sessionId = firstString(parsed.session_id, parsed.session)
   const metaId = firstString(parsed.meta_id, parsed.metaId)
   if (sessionId !== '') {
-    const index = readSessionClientIndex()
+    const index = storedIndex || readSessionClientIndex()
     const entry = ownEntry(index, sessionId)
     if (entry !== undefined && !visibleRecord(scope, entry)) return { forbidden: true }
     if (entry !== null && typeof entry === 'object') {
@@ -722,7 +837,7 @@ function resolveBoundClientForConfirm(body, scope) {
       if (key !== '') {
         return {
           client_key: key,
-          client: firstString(entry.client, parsed.client),
+          client: firstString(entry.client),
           source: 'session-client',
         }
       }
@@ -734,7 +849,7 @@ function resolveBoundClientForConfirm(body, scope) {
         if (key2 !== '') {
           return {
             client_key: key2,
-            client: firstString(meta && meta.client, entry.client, parsed.client),
+            client: firstString(meta && meta.client, entry.client),
             source: 'session-task-meta',
           }
         }
@@ -748,17 +863,9 @@ function resolveBoundClientForConfirm(body, scope) {
     if (key !== '') {
       return {
         client_key: key,
-        client: firstString(meta && meta.client, parsed.client),
+        client: firstString(meta && meta.client),
         source: 'task-meta',
       }
-    }
-  }
-  const bodyKey = firstString(parsed.client_key)
-  if (bodyKey !== '') {
-    return {
-      client_key: bodyKey,
-      client: firstString(parsed.client),
-      source: 'body',
     }
   }
   return null
@@ -768,7 +875,7 @@ function resolveBoundClientForConfirm(body, scope) {
  * body 声明的 client / client_key 必须与会话绑定一致。
  * @returns {{ ok:true }|{ ok:false, error:string, detail?:string }}
  */
-function assertConfirmClientMatch(bound, body) {
+function assertConfirmClientMatch(bound, body, scope) {
   if (bound === null || typeof bound !== 'object' || firstString(bound.client_key) === '') {
     return { ok: false, error: 'client-unbound', detail: '会话未绑定 client_key，无法确认入库' }
   }
@@ -780,7 +887,9 @@ function assertConfirmClientMatch(bound, body) {
   if (reqKey !== '' && reqKey !== boundKey) {
     return { ok: false, error: 'client-mismatch', detail: `body.client_key=${reqKey} ≠ bound=${boundKey}` }
   }
-  if (reqClient !== '' && boundClient !== '' && reqClient !== boundClient && reqClient !== boundKey) {
+  // A matching stable key (or its trusted current name) survives display renames.
+  if (reqClient !== '' && boundClient !== '' && reqClient !== boundClient && reqClient !== boundKey
+      && reqKey !== boundKey && scope?.namesByKey.get(boundKey) !== clientPathName(reqClient)) {
     return { ok: false, error: 'client-mismatch', detail: `body.client=${reqClient} ≠ bound.client=${boundClient}` }
   }
   return { ok: true }
@@ -819,6 +928,8 @@ export {
   resolveBoundClientForConfirm,
   assertConfirmClientMatch,
   readTaskMetaRecord,
+  sessionStatusIds,
+  sessionStatusItem,
 }
 
 /**
@@ -849,7 +960,59 @@ export function create(ctx, config) {
     const called = await callTool(hostCtx, resolved.server, resolved.tool, {})
     if (!called.ok) return
     for (const customer of normalize(called.value) || []) {
-      if (scope.allowed.has(customer.id)) scope.names.add(clientPathName(customer.name))
+      if (scope.allowed.has(customer.id)) {
+        scope.names.add(clientPathName(customer.name))
+        scope.namesByKey.set(customer.id, clientPathName(customer.name))
+      }
+    }
+  }
+
+  async function libraryClient(parsed, scope, res, requireBound = false) {
+    await loadClientNames(scope)
+    let bound = resolveBoundClientForConfirm(parsed, scope)
+    // Older read callers send only a name. Recover a key only from a unique,
+    // visible stored binding, never by treating their selector as a key.
+    if (!bound && !requireBound && !parsed.session_id && !parsed.session && !parsed.meta_id && !parsed.metaId
+        && !parsed.client_key && parsed.client) {
+      const name = clientPathName(parsed.client)
+      if (!authorizedClient(scope, name)) { forbidden(res); return null }
+      const candidates = new Map()
+      const index = readSessionClientIndex()
+      for (const [session_id, entry] of Object.entries(index)) {
+        if (!visibleRecord(scope, entry)) continue
+        const candidate = resolveBoundClientForConfirm({ session_id }, scope, index)
+        if (candidate?.client_key && (clientPathName(candidate.client) === name
+            || scope.namesByKey.get(candidate.client_key) === name)) candidates.set(candidate.client_key, candidate)
+      }
+      if (candidates.size > 1) { sendJson(res, { ok: false, error: 'ambiguous-client-binding' }, 400); return null }
+      bound = candidates.values().next().value || null
+    }
+    if (bound?.forbidden || (bound && scope.cloud && !scope.allowed.has(bound.client_key))) {
+      forbidden(res); return null
+    }
+    if (!bound) {
+      const name = clientPathName(parsed.client)
+      if (!authorizedClient(scope, name)) { forbidden(res); return null }
+      if (requireBound || parsed.session_id || parsed.session || parsed.meta_id || parsed.metaId
+          || parsed.client_key || /^CUS-/.test(name) || (scope.cloud && !scope.names.has(name))) {
+        sendJson(res, { ok: false, error: 'client-unbound' }, 400); return null
+      }
+    } else {
+      const match = assertConfirmClientMatch(bound, parsed, scope)
+      if (!match.ok) { sendJson(res, match, 400); return null }
+    }
+    const client = bound || { client_key: '', client: clientPathName(parsed.client) }
+    try {
+      const dir = clientLibraryDir(client.client_key, client.client)
+      // Writable metadata is not a grant for a legacy display-name directory.
+      // Once keyed, only the stable key matters, even if the saved name is old.
+      if (scope.cloud && client.client_key && dir !== join(libraryRoot(), client.client_key)
+          && scope.namesByKey.get(client.client_key) !== clientPathName(client.client)) {
+        forbidden(res); return null
+      }
+      return client
+    } catch {
+      sendJson(res, { ok: false, error: 'invalid-library-path' }, 400); return null
     }
   }
 
@@ -1298,6 +1461,88 @@ export function create(ctx, config) {
       methodNotAllowed(res)
     }
 
+    /* Batches use the same trusted uid/client scope as task-meta. Revision CAS
+     * makes claiming a round atomic across both relay slots and browser tabs. */
+    handlers[BATCH_PATH] = async (req, res, scope) => {
+      if (!['GET', 'POST'].includes(req.method)) { methodNotAllowed(res); return }
+      await loadClientNames(scope)
+      if (scope.cloud && !scope.uid) { forbidden(res); return }
+      if (req.method === 'GET') {
+        const url = new URL(req.url, 'http://localhost')
+        const id = url.searchParams.get('id') || ''
+        const session = url.searchParams.get('session_id') || ''
+        let batch = id ? readBatch(id) : null
+        if (!id && session) batch = latestSessionBatches(scope, [session]).get(session)
+        const binding = batch && ownEntry(readSessionClientIndex(), batch.session_id)
+        if (!visibleBatch(scope, batch) || (session && batch.session_id !== session)
+          || (binding && !visibleRecord(scope, binding))) {
+          sendJson(res, { ok: false, error: 'not-found' }, 404); return
+        }
+        sendJson(res, { ok: true, batch }); return
+      }
+      let raw = ''
+      req.on('data', chunk => { raw += chunk })
+      await new Promise(resolve => req.on('end', resolve))
+      let body
+      try { body = JSON.parse(raw) } catch { body = null }
+      if (!body || !validBatchId(body.id || '')) { sendJson(res, { ok: false, error: 'bad-id' }, 400); return }
+      const prev = readBatch(body.id)
+      if (prev && !visibleBatch(scope, prev)) { forbidden(res); return }
+      const session = firstString(body.session_id, prev && prev.session_id)
+      const binding = ownEntry(readSessionClientIndex(), session)
+      if ((binding && !visibleRecord(scope, binding)) || !authorizedBinding(scope, prev || body)) { forbidden(res); return }
+      if (prev && prev.session_id && body.session_id !== undefined && body.session_id !== prev.session_id) {
+        sendJson(res, { ok: false, error: 'session-mismatch' }, 409); return
+      }
+      // Stop wins over an in-flight claim; stale updates cannot restart a batch.
+      if (prev && body.op !== 'stop' && body.revision !== prev.revision) {
+        sendJson(res, { ok: false, error: 'revision-conflict', batch: prev }, 409); return
+      }
+      let record
+      if (!prev) {
+        const rounds = Math.max(1, Math.min(20, Math.floor(Number(body.rounds) || 1)))
+        if (rounds < 2 || !firstString(body.prompt)) { sendJson(res, { ok: false, error: 'bad-batch' }, 400); return }
+        record = stampOwner(scope, {
+          id: body.id, session_id: session, client_key: firstString(body.client_key), client: firstString(body.client),
+          rounds, prompt: body.prompt, meta_id: firstString(body.meta_id), bind: body.bind || {}, model: body.model || null,
+          questions: Array.isArray(body.questions) ? body.questions : [], status: 'running', review_opened: false,
+          records: Array.from({ length: rounds }, (_, i) => ({ round: i + 1, title: '', angle: '', status: 'pending' })),
+        })
+      } else {
+        record = { ...prev, session_id: session }
+        if (body.op === 'stop') record.status = 'stopped'
+        else {
+          if (body.records !== undefined) {
+            const rows = body.records
+            if (!Array.isArray(rows) || rows.length !== prev.rounds || rows.some((row, i) => !row || row.round !== i + 1
+              || !['pending', 'sending', 'ok', 'failed'].includes(row.status)
+              || typeof row.title !== 'string' || typeof row.angle !== 'string'
+              || (['ok', 'failed'].includes(prev.records[i].status) && JSON.stringify(row) !== JSON.stringify(prev.records[i]))
+              || (prev.status !== 'running' && prev.records[i].status === 'pending' && row.status !== 'pending')
+              || (prev.records[i].status === 'sending' && row.status === 'pending'))) {
+              sendJson(res, { ok: false, error: 'bad-rounds' }, 400); return
+            }
+            record.records = rows
+          }
+          if (prev.status === 'running' && ['done', 'failed_partial'].includes(body.status)) {
+            if (record.records.some(row => !['ok', 'failed'].includes(row.status))) {
+              sendJson(res, { ok: false, error: 'rounds-incomplete' }, 400); return
+            }
+            record.status = record.records.some(row => row.status === 'failed') ? 'failed_partial' : 'done'
+          }
+          if (body.review_opened === true) record.review_opened = true
+        }
+      }
+      record.revision = (prev ? prev.revision : 0) + 1
+      record.savedAt = new Date().toISOString()
+      try {
+        writeSessionClientIndex(record, join(batchDir(), record.id + '.json'))
+        sendJson(res, { ok: true, batch: record })
+      } catch (error) {
+        sendJson(res, { ok: false, error: 'save-failed', detail: String(error.message || error) }, 500)
+      }
+    }
+
     /* ---- session ↔ client 索引（WB-SUP P1）--------------------------
      * 形状：{ "<session_id>": { client_key, client, meta_id, topic, bound_at } }
      * 存 /home/dsh/.dsh/workbench-meta/session-client-index.json。
@@ -1347,6 +1592,17 @@ export function create(ctx, config) {
         try {
           const index = readSessionClientIndex()
           if (Object.hasOwn(index, sessionId) && !visibleRecord(scope, index[sessionId])) { forbidden(res); return }
+          const meta = readTaskMetaRecord(firstString(parsed.meta_id))
+          const inherited = {}
+          const clientKey = firstString(parsed.client_key, ownEntry(index, sessionId)?.client_key)
+          if (meta && visibleRecord(scope, meta) && (!clientKey || clientKey === meta.client_key)) {
+            for (const key of ['business_line_id', 'service_period_id', 'line', 'period', 'batch_id']) {
+              if (meta[key]) inherited[key] = meta[key]
+            }
+          }
+          for (const key of Object.keys(inherited)) {
+            if (parsed[key] == null || parsed[key] === '') parsed[key] = inherited[key]
+          }
           const entry = stampOwner(scope, mergeSessionClientBinding(index, sessionId, parsed))
           writeSessionClientIndex(index)
           sendJson(res, { ok: true, session_id: sessionId, binding: entry })
@@ -1360,24 +1616,21 @@ export function create(ctx, config) {
     }
 
     /* ---- 任务进程的客观卡点（2026-09-23）--------------------------
-     * 按客户名探测两个位置：工作区目录（产物）与文章库（入库）。
+     * 工作区探测保持原样；文章库优先使用绑定的 client_key。
      * 只报事实：目录是否存在 / 文件数 / 最近 24h 新增数。 */
     handlers[TASK_STATUS_PATH] = async (req, res, scope) => {
       if (req.method !== 'GET') { methodNotAllowed(res); return }
       const url = new URL(req.url, 'http://localhost')
-      const client = String(url.searchParams.get('client') ?? '').replace(/[/\\]/g, '')
-      await loadClientNames(scope)
-      if (!authorizedClient(scope, client)) { forbidden(res); return }
-      if (!client) { sendJson(res, { ok: false, error: 'no-client' }); return }
+      const bound = await libraryClient(Object.fromEntries(url.searchParams), scope, res)
+      if (!bound) return
       /* 2026-09-24：卡点按「本任务」算 —— since = 任务发起时刻（meta.savedAt）。
        * 不传 since 才退回 24h 窗口。上一单的入库不再冒充本任务的进度。 */
       const sinceRaw = url.searchParams.get('since') ?? ''
       const sinceParsed = Date.parse(sinceRaw)
       const since = Number.isFinite(sinceParsed) && sinceParsed > 0 ? sinceParsed : Date.now() - 24 * 3600 * 1000
-      function probe(root) {
+      function probe(dir) {
         try {
-          if (!root) return { exists: false, files: 0, recent: 0, list: [] }
-          const dir = join(root, client)
+          if (!dir) return { exists: false, files: 0, recent: 0, list: [] }
           const entries = readdirSync(dir, { withFileTypes: true })
           const files = entries.filter(e => e.isFile()).map(e => e.name)
           let recent = 0
@@ -1390,29 +1643,26 @@ export function create(ctx, config) {
           return { exists: false, files: 0, recent: 0, list: [] }
         }
       }
-      sendJson(res, { ok: true, workspace: probe(workspaceRoot()), library: probe(libraryRoot()) })
+      sendJson(res, { ok: true,
+        workspace: probe(workspaceRoot() ? join(workspaceRoot(), clientPathName(bound.client)) : null),
+        library: probe(clientLibraryDir(bound.client_key, bound.client)),
+      })
     }
 
     /* ---- 草稿区（2026-09-24）：write(draft:true) 落「文章库/<客户>/草稿/」，
      * 人在工作台预览 → 确认 → 宿主把文件挪到正式位置（rename，查重幂等）。
      * 卷共享，入库动作不经过 MCP 容器。 */
-    const draftDir = client => join(libraryRoot(), String(client).replace(/[/\\]/g, ''), '草稿')
+    const draftDir = bound => join(clientLibraryDir(bound.client_key, bound.client), '草稿')
     const safeFile = name => {
       const s = String(name ?? '')
       if (!s || s.includes('/') || s.includes('\\') || s.includes('..')) throw new Error('bad file name')
       return s.endsWith('.md') ? s : s + '.md'
     }
-    handlers[DRAFTS_PATH] = async (req, res, scope) => {
-      if (req.method !== 'GET') { methodNotAllowed(res); return }
-      const url = new URL(req.url, 'http://localhost')
-      const client = String(url.searchParams.get('client') ?? '').replace(/[/\\]/g, '')
-      await loadClientNames(scope)
-      if (!authorizedClient(scope, client)) { forbidden(res); return }
-      if (!client) { sendJson(res, { ok: false, error: 'no-client' }); return }
+    function localDraftLists(bound) {
       const localDrafts = []
       const localReady = []
       try {
-        const dir = draftDir(client)
+        const dir = draftDir(bound)
         for (const name of readdirSync(dir)) {
           if (!name.toLowerCase().endsWith('.md')) continue
           const st = statSync(join(dir, name))
@@ -1420,7 +1670,7 @@ export function create(ctx, config) {
         }
       } catch { /* 本地草稿目录不存在时继续查 Support */ }
       try {
-        const libDir = join(libraryRoot(), client)
+        const libDir = clientLibraryDir(bound.client_key, bound.client)
         for (const name of readdirSync(libDir)) {
           if (!name.toLowerCase().endsWith('.md')) continue
           const st = statSync(join(libDir, name))
@@ -1428,30 +1678,92 @@ export function create(ctx, config) {
         }
       } catch { /* 客户还没有正式库目录 */ }
 
-      /* Support 是正式站的权威源；MCP 不可用时仍返回本地兼容目录。 */
+      return { localDrafts, localReady }
+    }
+
+    /* Support 是正式站的权威源；MCP 不可用时仍返回本地兼容目录。 */
+    async function listLibraryArticles(bound) {
       let mcpArticles = []
       const resolved = resolveTool(hostCtx, libraryServer, libraryServers, articlesTool, [/^list_articles$/i, /^list/i])
       if (resolved.tool !== '') {
-        const called = await callTool(hostCtx, resolved.server, resolved.tool, { client })
+        const called = await callTool(hostCtx, resolved.server, resolved.tool, { client: bound.client_key || bound.client })
         if (called.ok) {
           const normalized = normalizeLibraryArticles(called.value)
           if (normalized !== null) mcpArticles = normalized
         }
       }
+      return mcpArticles
+    }
+
+    function cachedStatusArticles(bound, scope) {
+      let cache = sessionStatusDraftCache.get(hostCtx)
+      if (!cache) { cache = new Map(); sessionStatusDraftCache.set(hostCtx, cache) }
+      const now = Date.now()
+      for (const [key, entry] of cache) if (entry.expires <= now) cache.delete(key)
+      const key = JSON.stringify([libraryRoot(), scope.cloud, scope.uid, [...scope.allowed].sort(),
+        libraryServer, articlesTool, bound.client_key || bound.client])
+      if (!cache.has(key)) {
+        const entry = { expires: now + 30000, promise: listLibraryArticles(bound) }
+        cache.set(key, entry) // Share in-flight reads as well as completed results.
+        entry.promise.then(() => { entry.expires = Date.now() + 30000 })
+      }
+      return cache.get(key).promise
+    }
+
+    handlers[SESSION_STATUS_PATH] = async (req, res, scope) => {
+      if (req.method !== 'GET') { methodNotAllowed(res); return }
+      const ids = sessionStatusIds(new URL(req.url, 'http://localhost').searchParams)
+      if (!ids) { fail(res, 400, 'bad-ids', 'ids must contain 1–50 session ids'); return }
+      const items = Object.create(null)
+      if (scope.cloud && !scope.uid) { sendJson(res, { ok: true, items }); return }
+      await loadClientNames(scope)
+      const index = readSessionClientIndex(), map = readSessionClientIndex(clientMapFile())
+      const batches = latestSessionBatches(scope, ids), clients = new Map()
+      for (const id of ids) {
+        const binding = ownEntry(index, id), mapped = ownEntry(map, id), batch = batches.get(id)
+        if ((binding !== undefined && !visibleRecord(scope, binding))
+            || (mapped !== undefined && !visibleRecord(scope, mapped)) || (!binding && !mapped && !batch)) continue
+        if (!batch) { items[id] = sessionStatusItem(null); continue }
+        const bound = resolveBoundClientForConfirm({ session_id: id, meta_id: batch.meta_id }, scope, index)
+        if (bound?.forbidden) continue
+        let merged = null
+        if (bound && authorizedBinding(scope, bound) && assertConfirmClientMatch(bound, batch, scope).ok) {
+          try {
+            const dir = clientLibraryDir(bound.client_key, bound.client)
+            // Match the drafts route's legacy-directory guard; writable names are not grants.
+            if (scope.cloud && dir !== join(libraryRoot(), bound.client_key)
+                && scope.namesByKey.get(bound.client_key) !== clientPathName(bound.client)) continue
+            if (!clients.has(bound.client_key)) {
+              const { localDrafts, localReady } = localDraftLists(bound)
+              clients.set(bound.client_key, mergeDraftLists(localDrafts, localReady, await cachedStatusArticles(bound, scope)))
+            }
+            merged = clients.get(bound.client_key)
+          } catch { /* An unavailable/invalid binding cannot safely attribute drafts. */ }
+        }
+        items[id] = sessionStatusItem(batch, merged)
+      }
+      sendJson(res, { ok: true, items })
+    }
+
+    handlers[DRAFTS_PATH] = async (req, res, scope) => {
+      if (req.method !== 'GET') { methodNotAllowed(res); return }
+      const url = new URL(req.url, 'http://localhost')
+      const bound = await libraryClient(Object.fromEntries(url.searchParams), scope, res)
+      if (!bound) return
+      const { localDrafts, localReady } = localDraftLists(bound)
+      const mcpArticles = await listLibraryArticles(bound)
       const merged = mergeDraftLists(localDrafts, localReady, mcpArticles)
       sendJson(res, { ok: true, drafts: merged.drafts, library: merged.library })
     }
     handlers[DRAFT_PATH] = async (req, res, scope) => {
       if (req.method !== 'GET') { methodNotAllowed(res); return }
       const url = new URL(req.url, 'http://localhost')
-      const client = String(url.searchParams.get('client') ?? '').replace(/[/\\]/g, '')
-      await loadClientNames(scope)
-      if (!authorizedClient(scope, client)) { forbidden(res); return }
-      if (!client) { sendJson(res, { ok: false, error: 'not-found' }, 404); return }
+      const bound = await libraryClient(Object.fromEntries(url.searchParams), scope, res)
+      if (!bound) return
       const title = firstString(url.searchParams.get('title'))
       try {
         const file = safeFile(title)
-        const text = readFileSync(join(draftDir(client), file), 'utf8')
+        const text = readFileSync(join(draftDir(bound), file), 'utf8')
         res.writeHead(200, { 'content-type': 'text/markdown; charset=utf-8', 'cache-control': 'no-store' })
         res.end(text)
         return
@@ -1459,7 +1771,7 @@ export function create(ctx, config) {
       try {
         const resolved = resolveTool(hostCtx, libraryServer, libraryServers, 'read_article', [/read_article/i, /read/i])
         if (title === '' || resolved.tool === '') throw new Error('article-missing')
-        const called = await callTool(hostCtx, resolved.server, resolved.tool, { client, title })
+        const called = await callTool(hostCtx, resolved.server, resolved.tool, { client: bound.client_key || bound.client, title })
         if (!called.ok) throw new Error('article-missing')
         const text = articleContent(called.value)
         if (text === null) throw new Error('article-missing')
@@ -1481,24 +1793,12 @@ export function create(ctx, config) {
           return
         }
         /* WB-SUP P2：绑死会话 client_key；跨客户确认失败关闭。 */
-        await loadClientNames(scope)
-        const bound = resolveBoundClientForConfirm(parsed, scope)
-        if (bound && (bound.forbidden || (scope.cloud && !scope.allowed.has(bound.client_key)))) { forbidden(res); return }
-        const displayClient = firstString(bound && bound.client, parsed.client, bound && bound.client_key)
-        if (bound && !authorizedClient(scope, displayClient)) { forbidden(res); return }
-        const match = assertConfirmClientMatch(bound, parsed)
-        if (!match.ok) {
-          sendJson(res, { ok: false, error: match.error, detail: match.detail || '' }, 400)
-          return
-        }
+        const bound = await libraryClient(parsed, scope, res, true)
+        if (!bound) return
+        const displayClient = firstString(bound.client, bound.client_key)
         const boundKey = bound.client_key
         const fileName = safeFile(title)
-        /* 草稿目录仍按显示名（现网 write draft:true 落盘约定）；再试 client_key 目录。 */
-        let src = join(draftDir(displayClient), fileName)
-        if (!existsSync(src) && displayClient !== boundKey) {
-          const alt = join(draftDir(boundKey), fileName)
-          if (existsSync(alt)) src = alt
-        }
+        const src = join(draftDir(bound), fileName)
         const localSource = existsSync(src)
         let content = null
         if (localSource) {
@@ -1521,7 +1821,7 @@ export function create(ctx, config) {
             return
           }
         }
-        const dst = join(libraryRoot(), String(displayClient).replace(/[/\\]/g, ''), fileName)
+        const dst = join(clientLibraryDir(boundKey, bound.client), fileName)
         /* 先远端 write_article(draft:false) 用绑死的 client_key，再挪本地文件。 */
         const writeResolved = resolveTool(hostCtx, libraryServer, libraryServers, 'write_article', [/write_article/i, /write/i])
         let article = null
@@ -1531,6 +1831,8 @@ export function create(ctx, config) {
             title,
             content,
             draft: false,
+            ...confirmQuestionContext(hostCtx, writeResolved, firstString(parsed.session_id, parsed.session),
+              ownEntry(readSessionClientIndex(), firstString(parsed.session_id, parsed.session))),
           })
           if (!called.ok) {
             sendJson(res, {
@@ -1567,7 +1869,7 @@ export function create(ctx, config) {
           try { unlinkSync(src) } catch { /* 远端已 ready，草稿删不掉不挡 */ }
           movedTo = dst
         } else {
-          mkdirSync(dirname(dst), { recursive: true })
+          clientLibraryDir(boundKey, bound.client, { create: true })
           renameSync(src, dst)
           movedTo = dst
         }
@@ -1594,18 +1896,17 @@ export function create(ctx, config) {
       await new Promise(resolve => req.on('end', resolve))
       try {
         const parsed = JSON.parse(body || '{}')
-        const client = String(parsed.client ?? '').replace(/[/\\]/g, '')
         const titles = (Array.isArray(parsed.titles) ? parsed.titles : []).slice(0, 50)
-        await loadClientNames(scope)
-        if (!client || titles.length === 0) { sendJson(res, { ok: false, error: 'no-client-or-titles' }); return }
-        if (!authorizedClient(scope, client)) { forbidden(res); return }
+        const bound = await libraryClient(parsed, scope, res)
+        if (!bound) return
+        if (titles.length === 0) { sendJson(res, { ok: false, error: 'no-client-or-titles' }); return }
         const files = []
         for (const raw of titles) {
           try {
             const safe = safeFile(raw)
-            const draft = join(draftDir(client), safe)
+            const draft = join(draftDir(bound), safe)
             if (existsSync(draft)) { files.push(draft); continue }
-            const lib = join(libraryRoot(), client, safe)
+            const lib = join(clientLibraryDir(bound.client_key, bound.client), safe)
             if (existsSync(lib)) files.push(lib)
           } catch { /* bad names are ignored */ }
         }
