@@ -3,8 +3,7 @@
 这是我（Agent）在这个项目里做出来的全部东西，**自成一体**：把这个文件夹拿走、
 跑一遍 `install.sh`，就能得到一模一样的一套配置。
 
-> 仓库里其他目录（`plugins/`、`workbench/`）是你自己的东西，我没碰。
-> 这个文件夹是我单独开的。
+> 这就是「写字台」。线上服务器直接从 `/home/dsh/DSHing/agent-config/plugins/workbench-app` 加载，**目录不要改名或挪走**。
 
 ## 里面有什么
 
