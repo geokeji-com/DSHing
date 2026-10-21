@@ -109,7 +109,7 @@ test('mobile workbench CSS owns the shell width, light tokens and underline-free
   assert.match(source, /\.wb_mWeakRow\{flex:0 0 auto;display:grid;grid-template-columns:44px minmax\(0,1fr\)/)
   assert.match(source, /\.wb_mWeakGap\{display:inline-flex/)
   assert.match(source, /className:'wb_gapNum'/)
-  assert.match(source, /数据来源：Support/)
+  assert.match(source, /数据来源：资料台/)
   assert.doesNotMatch(source, /data-dsh-theme="dark"|data-ds-dark-theme\] .*color-scheme:dark/)
   assert.match(source, /html\[data-wb-mobile\] body\{[^}]*--wb-bg:var\(--dsh-bg,/)
   assert.match(source, /\.wb_mWeakGap\{[^}]*text-decoration:none!important/)
