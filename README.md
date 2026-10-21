@@ -15,15 +15,17 @@
 
 投放台在另一个仓库，不在这里。
 
-## 线上怎么用到这个仓库
+## 这个仓库是开发版本
 
-- **写字台**：服务器上 `/home/dsh/DSHing` 是这个仓库的 clone，DSH 直接从 `agent-config/plugins/workbench-app`、`plugins/mcp-console`、`plugins/dsh-skill-remote` 加载，`文章硬检/硬检.mjs` 也按这个路径调用。**这几个目录不要改名或挪走。**
+这里放的是开发中的代码，不是生产上线的版本。
+
+- **写字台开发环境**（dsh-dev.wanhuchangan.com）：服务器上 `/home/dsh/DSHing` 是这个仓库的 clone，DSH 直接从 `agent-config/plugins/workbench-app`、`plugins/mcp-console`、`plugins/dsh-skill-remote` 加载，`文章硬检/硬检.mjs` 也按这个路径调用。**这几个目录不要改名或挪走。**
 - **资料台 / 文章库服务**：跑在 Docker 里，服务器不从仓库拉代码，改完按各自 README 手动发布。
 
 ## 改东西
 
 - 一律开分支 + PR 合进 `main`，不要直接推 `main`。
-- 合进 `main` 后，写字台要到服务器 `/home/dsh/DSHing` 里 `git pull` 才生效。
+- 合进 `main` 后，写字台开发环境要到服务器 `/home/dsh/DSHing` 里 `git pull` 才生效。
 
 ## 装 DSH 小插件（同事本机用）
 
