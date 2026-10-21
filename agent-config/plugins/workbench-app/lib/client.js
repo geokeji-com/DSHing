@@ -572,7 +572,7 @@ window.__ModuleLoader__.load({
 					empty?h('div',{className:'wb_mEmpty'},h('b',null,'还没有分配给你的客户'),h('p',null,'联系管理员')):null,
 					p.clients.status==='error'?h('div',{className:'wb_mEmpty',role:'status'},'客户暂时无法加载，请稍后刷新重试'):null,
 					h('h3',null,'主题'),segment([['weak','薄弱问句'],['free','自己输入']],p.mode,p.setMode),
-					p.mode==='weak'?h('div',{className:'wb_mWeakWrap'},p.unified ? h('button',{type:'button',className:'wb_recommend',onClick:p.recommend},'选推荐的 3 条') : null,h('div',{className:'wb_mWeakStat'},'已选定 '+String(p.selectedCount||0)+' 条 · 共 '+String(weakQuestions.length)+' 条'),weakPanel,h('div',{className:'wb_mWeakSource'},'数据来源：Support · 薄弱问句（全局标准 v4，和 Support 页面数字一致）'),h('textarea',{className:'wb_mTopic',ref:topicRef,'aria-label':'补充要求',placeholder:'补充要求（选填）…',value:p.base,onChange:function(e){p.setBase(e.target.value);},rows:2})):h('textarea',{className:'wb_mTopic',ref:topicRef,'aria-label':'主题',placeholder:'想写什么选题，直接打。',value:p.topic,onChange:function(e){p.setTopic(e.target.value);},rows:2}),
+					p.mode==='weak'?h('div',{className:'wb_mWeakWrap'},p.unified ? h('button',{type:'button',className:'wb_recommend',onClick:p.recommend},'选推荐的 3 条') : null,h('div',{className:'wb_mWeakStat'},'已选定 '+String(p.selectedCount||0)+' 条 · 共 '+String(weakQuestions.length)+' 条'),weakPanel,h('div',{className:'wb_mWeakSource'},'数据来源：资料台 · 薄弱问句（全局标准 v4，和资料台页面数字一致）'),h('textarea',{className:'wb_mTopic',ref:topicRef,'aria-label':'补充要求',placeholder:'补充要求（选填）…',value:p.base,onChange:function(e){p.setBase(e.target.value);},rows:2})):h('textarea',{className:'wb_mTopic',ref:topicRef,'aria-label':'主题',placeholder:'想写什么选题，直接打。',value:p.topic,onChange:function(e){p.setTopic(e.target.value);},rows:2}),
 					h('h3',null,'怎么写'),segment([['copy','仿写'+(p.refCount?' '+p.refCount:'')],['skill','用模板'+(p.pickedTotal?' '+p.pickedTotal:'')]],p.refTab,p.setRefTab),
 					p.refTab==='copy'?h(React.Fragment,null,
 						h('div',{className:'wb_mReferences',key:'copy'},p.refs.urls.map(function(url,i){return h('div',{className:'wb_mReference',key:i},h('span',{className:'wb_mRefIcon'},'↗'),h('span',{className:'wb_mGrow'},url),h('button',{type:'button',className:'wb_mIcon','aria-label':'删除参考链接',onClick:function(){p.setRefText(p.refs.urls.filter(function(_,j){return j!==i;}).concat(p.refs.body?[p.refs.body]:[]).join('\n'));}},wbIcon('close')));}),
@@ -5126,7 +5126,7 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			}
 
 			return h("div", null,
-				h("div", { className: "wb_source" }, window.dshUnified ? "我方 − 领先竞品 / 个百分点 · 按住行拖扫，连续勾选" : "数据来源：Support · 薄弱问句（全局标准 v4，和 Support 页面数字一致）"),
+				h("div", { className: "wb_source" }, window.dshUnified ? "我方 − 领先竞品 / 个百分点 · 按住行拖扫，连续勾选" : "数据来源：资料台 · 薄弱问句（全局标准 v4，和资料台页面数字一致）"),
 				h("table", { className: "wb_tbl wb_tblGap", "data-drag": args.dragging ? "1" : "0" },
 					h("thead", null, head),
 					h("tbody", null, body)));

@@ -1812,12 +1812,12 @@ export function create(ctx, config) {
           }
           const readCalled = await callTool(hostCtx, readResolved.server, readResolved.tool, { client: boundKey, title })
           if (!readCalled.ok) {
-            sendJson(res, { ok: false, error: 'draft-missing', detail: `Support 草稿不存在：${title}` }, 404)
+            sendJson(res, { ok: false, error: 'draft-missing', detail: `资料台草稿不存在：${title}` }, 404)
             return
           }
           content = articleContent(readCalled.value)
           if (content === null) {
-            sendJson(res, { ok: false, error: 'draft-missing', detail: `Support 草稿不存在：${title}` }, 404)
+            sendJson(res, { ok: false, error: 'draft-missing', detail: `资料台草稿不存在：${title}` }, 404)
             return
           }
         }
@@ -1853,7 +1853,7 @@ export function create(ctx, config) {
           sendJson(res, {
             ok: false,
             error: 'write-article-missing',
-            detail: '没有可用的 write_article 工具，Support 草稿未更新。',
+            detail: '没有可用的 write_article 工具，资料台草稿未更新。',
           }, 502)
           return
         }
