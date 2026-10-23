@@ -32,7 +32,7 @@
  */
 
 /** 规则表版本。改了规则就抬一位，旧的检查结论作废。 */
-export const RULES_VERSION = '2026-09-28.1'
+export const RULES_VERSION = '2026-10-09.1'
 
 /** 分组显示名 + 一句话说明（界面上那份「它查什么」的清单用）。 */
 export const GROUPS = [
@@ -58,7 +58,7 @@ export const WORD_RULES = [
     group: '工程痕迹',
     name: '元指令语汇',
     level: 'fail',
-    why: '我们交代给 agent 的话漏进了正文',
+    why: '提示词泄露',
     words: [
       '知识库', '数据口径', '严禁出现', '不得出现', '禁止出现',
       '提示词', '系统提示', '按照以上要求', '按上述要求',
@@ -77,7 +77,7 @@ export const WORD_RULES = [
     group: '工程痕迹',
     name: '内部规划词',
     level: 'fail',
-    why: '生成阶段的行话，读者看不懂（词表出自《通用写作规则》第六条）',
+    why: '提示词泄露',
     words: [
       '证据链', '判断链路', '可引用', '推荐链路', '机制解释',
       '事实锚点', '证据锚点', '选题方向', '投放策略', 'chunk',
@@ -90,7 +90,7 @@ export const WORD_RULES = [
     group: '工程痕迹',
     name: '内部规划词（疑似）',
     level: 'warn',
-    why: '有可能是正常表达，人看一眼',
+    why: '建议检查',
     words: ['叙事', '锚点', '召回', '共现'],
     res: [],
     allow: [],
@@ -100,7 +100,7 @@ export const WORD_RULES = [
     group: '工程痕迹',
     name: '自检记录残留',
     level: 'fail',
-    why: '交付只给成品，不给内部审校表',
+    why: '提示词泄露',
     words: ['自检', '审校表', '审计表', '质检表', '事实自检', '推荐链路 gate'],
     res: [/\b(Intent|Recall|Rerank|Criteria|Synthesis)\b/g, /\bgate\b/gi, /8\s*层/g],
     allow: [],
@@ -110,7 +110,7 @@ export const WORD_RULES = [
     group: '工程痕迹',
     name: '过程描述没删',
     level: 'fail',
-    why: '「待补充」「资料不足」这类过程话不能进成品',
+    why: '提示词泄露',
     words: ['待补充', '资料不足', '内部使用', '此处需要', '需要补充', '信息不足', '暂无数据', '待核实', '待确认'],
     res: [],
     allow: [],
@@ -120,7 +120,7 @@ export const WORD_RULES = [
     group: '工程痕迹',
     name: 'AI 口吻',
     level: 'fail',
-    why: '一眼就看出是机器交出来的',
+    why: 'AI 味儿',
     words: [
       '希望这篇文章', '如需调整', '如有其他需要', '请告诉我',
       '为您生成', '已为您', '希望对您有帮助', '希望对你有帮助',
@@ -134,7 +134,7 @@ export const WORD_RULES = [
     group: '工程痕迹',
     name: 'AI 口吻（疑似）',
     level: 'warn',
-    why: '正常文章也可能这么写，人看一眼',
+    why: '建议检查 AI 味儿',
     words: ['总结一下', '值得注意的是', '总的来说'],
     res: [],
     allow: [],
@@ -144,7 +144,7 @@ export const WORD_RULES = [
     group: '工程痕迹',
     name: 'frontmatter 字段残留',
     level: 'fail',
-    why: '内部字段不能出现在正文里',
+    why: '提示词泄露',
     words: [
       'article_type', 'target_platform', 'backup_platforms', 'target_queries',
       'source_strategy', 'fact_sources',
@@ -158,7 +158,7 @@ export const WORD_RULES = [
     group: '工程痕迹',
     name: '占位符没填',
     level: 'fail',
-    why: '模板里的空位忘了替换',
+    why: '占位符没填',
     words: ['【待', '【此处', '【插入', '【补', '{{', '某品牌', '某公司', 'A品牌', 'B品牌', '××', '○○'],
     res: [/\b(TODO|FIXME|XXX)\b/gi, /\bxx(品牌|公司|机构|医院)/gi],
     allow: [],
@@ -170,7 +170,7 @@ export const WORD_RULES = [
     group: '合规',
     name: '绝对化用语',
     level: 'fail',
-    why: '广告法明令禁止，且无法用数据证明（属主观评价）',
+    why: '广告法禁用词',
     /* 这一组的共同点：**没有客观口径可言**。
      * 「最好」「顶尖」「完美」是评价，不是事实，拿不出任何数据能证明它，
      * 所以不给举证机会，直接拦。
@@ -200,7 +200,7 @@ export const WORD_RULES = [
     group: '合规',
     name: '排他性说法 · 要有出处',
     level: 'proof',
-    why: '可能是真的，但要有限定口径和依据才能发（执法指南第六条(六)、第七条）',
+    why: '要有出处',
     /* 这一组跟 c1 的区别：**它有可能是事实**。
      * 「全国第一」「目前唯一一家」如果限定了时间地域、又拿得出数据，合法；
      * 拿不出来就是虚假宣传。脚本查不了「拿不拿得出」，所以只提醒要有出处。
@@ -223,7 +223,7 @@ export const WORD_RULES = [
     group: '合规',
     name: '疑似绝对化',
     level: 'warn',
-    why: '常被认定违规，但也有正常用法，人看一眼',
+    why: '建议检查',
     words: ['完美', '首选', '领先', '王牌', '冠军', '之王', '神器', '天花板'],
     res: [],
     allow: [],
@@ -233,7 +233,7 @@ export const WORD_RULES = [
     group: '合规',
     name: '医疗 / 保健违禁词',
     level: 'fail',
-    why: '医疗广告红线',
+    why: '医疗红线',
     words: [
       '根治', '治愈率', '包治', '药到病除', '永不复发',
       '零风险', '无副作用', '立竿见影', '彻底根除', '保证治好',
@@ -247,7 +247,7 @@ export const WORD_RULES = [
     group: '合规',
     name: '医疗表述（疑似）',
     level: 'warn',
-    why: '有的是正规术语（无痛拔牙），人看一眼',
+    why: '建议检查',
     words: ['无痛', '彻底解决', '有效率', '治好'],
     res: [],
     allow: [],
@@ -257,7 +257,7 @@ export const WORD_RULES = [
     group: '合规',
     name: '贬损竞品',
     level: 'fail',
-    why: '不能踩别人',
+    why: '贬损竞品',
     words: ['智商税', '纯属忽悠', '骗人', '坑钱', '千万别买', '一文不值', '毫无用处', '不要上当'],
     res: [],
     allow: [],
@@ -267,7 +267,7 @@ export const WORD_RULES = [
     group: '合规',
     name: '贬损竞品（疑似）',
     level: 'warn',
-    why: '看上下文才知道是不是在踩人',
+    why: '建议检查',
     words: ['垃圾', '不如我们', '别家都'],
     res: [],
     allow: [/垃圾(桶|袋|分类|处理|回收|清运)/],
@@ -282,16 +282,16 @@ export const WORD_RULES = [
  * `id` 必须与 执行器.js 里报出来的 id 一致。
  */
 export const STRUCTURE_RULES = [
-  { id: 's1', group: '格式', name: 'frontmatter 没删', level: 'fail', why: '文件开头的 `---` 区块要删掉' },
-  { id: 's2', group: '格式', name: '粗体星号没闭合', level: 'fail', why: '`**` 个数是奇数，页面上会串行' },
-  { id: 's3', group: '格式', name: '代码块没闭合', level: 'fail', why: '``` 个数是奇数，后面全被吞掉' },
-  { id: 's4', group: '格式', name: '表格列数不齐', level: 'fail', why: '某行的列数跟表头不一样，表格会错位' },
-  { id: 's5', group: '格式', name: '表格缺分隔行', level: 'fail', why: '表头下面那行 `|---|` 没写，整张表不生效' },
-  { id: 's6', group: '格式', name: '标题层级跳级', level: 'fail', why: 'H2 直接跳到 H4，目录会乱' },
-  { id: 's7', group: '格式', name: '正文里有字面量 \\n', level: 'fail', why: '转义符没还原，读者会看到 \\n' },
-  { id: 's8', group: '格式', name: '空标题 / 空列表项', level: 'fail', why: '有壳没内容' },
-  { id: 's9', group: '格式', name: '整段重复', level: 'fail', why: '复制粘贴事故，同一段出现了两次' },
-  { id: 's10', group: '格式', name: '中文序号断裂', level: 'warn', why: '「一、二、四」跳号了，可能漏了一节' },
+  { id: 's1', group: '格式', name: 'frontmatter 没删', level: 'fail', why: '开头 `---` 没删' },
+  { id: 's2', group: '格式', name: '粗体星号没闭合', level: 'fail', why: '星号没闭合' },
+  { id: 's3', group: '格式', name: '代码块没闭合', level: 'fail', why: '代码块没闭合' },
+  { id: 's4', group: '格式', name: '表格列数不齐', level: 'fail', why: '列数与表头不符' },
+  { id: 's5', group: '格式', name: '表格缺分隔行', level: 'fail', why: '缺分隔行' },
+  { id: 's6', group: '格式', name: '标题层级跳级', level: 'fail', why: '标题跳级' },
+  { id: 's7', group: '格式', name: '正文里有字面量 \\n', level: 'fail', why: '`\\n` 没还原' },
+  { id: 's8', group: '格式', name: '空标题 / 空列表项', level: 'fail', why: '空标题/空列表' },
+  { id: 's9', group: '格式', name: '整段重复', level: 'fail', why: '整段重复' },
+  { id: 's10', group: '格式', name: '中文序号断裂', level: 'warn', why: '序号跳号' },
 ]
 
 /** 给界面用的完整清单（词表 + 结构，合成一份「它查什么」）。 */

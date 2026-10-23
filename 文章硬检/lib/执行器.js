@@ -228,7 +228,7 @@ function wordIssues(body, paras) {
           group: rule.group,
           rule: rule.name,
           level,
-          why: hit.qualified ? '已带限定口径，确认数据有出处即可' : rule.why,
+          why: hit.qualified ? '已带限定口径' : rule.why,
           hit: `命中「${body.slice(hit.offset, hit.offset + hit.length)}」`
             + (hit.qualified ? '（已带限定口径）' : ''),
           snippet: snippet(body, hit.offset, hit.length),
