@@ -442,6 +442,39 @@ test('batch CRUD persists rounds, binds one session and isolates cloud owners an
   assert.equal((await post({ id: 'wbb-one', rounds: 1, prompt: 'x' })).status, 400)
 })
 
+
+test('PUT /api/workbench/draft writes local draft only (authorized)', async t => {
+  const f = fixture(t), headers = f.cloud(['CUS-Y'])
+  const put = await f.request('draft', {
+    method: 'PUT', headers,
+    body: { client: '猿编程', title: 'x', text: 'Edited body' },
+  })
+  assert.equal(put.status, 200)
+  assert.deepEqual(put.body, { ok: true })
+  assert.equal(readFileSync(f.draft, 'utf8'), 'Edited body')
+  assert.equal((await f.request('draft?client=猿编程&title=x', { headers })).body, 'Edited body')
+  assert.equal(existsSync(join(f.library, '猿编程', 'x.md')), false)
+})
+
+test('PUT /api/workbench/draft rejects unauthorized client and missing fields', async t => {
+  const f = fixture(t)
+  const deniedPut = await f.request('draft', {
+    method: 'PUT', headers: f.cloud(['CUS-M']),
+    body: { client: '猿编程', title: 'x', text: 'Nope' },
+  })
+  denied(deniedPut)
+  assert.equal(readFileSync(f.draft, 'utf8'), 'Private Y draft')
+
+  const headers = f.cloud(['CUS-Y'])
+  assert.equal((await f.request('draft', {
+    method: 'PUT', headers, body: { client: '猿编程', text: 'x' },
+  })).status, 400)
+  assert.equal((await f.request('draft', {
+    method: 'PUT', headers, body: { client: '猿编程', title: 'x' },
+  })).status, 400)
+  assert.equal(readFileSync(f.draft, 'utf8'), 'Private Y draft')
+})
+
 test('batch revision claims, immutable completed rounds, atomic stop and review acknowledgement', async t => {
   const f = fixture(t), headers = f.cloud()
   const post = body => f.request('batch', { method: 'POST', headers, body })

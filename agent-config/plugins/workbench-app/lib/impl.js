@@ -26,6 +26,7 @@
  *   POST/GET /api/workbench/task-meta       → 装配参数；POST 持久化 client_key(CUS-*) + display client
  *   POST/GET /api/workbench/batch           → 多轮生文状态（uid/session 隔离，revision 防重复发送）
  *   GET/POST /api/workbench/session-client  → session_id ↔ client_key 索引
+ *   GET/PUT /api/workbench/draft            → 读/写本地草稿区 Markdown（PUT 不碰正式库、不重跑检查）
  *   POST /api/workbench/confirm-draft       → 绑死 client_key → write_article(draft:false) + 本地草稿挪正式
  */
 
@@ -1756,7 +1757,44 @@ export function create(ctx, config) {
       sendJson(res, { ok: true, drafts: merged.drafts, library: merged.library })
     }
     handlers[DRAFT_PATH] = async (req, res, scope) => {
-      if (req.method !== 'GET') { methodNotAllowed(res); return }
+      if (req.method !== 'GET' && req.method !== 'PUT') { methodNotAllowed(res); return }
+      if (req.method === 'PUT') {
+        /* 审校面板手改：只写本地草稿区，不碰正式库、不重跑检查。 */
+        let body = ''
+        req.on('data', c => { body += c; if (body.length > 2e6) req.destroy() })
+        await new Promise(resolve => req.on('end', resolve))
+        let parsed
+        try { parsed = JSON.parse(body || '{}') } catch { parsed = {} }
+        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) parsed = {}
+        const bound = await libraryClient(parsed, scope, res)
+        if (!bound) return
+        const title = firstString(parsed.title)
+        if (title === '') {
+          sendJson(res, { ok: false, error: 'bad-request', detail: '缺少 title' }, 400)
+          return
+        }
+        if (typeof parsed.text !== 'string') {
+          sendJson(res, { ok: false, error: 'bad-request', detail: '缺少 text' }, 400)
+          return
+        }
+        try {
+          const file = safeFile(title)
+          const dir = draftDir(bound)
+          mkdirSync(dir, { recursive: true })
+          const target = join(dir, file)
+          const tmp = target + '.tmp'
+          writeFileSync(tmp, parsed.text, 'utf8')
+          renameSync(tmp, target)
+          sendJson(res, { ok: true })
+        } catch (error) {
+          sendJson(res, {
+            ok: false,
+            error: 'draft-write-failed',
+            detail: String(error && error.message ? error.message : error),
+          }, 500)
+        }
+        return
+      }
       const url = new URL(req.url, 'http://localhost')
       const bound = await libraryClient(Object.fromEntries(url.searchParams), scope, res)
       if (!bound) return
