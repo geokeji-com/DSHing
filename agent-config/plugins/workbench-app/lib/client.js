@@ -820,6 +820,24 @@ window.__ModuleLoader__.load({
 			"[data-slot='main.conversation'][data-wb-running] [data-disclosure-row],",
 			"[data-slot='main.conversation'][data-wb-running] button[data-turn-process],",
 			"[data-slot='main.conversation'][data-wb-running] [data-chat-flow-kind='reasoning']{display:none !important;}",
+			/* —— 业务工具卡（tool.call.toolview 渲染，样式与过程胶囊一致）—— */
+			".wb_tool{max-width:640px;margin:0 0 6px;background:#fafafc;border:1px solid #eceef2;border-radius:12px;box-shadow:0 1px 2px rgba(16,24,40,.03);font-size:13px;line-height:20px;color:#3a3f4b;}",
+			".wb_toolRow{display:flex;align-items:center;gap:8px;padding:7px 12px;min-width:0;}",
+			".wb_toolRow[role='button']{cursor:pointer;}",
+			".wb_toolRow[role='button']:focus-visible{outline:2px solid var(--wb-klein,#002fa7);outline-offset:-2px;border-radius:12px;}",
+			".wb_toolDot{flex:none;width:6px;height:6px;border-radius:50%;background:#9aa3b5;}",
+			".wb_tool[data-wb-tool='running'] .wb_toolDot{background:var(--wb-klein,#002fa7);animation:wbPulse 1.2s ease-in-out infinite;}",
+			".wb_tool[data-wb-tool='error'] .wb_toolDot{background:#d92d20;}",
+			".wb_tool[data-wb-tool='stopped'] .wb_toolDot{background:#f79009;}",
+			".wb_toolLib{flex:none;color:#8b91a0;}",
+			".wb_toolName{flex:none;font-weight:500;}",
+			".wb_toolDetail{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#8b91a0;}",
+			".wb_toolStatus{flex:none;font-size:12px;color:#8b91a0;}",
+			".wb_tool[data-wb-tool='error'] .wb_toolStatus{color:#d92d20;}",
+			".wb_toolChev{flex:none;margin-left:auto;font-size:11px;color:#8b91a0;}",
+			".wb_toolOut{margin:0;padding:8px 12px 10px;border-top:1px solid #eceef2;max-height:320px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:18px;color:#56607a;}",
+			"@keyframes wbPulse{50%{opacity:.35}}",
+			"@media (prefers-reduced-motion: reduce){.wb_tool[data-wb-tool='running'] .wb_toolDot{animation:none;}}",
 			/* Direct child of the unpadded conversation slot: reserve a full inset
 			 * inside its scroll/clip boundary, without changing the host overflow. */
 			".wb_ldr{box-sizing:border-box;display:flex;flex:0 0 auto;align-items:center;gap:10px;background:#fff;border:1px solid #e7e9ee;border-radius:13px;padding:11px 16px;margin:8px 16px;max-width:min(640px,calc(100% - 32px));min-width:0;overflow:visible;color:#565c6b;font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;font-size:13px;box-shadow:0 2px 8px rgba(0,47,167,.05);animation:wbEnter var(--wb-motion) var(--wb-ease);}",
@@ -2266,6 +2284,68 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 			list_kb_files: "列文件清单", read_kb_file: "读文件", read_kb: "整库读取",
 			write_article: "写入草稿", list_articles: "列文章", confirm: "确认入库", get: "读文章", read_article: "读文章",
 		};
+		/* 业务工具卡（tool.call.toolview keyed slot）：DSH 渲染工具调用时直接调用这里，
+		 * 不再等 DOM 出来后改字。只接管我们自己的 MCP 工具；skill 等官方已认领的 key 不碰。 */
+		var WB_TOOLVIEW_LIBS = { knowledge: "知识库", "sora-knowledge": "知识库", articles: "文章库", "sora-articles": "文章库" };
+		var WB_TOOLVIEW_NAMES = ["list_clients", "list_kb_files", "read_kb_file", "read_kb", "list_articles", "read_article", "write_article", "confirm", "get"];
+		var WB_TOOLVIEW_KEYS = (function () {
+			var keys = [];
+			Object.keys(WB_TOOLVIEW_LIBS).forEach(function (lib) {
+				WB_TOOLVIEW_NAMES.forEach(function (name) { keys.push("mcp__" + lib + "__" + name); });
+			});
+			return keys;
+		})();
+		WB_TOOL_LABELS.list_clients = "列客户";
+		function wbToolRowModel(toolName, block) {
+			var m = /^mcp__([\w-]+?)__([\w-]+)$/.exec(String(toolName || "")) || [];
+			var settled = !!block && "kind" in block;
+			var argsRaw = (settled ? block.call && block.call.argsRaw : block && block.argsRaw) || "";
+			var args = {};
+			try { args = JSON.parse(argsRaw) || {}; } catch (e) { args = {}; }
+			var detail = "";
+			["title", "file", "path", "filename", "name", "article_id", "id"].some(function (k) {
+				if (typeof args[k] === "string" && args[k].trim()) { detail = args[k].trim().split("/").pop(); return true; }
+				return false;
+			});
+			if (detail.length > 40) detail = detail.slice(0, 40) + "…";
+			var output = null;
+			if (settled) {
+				var parts = (block.content || []).map(function (c) { return c && c.type === "text" ? c.text : JSON.stringify(c); });
+				if (!parts.length && block.error) parts.push(block.error.name + ": " + block.error.code);
+				output = parts.join("\n") || null;
+			}
+			var state = !settled ? "running" : block.error && block.error.code === "interrupted" ? "stopped" : block.isError ? "error" : "ok";
+			return {
+				lib: WB_TOOLVIEW_LIBS[m[1]] || "工具",
+				label: WB_TOOL_LABELS[m[2]] || String(m[2] || toolName).replace(/_/g, " "),
+				detail: detail,
+				state: state,
+				output: output,
+			};
+		}
+		function WbToolRow(props) {
+			var model = wbToolRowModel(props.toolName, props.block);
+			var openState = React.useState(false), open = openState[0] && model.output !== null, setOpen = openState[1];
+			var status = { running: "进行中", stopped: "已中断", error: "失败", ok: "" }[model.state];
+			var expandable = model.output !== null;
+			var toggle = function () { if (expandable) setOpen(function (v) { return !v; }); };
+			return h("div", { className: "wb_tool", "data-wb-tool": model.state },
+				h("div", {
+					className: "wb_toolRow",
+					role: expandable ? "button" : undefined,
+					tabIndex: expandable ? 0 : undefined,
+					"aria-expanded": expandable ? open : undefined,
+					onClick: toggle,
+					onKeyDown: function (e) { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } },
+				},
+					h("span", { className: "wb_toolDot", "aria-hidden": "true" }),
+					h("span", { className: "wb_toolLib" }, model.lib),
+					h("span", { className: "wb_toolName" }, model.label),
+					model.detail ? h("span", { className: "wb_toolDetail", translate: "no" }, model.detail) : null,
+					status ? h("span", { className: "wb_toolStatus" }, status) : null,
+					expandable ? h("span", { className: "wb_toolChev", "aria-hidden": "true" }, open ? "▴" : "▾") : null),
+				open ? h("pre", { className: "wb_toolOut", translate: "no" }, model.output.length > 4000 ? model.output.slice(0, 4000) + "\n…" : model.output) : null);
+		}
 		function wbHumanizeToolNames(text) {
 			return String(text).replace(/\bmcp__(?:sora-)?(articles|knowledge)__([\w-]+)\b/g, function (_, library, name) {
 				return (library === "articles" ? "文章库" : "知识库") + " · " + (WB_TOOL_LABELS[name] || name.replace(/_/g, " "));
@@ -6311,6 +6391,13 @@ html[data-wb-mobile] .impersonation-banner{box-sizing:border-box!important}
 					name: "sidebar.right.pane.tab.title",
 					key: "workbench-article-review",
 				}, function () { return "文章审核"; });
+			});
+
+			/* 业务 MCP 工具卡：官方 keyed slot，按 wire 工具名接管；未注册的工具仍走官方通用卡。 */
+			ctx.slots.inject("tool.call.toolview", function* () {
+				for (var i = 0; i < WB_TOOLVIEW_KEYS.length; i++) {
+					yield ctx.slots.register({ name: "tool.call.toolview", key: WB_TOOLVIEW_KEYS[i] }, WbToolRow);
+				}
 			});
 
 			/* C1 顶部任务条：替换会话头部（single 槽）。 */
