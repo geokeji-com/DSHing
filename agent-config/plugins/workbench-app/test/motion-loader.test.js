@@ -45,21 +45,25 @@ function fixture() {
 }
 const { api } = fixture()
 
-test('loader is an inset 18px masked Klein Blue arc, independent of host corner shape', () => {
+test('loader is an inline 12px masked Klein Blue arc row in the message column, independent of host corner shape', () => {
   assert.match(api.CSS, /--wb-klein:#002FA7/)
   assert.match(api.CSS, /--wb-motion:200ms; --wb-motion-fast:150ms; --wb-motion-panel:220ms; --wb-ease:cubic-bezier\(0\.2, 0, 0, 1\)/)
   const loader = api.CSS.match(/\.wb_ldr\{([^}]+)\}/)[1]
-  assert.match(loader, /margin:8px 16px/)
-  assert.match(loader, /max-width:min\(640px,calc\(100% - 32px\)\)/)
-  assert.match(loader, /overflow:visible/)
-  assert.match(loader, /flex:0 0 auto/)
+  for (const token of ['display:inline-flex', 'align-self:flex-start', 'margin:0', 'border:0', 'background:none', 'box-shadow:none', 'height:26px']) assert.ok(loader.includes(token), token)
   const arc = api.CSS.match(/\.wb_ldrSpin\{([^}]+)\}/)[1]
-  for (const token of ['width:18px', 'height:18px', 'corner-shape:round', 'conic-gradient', 'rgba(0,47,167,.15)', 'var(--wb-klein)', '-webkit-mask:radial-gradient', ';mask:radial-gradient']) assert.ok(arc.includes(token), token)
+  for (const token of ['width:12px', 'height:12px', 'corner-shape:round', 'conic-gradient', 'var(--wb-klein)', '-webkit-mask:radial-gradient', ';mask:radial-gradient']) assert.ok(arc.includes(token), token)
   assert.doesNotMatch(arc, /border-top-color|border:2px solid/)
+  assert.match(api.CSS, /\[data-chat-flow\]:has\(> \.wb_ldr\) > \[class\*='_turnStatus'\]\{display:none !important;\}/)
 })
 
 test('motion hooks cover waiting, surfaces, controls, collapse and reduced motion including pseudo elements', () => {
-  for (const hook of ['wb_skeletonLine::after', 'wb_mScrim', 'wb_mSheet', 'wb_mEditor', 'wb_mDrawer', 'wb_mReview', 'wb_reviewWrap', 'wb_rv', 'wb_rvCollapse', 'wb_confirmMask', 'wb_zoomMask', 'wb_nvItem', 'wb_mSession', 'wb_mSegment', 'wb_mChip', 'wb_go', 'wb_reviewMsg', 'wb_nvRenameError', 'wb_refBd', 'data-wb-prefold', 'data-disclosure-row', 'dsh-tabbar a:active']) assert.ok(api.CSS.includes(hook), hook)
+  for (const hook of ['wb_skeletonLine::after', 'wb_mScrim', 'wb_mSheet', 'wb_mEditor', 'wb_mDrawer', 'wb_mReview', 'wb_reviewWrap', 'wb_rv', 'wb_rvCollapse', 'wb_confirmMask', 'wb_zoomMask', 'wb_nvItem', 'wb_mSession', 'wb_mSegment', 'wb_mChip', 'wb_go', 'wb_reviewMsg', 'wb_nvRenameError', 'wb_refBd', 'data-disclosure-row', 'dsh-tabbar a:active']) assert.ok(api.CSS.includes(hook), hook)
+  assert.doesNotMatch(api.CSS, /interpolate-size|data-wb-pref-tail/)
+  assert.match(api.CSS, /\[data-wb-prefold\]\[data-wb-open\] > :not\(\.wb_prefoldHead\)\{animation:wbFade/)
+  assert.match(api.CSS, /@media \(prefers-reduced-motion: reduce\)\{\[data-slot='main\.conversation'\] \.wb_prefoldHead,[^}]*animation:none !important; transition:none !important;/)
+  assert.match(api.CSS, /\.wb_mProgress\[open\] \.wb_mChecklist,\[data-slot='main\.conversation'\] \[data-disclosure-row\]\{animation:wbFade/)
+  const reduced = api.CSS.match(/@media \(prefers-reduced-motion: reduce\)\{\[class\^='wb_'\][^\n]+/)[0]
+  for (const hook of ['.wb_mProgress *', 'button[data-turn-process]', '[data-disclosure-row]', '.wb_mProgress::details-content']) assert.ok(reduced.includes(hook), hook)
   assert.match(api.CSS, /@media \(prefers-reduced-motion: reduce\)\{[^\n]+animation:none!important;transition:none!important/)
   assert.match(api.CSS, /\[class\^='wb_'\]::before,\[class\^='wb_'\]::after/)
   assert.match(api.CSS, /\.wb_ldrSpin\{transform:none;/)
