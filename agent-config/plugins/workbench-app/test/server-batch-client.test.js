@@ -65,7 +65,7 @@ function load({ cloud = true, mobile = false, config = () => response({ ok: true
   const instrumented = source.replace('return module.exports;', `return { ...module.exports,
     wbServerBatch, wbBatchPost, wbBatchSave, wbBatchSend, wbBatchTick, wbBatchStop,
     wbBatchKey, wbBatches, wbBatchFor, wbRunStatus, wbNavBatch, wbNavState, wbNavRunState, wbNavStatus,
-    wbNavPollSessionStatus, wbNavEmit, wbRememberServerBatch, wbCacheWorkspace, BatchRelay, PromptRelay, WorkbenchPage,
+    wbNavPollSessionStatus, wbNavEmit, wbRememberServerBatch, wbCacheWorkspace, BatchRelay, PromptRelay, WorkbenchPage, PickBar, wbBatchRoundLabel,
     pending: () => pendingPrompt, setPending: p => { pendingPrompt = p; }, context: ctx => { WbCtx = ctx; },
     watchBatchSend: fn => { var send = wbBatchSend; wbBatchSend = (...args) => { fn(); return send(...args); }; }
   };`).replace('function startDrag(event) {', 'if (props.captureDispatch) return props.captureDispatch(dispatch, setCounts);\nfunction startDrag(event) {')
@@ -144,6 +144,10 @@ function load({ cloud = true, mobile = false, config = () => response({ ok: true
       const c = component('BatchRelay', { sessionId: 's0', inputActions: actions })
       c.render(); await settle(); return c
     },
+    async bar(sessionId = 's0') {
+      const c = component('PickBar', { sessionId })
+      c.render(); await settle(); return c
+    },
   }
 }
 
@@ -207,7 +211,10 @@ test('mounted server relay discovers without history and polls every 3s until un
   const c = await f.mount()
   assert.equal(f.requests.filter(r => r.url.startsWith(apiPath + '?')).length, 1)
   assert.ok(f.requests.some(r => r.url === apiPath + '?session_id=s0'))
-  assert.match(JSON.stringify(c.render()), /第 1\/3 轮/)
+  assert.equal(c.render(), null, 'desktop no longer renders the floating batch card')
+  const bar = await f.bar()
+  assert.match(JSON.stringify(bar.render()), /第 1\/3 轮/)
+  bar.dispose()
   for (const ms of [1000, 1000]) await f.timersTick(ms)
   assert.equal(f.requests.filter(r => r.url.startsWith(apiPath + '?')).length, 1)
   await f.timersTick(1000)
@@ -234,8 +241,8 @@ test('late missing-batch reads cannot erase a batch created while discovery/list
   }
 })
 
-test('stop button posts server op:stop and stops visible generation immediately', async () => {
-  const f = load(), entry = f.seed(), c = await f.mount()
+test('mobile floating card stop button posts server op:stop and stops visible generation immediately', async () => {
+  const f = load({ mobile: true }), entry = f.seed(), c = await f.mount()
   f.running = true
   const button = c.render().children.find(node => node?.type === 'button')
   button.props.onClick()
@@ -247,6 +254,42 @@ test('stop button posts server op:stop and stops visible generation immediately'
     { url: apiPath, body: { id: entry.batch.id, revision: 1, op: 'stop' } },
   ])
   c.dispose()
+})
+
+test('desktop pick-bar stop button posts server op:stop, stops generation and shows 正在停止', async () => {
+  const f = load(), entry = f.seed(), c = await f.mount(), bar = await f.bar()
+  assert.equal(c.render(), null)
+  f.running = true
+  const find = (node, cls) => node && typeof node === 'object' ? (node.props?.className === cls ? node : (node.children || []).flat().map(n => find(n, cls)).find(Boolean)) : null
+  const tree = bar.render()
+  assert.equal(tree.props.className, 'wb_pkRow is-round', 'batch-only bar renders just the round part')
+  assert.equal(find(tree, 'wb_pkK'), undefined)
+  find(tree, 'wb_pkStop').props.onClick()
+  assert.equal(f.stopped, 1)
+  await settle()
+  assert.equal(entry.batch.status, 'stopping')
+  const after = JSON.stringify(bar.render())
+  assert.match(after, /第 1\/3 轮 · 正在停止/)
+  assert.doesNotMatch(after, /停止本批/)
+  assert.deepEqual(f.requests.filter(r => r.body).map(r => ({ url: r.url, body: r.body })), [
+    { url: apiPath, body: { id: entry.batch.id, revision: 1, op: 'stop' } },
+  ])
+  c.dispose(); bar.dispose()
+})
+
+test('round label copy: running / stopping / stopped / ended; single round and mobile show nothing', async () => {
+  const f = load(), label = f.api.wbBatchRoundLabel
+  const b = (status, done = 1) => makeBatch({ status, records: [1, 2, 3].map(round => ({ round, status: round <= done ? 'ok' : 'pending' })) })
+  assert.equal(label(b('running')), '第 2/3 轮')
+  assert.equal(label(b('stopping')), '第 2/3 轮 · 正在停止')
+  assert.equal(label(b('stopped')), '第 2/3 轮 · 已停止')
+  assert.equal(label(b('done', 3)), '共 3 轮 · 本批已结束')
+  assert.equal(label(b('failed_partial', 3)), '共 3 轮 · 本批已结束')
+  assert.equal(label(makeBatch({ rounds: 1, records: [{ round: 1, status: 'pending' }] })), '')
+  assert.equal(label(undefined), '')
+  assert.equal((await f.bar()).render(), null, 'no batch, no drafts: no bar')
+  const m = load({ mobile: true }); m.seed()
+  assert.equal((await m.bar()).render(), null, 'mobile keeps the floating card, bar shows no round')
 })
 
 test('done/failed_partial open unified review once, acknowledge it, and retain batch titles/progress', async () => {
@@ -286,8 +329,16 @@ test('opening a completed server batch immediately opens review even if every ro
   const c = await f.mount()
   assert.equal(f.events.filter(e => e.type === 'dsh:review-available').length, 1)
   assert.equal(f.requests.filter(r => r.body?.review_opened).length, 1)
-  assert.match(JSON.stringify(c.render()), /本批已结束/)
-  assert.match(JSON.stringify(c.render()), /资料不足/)
+  assert.equal(c.render(), null)
+  const bar = JSON.stringify((await f.bar()).render())
+  assert.match(bar, /共 3 轮 · 本批已结束/)
+  assert.match(bar, /3 轮失败/)
+  assert.match(bar, /第 2 轮：资料不足/)
+  assert.doesNotMatch(bar, /停止本批/)
+  const m = load({ mobile: true }); m.batches.set(batch.id, batch)
+  const card = JSON.stringify((await m.mount()).render())
+  assert.match(card, /本批已结束/)
+  assert.match(card, /资料不足/)
   await f.timersTick(3000)
   assert.equal(f.events.filter(e => e.type === 'dsh:review-available').length, 1)
   c.dispose()

@@ -57,7 +57,8 @@ function fixture({ stored, width = 900, mobile = false, mobileAttribute = false,
     observe(node) { this.node = node; this.active = true }
     disconnect() { this.active = false }
   }
-  Object.assign(window, { __DSH_FORCE_LIGHT_THEME__: true, localStorage: storage, matchMedia: () => media,
+  const frames = new Map(); let frameId = 0
+  Object.assign(window, { requestAnimationFrame: fn => { frames.set(++frameId, fn); return frameId }, cancelAnimationFrame: id => frames.delete(id), __DSH_FORCE_LIGHT_THEME__: true, localStorage: storage, matchMedia: () => media,
     __ModuleLoader__: { load({ factory }) { api = factory(() => ({})) } } })
   vm.runInNewContext(source.replace('return module.exports;', 'return {...module.exports, wbMountReviewSplitter, CSS};'), {
     window, document: { documentElement: root, body, createElement: element },
@@ -68,7 +69,9 @@ function fixture({ stored, width = 900, mobile = false, mobileAttribute = false,
     api, cols, root, body, media, window, values, observers,
     mount: () => api.wbMountReviewSplitter(cols),
     bar: () => cols.children.find(child => child.getAttribute('role') === 'separator'),
-    notify(node) { observers.filter(o => o.active && o.node === node).forEach(o => o.fn()) },
+    frames,
+    flush() { const fns = [...frames.values()]; frames.clear(); fns.forEach(fn => fn()) },
+    resize() { window.fire('resize'); this.flush() },
   }
 }
 
@@ -110,7 +113,7 @@ test('mount restores persisted width with accessible bounds and clamps on resize
   assert.equal(bar.getAttribute('aria-valuemax'), '320')
   assert.equal(bar.getAttribute('aria-valuenow'), '320')
   assert.equal(f.cols.style.getPropertyValue('--wb-review-list-width'), '320px')
-  f.cols.clientWidth = 430; f.notify(f.cols)
+  f.cols.clientWidth = 430; f.resize()
   assert.equal(bar.getAttribute('aria-valuemax'), '150')
   assert.equal(bar.getAttribute('aria-valuenow'), '150')
   assert.equal(f.values.get(storageKey), '400')
@@ -133,7 +136,7 @@ test('keyboard persists changes; double-click and Enter reset the clamped defaul
   assert.equal(f.values.has(storageKey), false)
   bar.fire('keydown', { key: 'End' })
   assert.equal(f.values.get(storageKey), '420')
-  f.cols.clientWidth = 410; f.notify(f.cols)
+  f.cols.clientWidth = 410; f.resize()
   bar.fire('keydown', { key: 'Enter' })
   assert.equal(bar.getAttribute('aria-valuenow'), '130')
   assert.equal(f.values.has(storageKey), false)
@@ -155,12 +158,12 @@ test('a fresh mount restores a drag preference and a reset survives reopening', 
   assert.equal(f.values.has(storageKey), false)
 })
 
-test('a zero-width container uses real bounds instead of an assumed desktop width', () => {
+test('a hidden (zero-width) container keeps the preference until real bounds exist', () => {
   const f = fixture({ width: 0, stored: '400' }); f.mount()
-  assert.equal(f.bar().getAttribute('aria-valuemax'), '112')
-  assert.equal(f.bar().getAttribute('aria-valuenow'), '112')
-  f.bar().fire('keydown', { key: 'End' })
-  assert.equal(f.bar().getAttribute('aria-valuenow'), '112')
+  assert.equal(f.bar().getAttribute('aria-valuenow'), '400')
+  f.cols.clientWidth = 500; f.resize()
+  assert.equal(f.bar().getAttribute('aria-valuenow'), '220')
+  assert.equal(f.values.get(storageKey), '400')
 })
 
 test('missing, invalid or denied localStorage never prevents resizing or resetting', () => {
@@ -207,7 +210,7 @@ test('cancel, lost capture, blur, unmount and mobile changes always restore drag
     const f = fixture(), dispose = f.mount(), bar = f.bar()
     bar.fire('pointerdown', { button: 0, pointerId: 1, clientX: 152 })
     if (end === 'unmount') dispose()
-    else if (end === 'mobile') { f.media.matches = true; f.media.fire('change') }
+    else if (end === 'mobile') { f.media.matches = true; f.media.fire('change'); f.flush() }
     else if (end === 'blur') f.window.fire('blur')
     else bar.fire(end, { pointerId: 1 })
     assert.equal(f.body.classList.contains('wb_reviewResizing'), false, end)
@@ -235,10 +238,10 @@ test('both mobile signals omit the separator and preserve the original children 
     assert.deepEqual(f.cols.children, children)
     assert.equal(f.cols.classList.contains('wb_reviewSplit'), false)
     assert.equal(f.cols.style.getPropertyValue('--wb-review-list-width'), '')
-    f.media.matches = false; f.root.removeAttribute('data-wb-mobile'); f.media.fire('change'); f.notify(f.root)
+    f.media.matches = false; f.root.removeAttribute('data-wb-mobile'); f.media.fire('change'); f.window.fire('resize'); f.flush()
     assert.equal(f.bar().getAttribute('aria-valuenow'), '400')
-    assert.equal(f.cols.children.length, 3, 'media and attribute notifications cannot create duplicate bars')
-    f.root.setAttribute('data-wb-mobile', ''); f.notify(f.root)
+    assert.equal(f.cols.children.length, 3, 'media and resize notifications cannot create duplicate bars')
+    f.root.setAttribute('data-wb-mobile', ''); f.resize()
     assert.equal(f.bar(), undefined)
     assert.deepEqual(f.cols.children, children)
   }
@@ -265,4 +268,20 @@ test('unified shell .review-mount keeps its stacked card strip: no separator, no
   assert.deepEqual(f.cols.children, children)
   assert.equal(f.cols.classList.contains('wb_reviewSplit'), false)
   dispose()
+})
+
+test('loop safety: no observers, writes only on change, resize is rAF-coalesced', () => {
+  const f = fixture({ stored: '200' }), dispose = f.mount(), bar = f.bar()
+  assert.equal(f.observers.length, 0, 'splitter must not create Resize/MutationObservers')
+  let writes = 0
+  const set = f.cols.style.setProperty, attr = bar.setAttribute
+  f.cols.style.setProperty = (...a) => { writes++; set(...a) }
+  bar.setAttribute = (...a) => { writes++; attr(...a) }
+  for (let i = 0; i < 50; i++) f.window.fire('resize')
+  assert.equal(f.frames.size, 1, 'many resize events schedule one frame')
+  f.flush()
+  assert.equal(writes, 0, 'unchanged width writes nothing')
+  f.cols.clientWidth = 430; f.resize()
+  assert.ok(writes > 0 && writes <= 3)
+  dispose(); assert.equal(f.frames.size, 0)
 })
