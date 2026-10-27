@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { App as AntApp, Button, Empty, Input, Modal, Segmented, Select, Upload } from 'antd'
+import { App as AntApp, Button, Dropdown, Empty, Input, Modal, Segmented, Select, Upload } from 'antd'
 import { PlusOutlined } from '@ant-design/icons'
 import { api } from './api'
 import Reader from './Reader'
@@ -42,6 +42,13 @@ function useColWidth(key, def, min, max) {
   }
   const reset = () => { setW(def); localStorage.removeItem(key) }
   return [w, drag, reset]
+}
+
+// 新建文件名白名单：.md 结尾、不带路径、不以点开头（和后端 safeName 一个口径）
+function mdName(s) {
+  const v = (s || '').trim()
+  if (!v || !/\.md$/i.test(v) || /[\\/]/.test(v) || v.includes('..') || v.startsWith('.')) return null
+  return v
 }
 
 export default function Clients({ tree, reload, guardDirty, onDirty }) {
@@ -109,6 +116,66 @@ export default function Clients({ tree, reload, guardDirty, onDirty }) {
     setArchOpen(false); setArchName('客户偏好.md')
     await reload()
     setPath(p)
+  }
+
+  // ---------- 新建知识文档（空白） ----------
+  const [kbNewOpen, setKbNewOpen] = useState(false)
+  const [kbNewName, setKbNewName] = useState('新文档.md')
+  const [kbNewLine, setKbNewLine] = useState('')
+  const newKbDoc = async () => {
+    const name = mdName(kbNewName)
+    if (!client) return
+    if (!name) { message.warning('文件名要以 .md 结尾，且不含 / 等符号'); return }
+    const line = (kbNewLine || '').trim()
+    const p = ['知识库', client, ...(line ? [line] : []), name].join('/')
+    const ex = await api.file(p)
+    if (ex.content != null && !window.confirm('「' + name + '」已存在，覆盖吗？')) return
+    const r = await api.save(p, '# ' + name.replace(/\.md$/i, '') + '\n\n')
+    if (!r.ok) { message.error(r.error || '创建失败'); return }
+    setKbNewOpen(false); setKbNewName('新文档.md'); setKbNewLine('')
+    await reload()
+    go(() => { setTab('knowledge'); setPath(p) })
+  }
+
+  // ---------- 新建文章（空白） ----------
+  const [artNewOpen, setArtNewOpen] = useState(false)
+  const [artNewName, setArtNewName] = useState('新文章.md')
+  const newArticleDoc = async () => {
+    const name = mdName(artNewName)
+    if (!client) return
+    if (!name) { message.warning('文件名要以 .md 结尾，且不含 / 等符号'); return }
+    const p = '文章库/' + client + '/' + name
+    const ex = await api.file(p)
+    if (ex.content != null && !window.confirm('「' + name + '」已存在，覆盖吗？')) return
+    const r = await api.save(p, '# ' + name.replace(/\.md$/i, '') + '\n\n')
+    if (!r.ok) { message.error(r.error || '创建失败'); return }
+    setArtNewOpen(false); setArtNewName('新文章.md')
+    await reload()
+    go(() => { setTab('articles'); setPath(p) })
+  }
+
+  // ---------- 上传文章（.md，可多选） ----------
+  const [artUpOpen, setArtUpOpen] = useState(false)
+  const [artUpFiles, setArtUpFiles] = useState([])
+  const doArtUpload = async () => {
+    if (!client) return
+    if (!artUpFiles.length) { message.warning('请选择要上传的 .md 文件'); return }
+    const base = '文章库/' + client + '/'
+    const exist = []
+    for (const { file } of artUpFiles) {
+      const ex = await api.file(base + file.name)
+      if (ex.content != null) exist.push(file.name)
+    }
+    if (exist.length && !window.confirm('同名文件已存在：\n' + exist.join('、') + '\n覆盖吗？')) return
+    let n = 0
+    for (const { file } of artUpFiles) {
+      const r = await api.save(base + file.name, await file.text())
+      if (!r.ok) { message.error(file.name + '：' + (r.error || '上传失败')); return }
+      n++
+    }
+    setArtUpOpen(false)
+    await reload()
+    message.success('已上传 ' + n + ' 个文件')
   }
 
   // ---------- 中栏列表：按业务线 / 入库日期分组 ----------
@@ -203,7 +270,22 @@ export default function Clients({ tree, reload, guardDirty, onDirty }) {
           ))}
         </div>
         <div className="files-foot">
-          {tab === 'knowledge' && <Button block icon={<PlusOutlined />} onClick={openUpload}>上传知识文档</Button>}
+          {tab === 'knowledge' && (
+            <Dropdown style={{ display: 'block' }} trigger={['click']} menu={{
+              items: [{ key: 'blank', label: '空白文档…' }, { key: 'upload', label: '上传 .md…' }],
+              onClick: ({ key }) => key === 'blank' ? setKbNewOpen(true) : openUpload(),
+            }}>
+              <Button block icon={<PlusOutlined />}>新建</Button>
+            </Dropdown>
+          )}
+          {tab === 'articles' && client && (
+            <Dropdown style={{ display: 'block' }} trigger={['click']} menu={{
+              items: [{ key: 'blank', label: '空白文档…' }, { key: 'upload', label: '上传 .md…' }],
+              onClick: ({ key }) => key === 'blank' ? setArtNewOpen(true) : setArtUpOpen(true),
+            }}>
+              <Button block icon={<PlusOutlined />}>新建</Button>
+            </Dropdown>
+          )}
           {tab === 'archives' && client && <Button block icon={<PlusOutlined />} onClick={() => setArchOpen(true)}>新建档案文档</Button>}
         </div>
       </div>
@@ -252,6 +334,37 @@ export default function Clients({ tree, reload, guardDirty, onDirty }) {
         onCancel={() => { setArchOpen(false); setArchName('客户偏好.md') }} okText="创建" cancelText="取消" destroyOnClose>
         <div className="fld-label">文件名（.md）</div>
         <Input value={archName} onChange={(e) => setArchName(e.target.value)} onPressEnter={newArchiveDoc} />
+      </Modal>
+
+      <Modal title="新建知识文档" open={kbNewOpen} onOk={newKbDoc}
+        onCancel={() => setKbNewOpen(false)} okText="创建" cancelText="取消" destroyOnClose>
+        <div className="fld-label">文件名（.md）</div>
+        <Input value={kbNewName} onChange={(e) => setKbNewName(e.target.value)} onPressEnter={newKbDoc} />
+        <div className="fld-label">业务线（可选）</div>
+        <Input placeholder="留空 = 客户根目录" value={kbNewLine} onChange={(e) => setKbNewLine(e.target.value)} onPressEnter={newKbDoc} />
+      </Modal>
+
+      <Modal title="新建文章" open={artNewOpen} onOk={newArticleDoc}
+        onCancel={() => setArtNewOpen(false)} okText="创建" cancelText="取消" destroyOnClose>
+        <div className="fld-label">文件名（.md）</div>
+        <Input value={artNewName} onChange={(e) => setArtNewName(e.target.value)} onPressEnter={newArticleDoc} />
+      </Modal>
+
+      <Modal title="上传文章" open={artUpOpen} onOk={doArtUpload}
+        onCancel={() => setArtUpOpen(false)} okText="上传" cancelText="取消" destroyOnClose>
+        <div className="fld-label">上传到「{client}」的文章库</div>
+        <Upload multiple accept=".md,.markdown"
+          beforeUpload={(_, fl) => {
+            setArtUpFiles((prev) => {
+              const have = new Set(prev.map((p) => p.file.name + ':' + p.file.size))
+              return [...prev, ...fl.filter((f) => !have.has(f.name + ':' + f.size)).map((f) => ({ uid: `a${++uidRef.current}`, file: f }))]
+            })
+            return false
+          }}
+          onRemove={(item) => setArtUpFiles((fs) => fs.filter((p) => p.uid !== item.uid))}
+          fileList={artUpFiles.map((p) => ({ uid: p.uid, name: p.file.name, size: p.file.size }))}>
+          <Button>选择文件</Button>
+        </Upload>
       </Modal>
     </div>
   )
